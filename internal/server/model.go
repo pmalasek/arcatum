@@ -25,6 +25,20 @@ type Instance struct {
 	Schedule ScheduleJSON      `json:"schedule"`
 }
 
+// Redacted returns a copy safe to expose over the API or in logs: secret *names*
+// are kept (so the UI can show which are set) but their values are masked. Secret
+// values leave the server only inside a JobDispatch to the owning runner.
+func (i *Instance) Redacted() *Instance {
+	copyInst := *i
+	if i.Secrets != nil {
+		copyInst.Secrets = make(map[string]string, len(i.Secrets))
+		for k := range i.Secrets {
+			copyInst.Secrets[k] = "***"
+		}
+	}
+	return &copyInst
+}
+
 // ScheduleJSON is the on-disk form of a schedule.
 type ScheduleJSON struct {
 	Frequency string   `json:"frequency"` // daily | weekly | monthly

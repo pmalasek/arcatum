@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"arcatum/pkg/proto"
@@ -18,19 +20,20 @@ type Server struct {
 	log     *log.Logger
 }
 
-// New builds a Server: loads the catalog, instances, and starts tracking schedules.
-func New(scriptsDir, instancesPath, backupDir string, loc *time.Location, logger *log.Logger) (*Server, error) {
+// New builds a Server over an open Store: loads the script catalog and starts
+// tracking the schedule of every instance currently in the database.
+func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger) (*Server, error) {
 	cat, err := LoadCatalog(scriptsDir)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)
 	}
-	store := NewStore(backupDir)
-	if err := store.LoadInstances(instancesPath); err != nil {
-		return nil, fmt.Errorf("instances: %w", err)
+	instances, err := store.Instances()
+	if err != nil {
+		return nil, fmt.Errorf("load instances: %w", err)
 	}
 	sched := NewScheduler(loc)
 	now := time.Now()
-	for _, in := range store.Instances() {
+	for _, in := range instances {
 		if _, ok := cat.Get(in.Script); !ok {
 			return nil, fmt.Errorf("instance %q references unknown script %q", in.ID, in.Script)
 		}
@@ -47,21 +50,38 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/checkin", s.handleCheckin)
 	mux.HandleFunc("POST /api/v1/runs/updates", s.handleUpdates)
 	mux.HandleFunc("POST /api/v1/instances/{id}/run", s.handleTrigger)
+	mux.HandleFunc("GET /api/v1/instances", s.handleListInstances)
 	mux.HandleFunc("GET /api/v1/runs", s.handleListRuns)
+	mux.HandleFunc("GET /api/v1/runs/{id}/output", s.handleRunOutput)
+	mux.HandleFunc("GET /api/v1/runners", s.handleListRunners)
 	mux.HandleFunc("GET /", s.handleIndex)
 	return mux
 }
 
-// handleCheckin returns the jobs due for the calling runner.
+// handleCheckin registers the runner and returns the jobs due for it.
 func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	var req proto.CheckinRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.RunnerID == "" {
+		http.Error(w, "runner_id is required", http.StatusBadRequest)
+		return
+	}
 	now := time.Now()
+	if err := s.store.RecordCheckin(req, now); err != nil {
+		s.log.Printf("checkin: record runner %q: %v", req.RunnerID, err)
+	}
+
+	instances, err := s.store.InstancesForRunner(req.RunnerID)
+	if err != nil {
+		s.log.Printf("checkin: instances for %q: %v", req.RunnerID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	var due []proto.JobDispatch
-	for _, in := range s.store.InstancesForRunner(req.RunnerID) {
+	for _, in := range instances {
 		if !s.sched.Due(in.ID, now) {
 			continue
 		}
@@ -77,7 +97,8 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, proto.CheckinResponse{Due: due})
 }
 
-// buildDispatch turns an instance into a signed-later JobDispatch and records a Run.
+// buildDispatch turns an instance into a JobDispatch and records a pending Run.
+// Signing is added with pkg/crypto.
 func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 	entry, ok := s.catalog.Get(in.Script)
 	if !ok {
@@ -87,7 +108,10 @@ func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 	if err != nil {
 		return proto.JobDispatch{}, err
 	}
-	run := s.store.CreateRun(in)
+	run, err := s.store.CreateRun(in)
+	if err != nil {
+		return proto.JobDispatch{}, fmt.Errorf("create run: %w", err)
+	}
 	capture := in.Capture
 	if capture == "" {
 		capture = "stream"
@@ -123,34 +147,27 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) applyUpdate(u proto.RunUpdate) {
+	var err error
 	switch u.Kind {
 	case proto.KindStarted:
-		s.store.UpdateRun(u.RunID, func(r *Run) {
-			r.Status = StatusRunning
-			r.StartedAt = time.Now()
-		})
-		s.log.Printf("run=%s started", u.RunID)
-	case proto.KindOutput:
-		n, err := s.store.AppendOutput(u.RunID, u.Stream, u.Data)
-		if err != nil {
-			s.log.Printf("run=%s output write: %v", u.RunID, err)
-			return
+		err = s.store.MarkRunStarted(u.RunID, time.Now())
+		if err == nil {
+			s.log.Printf("run=%s started", u.RunID)
 		}
-		s.store.UpdateRun(u.RunID, func(r *Run) { r.Bytes += int64(n) })
+	case proto.KindOutput:
+		var n int
+		n, err = s.store.AppendOutput(u.RunID, u.Stream, u.Data)
+		if err == nil {
+			err = s.store.AddRunBytes(u.RunID, int64(n))
+		}
 	case proto.KindFinished:
-		s.store.UpdateRun(u.RunID, func(r *Run) {
-			r.EndedAt = time.Now()
-			r.ExitCode = u.ExitCode
-			if u.Error != "" {
-				r.Status = StatusError
-				r.Err = u.Error
-			} else if u.ExitCode == 0 {
-				r.Status = StatusSuccess
-			} else {
-				r.Status = StatusFailed
-			}
-		})
-		s.log.Printf("run=%s finished exit=%d err=%q", u.RunID, u.ExitCode, u.Error)
+		err = s.store.FinishRun(u.RunID, time.Now(), u.ExitCode, u.Error)
+		if err == nil {
+			s.log.Printf("run=%s finished exit=%d err=%q", u.RunID, u.ExitCode, u.Error)
+		}
+	}
+	if err != nil {
+		s.log.Printf("run=%s update %s: %v", u.RunID, u.Kind, err)
 	}
 }
 
@@ -165,9 +182,74 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "queued", "instance": id})
 }
 
-// handleListRuns returns runs newest-first.
+// handleListInstances returns instances with their next scheduled run.
+func (s *Server) handleListInstances(w http.ResponseWriter, r *http.Request) {
+	instances, err := s.store.Instances()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	type item struct {
+		*Instance
+		NextRun *time.Time `json:"next_run,omitempty"`
+	}
+	out := make([]item, 0, len(instances))
+	for _, in := range instances {
+		it := item{Instance: in.Redacted()} // never expose secret values over the API
+		if next, ok := s.sched.NextRun(in.ID); ok {
+			it.NextRun = &next
+		}
+		out = append(out, it)
+	}
+	writeJSON(w, out)
+}
+
+// handleListRuns returns runs newest-first; ?limit=N caps the result.
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.store.ListRuns())
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	runs, err := s.store.ListRuns(limit)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, runs)
+}
+
+// handleRunOutput serves a run's captured output (?stream=stdout|stderr). This backs
+// inspecting a run while debugging a script.
+func (s *Server) handleRunOutput(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("id")
+	run, err := s.store.Run(runID)
+	if err != nil || run == nil {
+		http.Error(w, "unknown run", http.StatusNotFound)
+		return
+	}
+	data, err := os.ReadFile(s.store.StreamPath(runID, r.URL.Query().Get("stream")))
+	if os.IsNotExist(err) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		return // no output captured (yet)
+	}
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(data)
+}
+
+// handleListRunners returns known runners, most recently seen first.
+func (s *Server) handleListRunners(w http.ResponseWriter, r *http.Request) {
+	runners, err := s.store.Runners()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, runners)
 }
 
 // handleIndex is a minimal text status page (real web UI later).
@@ -177,11 +259,32 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "arcatum-server\n\nscripts: %v\ninstances: %d\n\nruns (newest first):\n",
-		s.catalog.Names(), len(s.store.Instances()))
-	for _, run := range s.store.ListRuns() {
-		fmt.Fprintf(w, "  %s  %-8s  instance=%s  exit=%d  bytes=%d\n",
-			run.ID, run.Status, run.InstanceID, run.ExitCode, run.Bytes)
+	fmt.Fprintf(w, "arcatum-server\n\nscripts: %v\n", s.catalog.Names())
+
+	if runners, err := s.store.Runners(); err == nil {
+		fmt.Fprintf(w, "\nrunners:\n")
+		for _, rn := range runners {
+			fmt.Fprintf(w, "  %-20s %s/%s  last_seen=%s\n", rn.ID, rn.OS, rn.Arch,
+				rn.LastSeen.Format(time.RFC3339))
+		}
+	}
+	if instances, err := s.store.Instances(); err == nil {
+		fmt.Fprintf(w, "\ninstances:\n")
+		for _, in := range instances {
+			next := "-"
+			if t, ok := s.sched.NextRun(in.ID); ok {
+				next = t.Format(time.RFC3339)
+			}
+			fmt.Fprintf(w, "  %-20s script=%-14s runner=%-16s next_run=%s\n",
+				in.ID, in.Script, in.RunnerID, next)
+		}
+	}
+	if runs, err := s.store.ListRuns(20); err == nil {
+		fmt.Fprintf(w, "\nruns (newest first):\n")
+		for _, run := range runs {
+			fmt.Fprintf(w, "  %-8s %-8s instance=%-16s exit=%-3d bytes=%d\n",
+				run.ID, run.Status, run.InstanceID, run.ExitCode, run.Bytes)
+		}
 	}
 }
 

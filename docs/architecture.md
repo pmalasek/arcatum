@@ -200,14 +200,28 @@ data_dir      = "/var/lib/arcatum-runner"
 
 ## 6. Databáze (server)
 
-Jednoduchá, na start **SQLite** (jeden soubor, žádná správa), s možností přejít na
-Postgres. Hlavní tabulky:
+**SQLite** (jeden soubor v `data_dir/arcatum.db`), driver `modernc.org/sqlite` — čistě
+v Go, **bez CGO**, takže binárka zůstává statická. Schéma v `internal/server/schema.go`,
+aplikuje se idempotentně při každém startu.
 
-- `runners` — id, hostname, arch/platform, cert fingerprint, stav (pending/approved), last_seen
-- `scripts` — definice (manifest) odvozené z `scripts/*.toml`, včetně schématu parametrů
-- `instances` — script_id, target runner, hodnoty parametrů, **secrets (šifrované)**, rozvrh
-- `runs` — id, instance_id, runner_id, start, end, status, exit_code, bytes, ukazatel na log/data
-- `run_logs` — streamovaný stdout/stderr (nebo odkaz na soubor v storage)
+Implementované tabulky:
+
+- `runners` — id, hostname, os, arch, first_seen, last_seen *(cert fingerprint a stav
+  pending/approved přidáme s enrollmentem)*
+- `instances` — script, runner_id, params (JSON), secrets (JSON), capture, timeout,
+  schedule (JSON)
+- `runs` — id (rowid → `run-<n>`), instance_id, runner_id, script, status, exit_code,
+  bytes, started_at, ended_at, err, created_at
+
+**Skripty nejsou v DB** — definice zůstávají soubory ve `scripts/` (verzované v gitu),
+server je čte do katalogu při startu.
+
+**Výstup běhů také není v DB** — streamuje se do
+`backup_dir/runs/<run_id>/{stdout,stderr}.log`. Payload zálohy patří do úložiště, ne
+do tabulky; v DB je jen metadata a počet bajtů.
+
+Časy jsou unix millis (0 = nenastaveno). Secrets jsou zatím v plaintextu — šifrování
+at-rest přijde s `pkg/crypto.SecretBox`. Přechod na Postgres zůstává otevřený.
 
 ---
 
@@ -254,27 +268,27 @@ Kostra monorepa, config (server + runner), parser manifestu, výpočet rozvrhu, 
 Runner se přihlásí, dostane úlohu, spustí ji a **streamuje výstup zpět na server**, kde
 se ukládá do `backup_dir/runs/<run_id>/` — na zálohovaném hostu nezůstává. Ověřeno E2E.
 
-**HTTP API (`internal/server`):**
-
-| Metoda + cesta | Účel |
-|---|---|
-| `POST /api/v1/checkin` | runner se hlásí, dostane `Due []JobDispatch` |
-| `POST /api/v1/runs/updates` | příjem ndjson streamu `RunUpdate` (started/output/finished) |
-| `POST /api/v1/instances/{id}/run` | manuální trigger („spusť teď") — ladění |
-| `GET /api/v1/runs` | seznam běhů (JSON) |
-| `GET /` | textová status stránka (web UI později) |
+**HTTP API (`internal/server`)** — kompletní přehled v [README](../README.md#http-api).
 
 **Runner (`internal/runner`):** checkin smyčka dle `poll_interval`, executor materializuje
 artefakt (ověří SHA-256), non-secret params → `ARCATUM_*` env, secrets → dočasný sourcovaný
 soubor (mazán po běhu), stdout/stderr streamuje jako `RunUpdate`.
 
-**Zatím vědomě chybí (další fáze):** mTLS + podpis úloh (běží plain HTTP), DB (in-memory
-store), restic orchestrace, web UI, retence, notifikace, restore.
+### Fáze C — persistence v SQLite ✓
+In-memory store nahrazen SQLite (`internal/server/store.go`, schéma v `schema.go`).
+Instance, běhy i evidence runnerů přežijí restart serveru; číslování běhů pokračuje.
+Přidány endpointy `GET /api/v1/instances` (s `next_run`), `GET /api/v1/runs/{id}/output`
+a `GET /api/v1/runners`.
 
-**Vyzkoušení lokálně:**
-```sh
-go run ./cmd/server -config config/server.example.toml -instances data/instances.json
-# v instances.json nastav runner_id na hostname stroje s runnerem
-go run ./cmd/runner -server http://127.0.0.1:8443 -once
-curl -X POST http://127.0.0.1:8443/api/v1/instances/hello-demo/run   # trigger
-```
+**Ověřeno E2E:** běh → restart serveru → data i výstup zachovány → další běh je `run-2`.
+Testy v `internal/server/store_test.go` (upsert instancí, životní cyklus běhu, mapování
+statusů, persistence přes reopen, maskování secrets).
+
+**Bezpečnostní detail:** `Instance.Redacted()` maskuje hodnoty secrets pro API a logy;
+skutečné hodnoty opouštějí server jen v `JobDispatch` vlastnímu runneru.
+
+**Zatím vědomě chybí (další fáze):** mTLS + podpis úloh (běží plain HTTP, runner podpis
+neověřuje), šifrování secrets at-rest, restic orchestrace, web UI, retence, notifikace,
+restore, správa instancí přes API (dnes seed z JSON).
+
+**Vyzkoušení lokálně:** viz [README — Rychlý start](../README.md#rychlý-start-lokální-vyzkoušení).

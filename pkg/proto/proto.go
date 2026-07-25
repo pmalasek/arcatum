@@ -36,9 +36,9 @@ type JobDispatch struct {
 	InstanceID string            `json:"instance_id"` // which instance (script + target + params)
 	Script     string            `json:"script"`      // script (definition) name
 	Type       ScriptType        `json:"type"`
-	Artifact   Artifact          `json:"artifact"`  // the code/binary to run
-	Params     map[string]string `json:"params"`    // non-secret params -> env vars
-	Secrets    map[string]string `json:"secrets"`   // decrypted only for this runner over mTLS -> temp file
+	Artifact   Artifact          `json:"artifact"` // the code/binary to run
+	Params     map[string]string `json:"params"`   // non-secret params -> env vars
+	Secrets    map[string]string `json:"secrets"`  // decrypted only for this runner over mTLS -> temp file
 	TimeoutSec int               `json:"timeout_sec"`
 	Capture    string            `json:"capture"`   // "stream" | "local"
 	Signature  []byte            `json:"signature"` // server signature over the dispatch (runner verifies)
