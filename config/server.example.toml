@@ -1,0 +1,18 @@
+# arcatum-server configuration. Copy to server.toml and adjust.
+# Missing fields fall back to built-in defaults (see pkg/config.Default).
+
+[server]
+listen    = "0.0.0.0:8443"                 # API / web listen address
+scripts   = "scripts"                       # dir with script definitions
+data_dir  = "/central_backup/arcatum/data"  # DB and runtime state
+timezone  = "Europe/Prague"                 # default TZ for schedules without one
+log_level = "info"                          # debug | info | warn | error
+
+[storage]
+backup_dir = "/central_backup/arcatum"      # where backup data is stored
+
+[tls]
+# mTLS material (wired up later)
+# ca_cert = "/central_backup/arcatum/pki/ca.pem"
+# cert    = "/central_backup/arcatum/pki/server.pem"
+# key     = "/central_backup/arcatum/pki/server.key"

@@ -1,0 +1,14 @@
+# arcatum-runner configuration (runner.toml), installed on each backed-up host.
+# install.sh writes `server` from the URL the installer was fetched from, so the
+# operator normally doesn't edit this by hand.
+
+[runner]
+server        = "https://172.24.0.60:8443"  # where to check in (arcatum-server)
+poll_interval = "30s"                        # how often the runner checks in
+data_dir      = "/var/lib/arcatum-runner"    # identity + temp dispatch files
+
+[tls]
+# client mTLS material (wired up later)
+# ca_cert = "/var/lib/arcatum-runner/pki/ca.pem"
+# cert    = "/var/lib/arcatum-runner/pki/client.pem"
+# key     = "/var/lib/arcatum-runner/pki/client.key"

@@ -1,0 +1,16 @@
+# Build output
+/server
+/runner
+/bin/
+*.exe
+
+# Local data (DB, storage, secrets) — never commit; example is tracked
+/data/instances.json
+/central_backup/
+*.db
+*.sqlite
+*.pem
+*.key
+
+# Editor / OS
+.DS_Store

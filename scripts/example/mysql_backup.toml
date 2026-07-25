@@ -1,0 +1,33 @@
+# Script DEFINITION (template). Values for a concrete server live in an instance
+# (in the DB / web UI), not here. See docs/architecture.md §5.
+name       = "mysql-backup"
+type       = "bash"            # bash | python | binary | restic
+entrypoint = "mysql_backup.sh" # relative to this manifest
+timeout    = "1h"              # default; an instance may override
+
+# Parameter declarations → the server renders a form and validates instances.
+[[param]]
+name = "host"
+type = "string"
+required = true
+
+[[param]]
+name = "port"
+type = "int"
+default = "3306"
+
+[[param]]
+name = "database"
+type = "string"
+required = true
+
+[[param]]
+name = "user"
+type = "string"
+required = true
+
+[[param]]
+name = "password"
+type = "string"
+required = true
+secret = true

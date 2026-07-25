@@ -1,0 +1,21 @@
+# Demo script definition — no external tools, so it exercises the pipeline end-to-end.
+name       = "hello"
+type       = "bash"
+entrypoint = "hello.sh"
+timeout    = "1m"
+
+[[param]]
+name = "name"
+type = "string"
+required = true
+
+[[param]]
+name = "target"
+type = "string"
+required = true
+
+[[param]]
+name = "token"
+type = "string"
+required = true
+secret = true
