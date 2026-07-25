@@ -7,8 +7,15 @@ server        = "https://172.24.0.60:8443"  # where to check in (arcatum-server)
 poll_interval = "30s"                        # how often the runner checks in
 data_dir      = "/var/lib/arcatum-runner"    # identity + temp dispatch files
 
+# Client mTLS. The certificate's common name must equal this runner's id (the
+# runner_id used in instances) — the server identifies the runner by it.
+# All three paths must be set together.
 [tls]
-# client mTLS material (wired up later)
 # ca_cert = "/var/lib/arcatum-runner/pki/ca.pem"
-# cert    = "/var/lib/arcatum-runner/pki/client.pem"
-# key     = "/var/lib/arcatum-runner/pki/client.key"
+# cert    = "/var/lib/arcatum-runner/pki/runner-web-01.pem"
+# key     = "/var/lib/arcatum-runner/pki/runner-web-01.key"
+
+# Server's public key for verifying job signatures. Required whenever [tls] is set;
+# without it the runner would execute whatever it is handed.
+[signing]
+# public_key = "/var/lib/arcatum-runner/pki/dispatch-signing.pub"

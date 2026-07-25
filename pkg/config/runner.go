@@ -13,8 +13,14 @@ import (
 // each backed-up host. Its key field is Server — where to check in. install.sh
 // fills it in at install time from the URL the installer was fetched from.
 type RunnerConfig struct {
-	Runner RunnerSection `toml:"runner"`
-	TLS    TLS           `toml:"tls"`
+	Runner  RunnerSection `toml:"runner"`
+	TLS     TLS           `toml:"tls"`
+	Signing RunnerSigning `toml:"signing"`
+}
+
+// RunnerSigning points at the server's public key used to verify job dispatches.
+type RunnerSigning struct {
+	PublicKey string `toml:"public_key"` // e.g. /var/lib/arcatum-runner/pki/dispatch-signing.pub
 }
 
 // RunnerSection holds the runner's process-level settings.
@@ -53,6 +59,12 @@ func LoadRunner(path string) (*RunnerConfig, error) {
 func (c *RunnerConfig) Validate() error {
 	if c.Runner.Server == "" {
 		return errors.New("runner config: runner.server is required (set in runner.toml or via -server)")
+	}
+	if err := c.TLS.Validate(); err != nil {
+		return err
+	}
+	if c.TLS.Enabled() && c.Signing.PublicKey == "" {
+		return errors.New("runner config: [signing] public_key is required when mTLS is enabled (used to verify job signatures)")
 	}
 	if _, err := c.Interval(); err != nil {
 		return err

@@ -7,10 +7,16 @@
 # Local data (DB, storage, secrets) — never commit; example is tracked
 /data/instances.json
 /central_backup/
+/local/
 *.db
 *.sqlite
+
+# PKI — private keys and certificates must never be committed
+/pki/
 *.pem
 *.key
+*.pub
+*.csr
 
 # Editor / OS
 .DS_Store

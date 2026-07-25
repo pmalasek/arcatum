@@ -75,7 +75,12 @@ func Execute(ctx context.Context, d proto.JobDispatch, baseDir string, emit func
 // prepare validates the artifact hash, writes the executable and secrets file, and
 // builds the exec.Cmd with the right interpreter and environment.
 func prepare(ctx context.Context, d proto.JobDispatch, workDir string) (*exec.Cmd, error) {
-	if got := sha256Hex(d.Artifact.Content); d.Artifact.SHA256 != "" && got != d.Artifact.SHA256 {
+	// The signature covers the artifact's hash, not its bytes, so this check is what
+	// ties the verified dispatch to the code actually about to run. It is mandatory.
+	if d.Artifact.SHA256 == "" {
+		return nil, fmt.Errorf("artifact has no sha256")
+	}
+	if got := sha256Hex(d.Artifact.Content); got != d.Artifact.SHA256 {
 		return nil, fmt.Errorf("artifact hash mismatch: got %s want %s", got, d.Artifact.SHA256)
 	}
 	exe := filepath.Join(workDir, filepath.Base(d.Artifact.Filename))

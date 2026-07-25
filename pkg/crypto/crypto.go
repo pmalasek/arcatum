@@ -1,9 +1,14 @@
-// Package crypto is the intended home for Arcatum's security primitives:
-//   - mTLS identity for runners (enrollment: CSR -> admin approval -> client cert)
-//   - signing of JobDispatch on the server, verification on the runner
-//   - encryption of instance secrets at rest, decrypted only at dispatch time
+// Package crypto holds Arcatum's security primitives:
 //
-// This is a placeholder that pins down the interfaces; implementations land later.
+//   - PKI (pki.go): the Arcatum CA, the server certificate, and one client
+//     certificate per runner, so both sides authenticate each other.
+//   - TLS (tls.go): mTLS configs — the server requires a client certificate signed
+//     by the CA, the runner verifies the server against the same CA.
+//   - Signing (sign.go): Ed25519 signatures over a JobDispatch. mTLS proves who the
+//     peer is on the wire; the signature proves the *job* originates from Arcatum
+//     and was not altered.
+//
+// Encryption of instance secrets at rest (SecretBox) is not implemented yet.
 package crypto
 
 // Signer signs outgoing job dispatches (server side).
@@ -17,7 +22,14 @@ type Verifier interface {
 }
 
 // SecretBox encrypts and decrypts instance secrets at rest on the server.
+// Not implemented yet: secrets are currently stored in plaintext in the database.
 type SecretBox interface {
 	Seal(plaintext []byte) (ciphertext []byte, err error)
 	Open(ciphertext []byte) (plaintext []byte, err error)
 }
+
+// Compile-time checks that the concrete types satisfy the interfaces.
+var (
+	_ Signer   = (*Ed25519Signer)(nil)
+	_ Verifier = (*Ed25519Verifier)(nil)
+)

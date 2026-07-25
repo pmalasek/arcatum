@@ -21,6 +21,12 @@ type Config struct {
 	Server  Server  `toml:"server"`
 	Storage Storage `toml:"storage"`
 	TLS     TLS     `toml:"tls"`
+	Signing Signing `toml:"signing"`
+}
+
+// Signing points at the key used to sign job dispatches (server side).
+type Signing struct {
+	Key string `toml:"key"` // Ed25519 private key, e.g. pki/dispatch-signing.key
 }
 
 // Server holds process-level settings.
@@ -37,11 +43,32 @@ type Storage struct {
 	BackupDir string `toml:"backup_dir"` // e.g. /central_backup/arcatum
 }
 
-// TLS holds mTLS material (wired up later).
+// TLS holds the mTLS material for one side of the connection.
 type TLS struct {
 	CACert string `toml:"ca_cert"`
 	Cert   string `toml:"cert"`
 	Key    string `toml:"key"`
+}
+
+// Enabled reports whether mTLS is configured. All three paths are needed; a partial
+// configuration is a mistake rather than a mode, and Validate rejects it.
+func (t TLS) Enabled() bool {
+	return t.CACert != "" && t.Cert != "" && t.Key != ""
+}
+
+// Validate rejects a half-filled TLS section, which would otherwise silently fall
+// back to unencrypted, unauthenticated HTTP.
+func (t TLS) Validate() error {
+	set := 0
+	for _, p := range []string{t.CACert, t.Cert, t.Key} {
+		if p != "" {
+			set++
+		}
+	}
+	if set != 0 && set != 3 {
+		return errors.New("config: [tls] needs ca_cert, cert and key together (or none at all)")
+	}
+	return nil
 }
 
 // Default returns the built-in configuration used when server.toml is absent or
@@ -85,6 +112,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Storage.BackupDir == "" {
 		return errors.New("config: storage.backup_dir is required")
+	}
+	if err := c.TLS.Validate(); err != nil {
+		return err
+	}
+	if c.TLS.Enabled() && c.Signing.Key == "" {
+		return errors.New("config: [signing] key is required when mTLS is enabled (runners verify job signatures)")
 	}
 	if _, err := c.Location(); err != nil {
 		return err

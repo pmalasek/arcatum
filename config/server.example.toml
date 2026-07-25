@@ -11,8 +11,15 @@ log_level = "info"                          # debug | info | warn | error
 [storage]
 backup_dir = "/central_backup/arcatum"      # where backup data is stored
 
+# mTLS. Generate the files with: deploy/gen-certs.sh -H <server-ip-or-dns> <runner-id>...
+# All three paths must be set together. Without them the server speaks plain HTTP and
+# does NOT authenticate callers — development only.
 [tls]
-# mTLS material (wired up later)
 # ca_cert = "/central_backup/arcatum/pki/ca.pem"
 # cert    = "/central_backup/arcatum/pki/server.pem"
 # key     = "/central_backup/arcatum/pki/server.key"
+
+# Key used to sign job dispatches; runners verify it with the matching .pub file.
+# Required whenever [tls] is set.
+[signing]
+# key = "/central_backup/arcatum/pki/dispatch-signing.key"

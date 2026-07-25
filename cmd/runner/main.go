@@ -9,14 +9,17 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	"arcatum/internal/runner"
 	"arcatum/pkg/config"
+	"arcatum/pkg/crypto"
 	"arcatum/pkg/proto"
 )
 
@@ -43,12 +46,36 @@ func main() {
 	host, _ := os.Hostname()
 	req := proto.CheckinRequest{RunnerID: host, Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH}
 
-	client := runner.NewClient(cfg.Runner.Server, nil)
+	// With mTLS configured, the server identifies this runner by its certificate's
+	// common name, so the certificate must be issued for this runner_id.
+	httpClient := &http.Client{Timeout: 0} // no global timeout: runs stream for as long as they take
+	var verifier crypto.Verifier
+	if cfg.TLS.Enabled() {
+		tlsConfig, err := crypto.ClientTLSConfig(cfg.TLS.Cert, cfg.TLS.Key, cfg.TLS.CACert)
+		if err != nil {
+			logger.Fatalf("tls: %v", err)
+		}
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig:     tlsConfig,
+			TLSHandshakeTimeout: 10 * time.Second,
+		}
+		if verifier, err = crypto.LoadVerifier(cfg.Signing.PublicKey); err != nil {
+			logger.Fatalf("signing public key: %v", err)
+		}
+	}
+
+	client := runner.NewClient(cfg.Runner.Server, httpClient)
 	workBase := filepath.Join(cfg.Runner.DataDir, "work")
-	agent := runner.NewAgent(client, req, workBase, logger)
+	agent := runner.NewAgent(client, req, workBase, logger, verifier)
 
 	logger.Printf("arcatum-runner (protocol %s) — server=%s runner=%q (%s/%s)",
 		proto.Version, cfg.Runner.Server, req.Hostname, req.OS, req.Arch)
+	if verifier != nil {
+		logger.Printf("mTLS enabled; job signatures are verified before execution")
+	} else {
+		logger.Printf("WARNING: no [tls] configured — plain HTTP and job signatures are NOT verified.")
+		logger.Printf("         Development only. See README: Zabezpečení (mTLS a podpis úloh).")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

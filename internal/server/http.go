@@ -9,20 +9,32 @@ import (
 	"strconv"
 	"time"
 
+	"arcatum/pkg/crypto"
 	"arcatum/pkg/proto"
 )
 
 // Server wires the HTTP API to the store, scheduler and script catalog.
 type Server struct {
-	store   *Store
-	sched   *Scheduler
-	catalog *Catalog
-	log     *log.Logger
+	store             *Store
+	sched             *Scheduler
+	catalog           *Catalog
+	log               *log.Logger
+	signer            crypto.Signer
+	requireClientCert bool
+}
+
+// Options carries the security wiring. Both fields are empty/false in development
+// mode, where the server speaks plain HTTP and cannot identify its callers.
+type Options struct {
+	// Signer signs every dispatch so runners can prove a job came from Arcatum.
+	Signer crypto.Signer
+	// RequireClientCert enables certificate-based identity and role checks.
+	RequireClientCert bool
 }
 
 // New builds a Server over an open Store: loads the script catalog and starts
 // tracking the schedule of every instance currently in the database.
-func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger) (*Server, error) {
+func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger, opts Options) (*Server, error) {
 	cat, err := LoadCatalog(scriptsDir)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)
@@ -41,20 +53,28 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 			return nil, fmt.Errorf("instance %q schedule: %w", in.ID, err)
 		}
 	}
-	return &Server{store: store, sched: sched, catalog: cat, log: logger}, nil
+	return &Server{
+		store:             store,
+		sched:             sched,
+		catalog:           cat,
+		log:               logger,
+		signer:            opts.Signer,
+		requireClientCert: opts.RequireClientCert,
+	}, nil
 }
 
-// Handler returns the HTTP router.
+// Handler returns the HTTP router. Runner endpoints authenticate as a runner;
+// everything else needs an admin certificate (see auth.go).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/checkin", s.handleCheckin)
 	mux.HandleFunc("POST /api/v1/runs/updates", s.handleUpdates)
-	mux.HandleFunc("POST /api/v1/instances/{id}/run", s.handleTrigger)
-	mux.HandleFunc("GET /api/v1/instances", s.handleListInstances)
-	mux.HandleFunc("GET /api/v1/runs", s.handleListRuns)
-	mux.HandleFunc("GET /api/v1/runs/{id}/output", s.handleRunOutput)
-	mux.HandleFunc("GET /api/v1/runners", s.handleListRunners)
-	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("POST /api/v1/instances/{id}/run", s.adminOnly(s.handleTrigger))
+	mux.HandleFunc("GET /api/v1/instances", s.adminOnly(s.handleListInstances))
+	mux.HandleFunc("GET /api/v1/runs", s.adminOnly(s.handleListRuns))
+	mux.HandleFunc("GET /api/v1/runs/{id}/output", s.adminOnly(s.handleRunOutput))
+	mux.HandleFunc("GET /api/v1/runners", s.adminOnly(s.handleListRunners))
+	mux.HandleFunc("GET /", s.adminOnly(s.handleIndex))
 	return mux
 }
 
@@ -65,18 +85,22 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.RunnerID == "" {
-		http.Error(w, "runner_id is required", http.StatusBadRequest)
+	runnerID, err := s.runnerIdentity(r, req.RunnerID)
+	if err != nil {
+		s.log.Printf("checkin denied: %v", err)
+		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	req.RunnerID = runnerID // the certificate is authoritative
+
 	now := time.Now()
 	if err := s.store.RecordCheckin(req, now); err != nil {
-		s.log.Printf("checkin: record runner %q: %v", req.RunnerID, err)
+		s.log.Printf("checkin: record runner %q: %v", runnerID, err)
 	}
 
-	instances, err := s.store.InstancesForRunner(req.RunnerID)
+	instances, err := s.store.InstancesForRunner(runnerID)
 	if err != nil {
-		s.log.Printf("checkin: instances for %q: %v", req.RunnerID, err)
+		s.log.Printf("checkin: instances for %q: %v", runnerID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -92,13 +116,14 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		}
 		s.sched.MarkDispatched(in.ID, now)
 		due = append(due, d)
-		s.log.Printf("dispatch: instance=%s run=%s -> runner=%s", in.ID, d.RunID, req.RunnerID)
+		s.log.Printf("dispatch: instance=%s run=%s -> runner=%s", in.ID, d.RunID, runnerID)
 	}
 	writeJSON(w, proto.CheckinResponse{Due: due})
 }
 
-// buildDispatch turns an instance into a JobDispatch and records a pending Run.
-// Signing is added with pkg/crypto.
+// buildDispatch turns an instance into a JobDispatch and records a pending Run. When
+// a signer is configured the dispatch is signed, which is what lets the runner prove
+// the job really came from Arcatum before executing anything.
 func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 	entry, ok := s.catalog.Get(in.Script)
 	if !ok {
@@ -116,7 +141,7 @@ func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 	if capture == "" {
 		capture = "stream"
 	}
-	return proto.JobDispatch{
+	d := proto.JobDispatch{
 		RunID:      run.ID,
 		InstanceID: in.ID,
 		Script:     in.Script,
@@ -130,20 +155,54 @@ func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 		Secrets:    in.Secrets,
 		TimeoutSec: timeoutSeconds(in.Timeout, entry.Manifest.Timeout),
 		Capture:    capture,
-	}, nil
+	}
+	if s.signer != nil {
+		sig, err := s.signer.Sign(d.SigningBytes())
+		if err != nil {
+			return proto.JobDispatch{}, fmt.Errorf("sign dispatch: %w", err)
+		}
+		d.Signature = sig
+	}
+	return d, nil
 }
 
-// handleUpdates consumes a runner's ndjson stream of RunUpdate for one run.
+// handleUpdates consumes a runner's ndjson stream of RunUpdate for one run. A runner
+// may only report on runs dispatched to it, so one host cannot overwrite another's
+// results.
 func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
+	runnerID, err := s.runnerIdentity(r, "")
+	if err != nil && s.requireClientCert {
+		s.log.Printf("updates denied: %v", err)
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
+	allowed := map[string]bool{} // run id -> owned by this runner (cached per request)
 	dec := json.NewDecoder(r.Body)
 	for {
 		var u proto.RunUpdate
 		if err := dec.Decode(&u); err != nil {
 			break // EOF or malformed tail — stop consuming
 		}
+		if s.requireClientCert && !s.ownsRun(allowed, u.RunID, runnerID) {
+			s.log.Printf("updates denied: runner %q does not own run %s", runnerID, u.RunID)
+			continue
+		}
 		s.applyUpdate(u)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ownsRun reports whether runnerID is the runner a run was dispatched to, caching
+// the answer so a long output stream costs one lookup.
+func (s *Server) ownsRun(cache map[string]bool, runID, runnerID string) bool {
+	if ok, seen := cache[runID]; seen {
+		return ok
+	}
+	run, err := s.store.Run(runID)
+	ok := err == nil && run != nil && run.RunnerID == runnerID
+	cache[runID] = ok
+	return ok
 }
 
 func (s *Server) applyUpdate(u proto.RunUpdate) {

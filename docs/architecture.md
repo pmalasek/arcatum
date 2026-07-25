@@ -227,13 +227,45 @@ at-rest přijde s `pkg/crypto.SecretBox`. Přechod na Postgres zůstává otevř
 
 ## 7. Bezpečnost
 
-- **mTLS** — každý runner má vlastní klientský cert vydaný Arcatum CA. Server ověří
-  runner, runner ověří server. Tím je splněno „autorizace oběma směry".
-- **Enrollment** — nový runner pošle CSR, admin ho ve webu schválí, teprve pak dostane cert.
-- **Podpis úloh** — server podepisuje payload úlohy svým klíčem; runner spustí jen
-  ověřený podpis. Šifrování zajišťuje samotné mTLS spojení.
-- **Secrets** — hesla (DB apod.) nikdy v plaintextu v `scripts/`; injektují se přes
-  prostředí/secret store při doručení úlohy. (Detailně dořešit.)
+Implementováno v `pkg/crypto` (PKI, mTLS, podpisy) a `internal/server/auth.go`
+(autorizace). Dvě **nezávislé** vrstvy:
+
+- **mTLS** — *kdo je na drátě*. Každý runner má klientský cert od Arcatum CA, server
+  vyžaduje `RequireAndVerifyClientCert`. Tím je splněno „autorizace oběma směry".
+  Klíče jsou ECDSA P‑256 (ne Ed25519), aby stejný cert serveru zvládly i prohlížeče
+  pro web UI.
+- **Podpis úloh** — *odkud pochází práce*. Server podepisuje `JobDispatch` klíčem
+  Ed25519, runner ověří **před spuštěním**; při nesouhlasu kód nespustí a nahlásí
+  selhání. Podpis je záměrně **jiný klíč než TLS** — kdyby unikl TLS klíč serveru,
+  útočník stále nepodstrčí runneru kód.
+
+**Co podpis pokrývá:** kanonická serializace v `pkg/proto/signing.go` — všechna pole
+s délkovými prefixy (aby hodnota nemohla imitovat hranici pole) a mapy se seřazenými
+klíči (jinak by verifikace selhávala nedeterministicky). Obsah artefaktu se podepisuje
+**přes jeho SHA‑256**; runner přijaté bajty proti hashi povinně ověří, takže je podpis
+svázán s konkrétním kódem.
+
+**Role v certifikátu (`OU`):**
+
+| Role | Kdo | Oprávnění |
+|---|---|---|
+| `runner` | zálohovaný server | `checkin` a hlášení **vlastních** běhů |
+| `admin` | operátor / web UI | ostatní API (trigger, výpisy, čtení výstupů) |
+
+**Identitu určuje certifikát, ne požadavek** — runner je identifikován `CN`, které musí
+odpovídat `runner_id` instance. Pokus vydávat se za jiný host končí 403 (neselhává
+tiše). Runner také nemůže hlásit výsledky běhu, který nebyl přidělen jemu.
+
+- **Enrollment** — zatím ruční: certifikáty generuje `deploy/gen-certs.sh` /
+  `cmd/arcatum-ca` a rozdávají se s instalací. `CA.SignCSR` a `CreateCSR` už existují
+  jako stavební kameny pro automatický flow (runner pošle CSR → admin schválí → cert).
+- **Secrets** — hesla nikdy v plaintextu v `scripts/`; předávají se v úloze a na
+  runneru dočasným souborem (ne env, viz §5.3). V DB jsou zatím v plaintextu —
+  šifrování at-rest čeká na `pkg/crypto.SecretBox`.
+- **Bez `[tls]`** server běží plain HTTP a nikoho neautentizuje. Je to režim pro
+  lokální vývoj; obě komponenty na to při startu upozorní a poloviční konfiguraci
+  `[tls]` config odmítne, aby nedošlo k tichému propadnutí na nezabezpečený režim.
+- **Chybí:** revokace (CRL/OCSP), rotace klíčů, autentizace k webu jinak než certifikátem.
 
 ---
 
@@ -287,8 +319,23 @@ statusů, persistence přes reopen, maskování secrets).
 **Bezpečnostní detail:** `Instance.Redacted()` maskuje hodnoty secrets pro API a logy;
 skutečné hodnoty opouštějí server jen v `JobDispatch` vlastnímu runneru.
 
-**Zatím vědomě chybí (další fáze):** mTLS + podpis úloh (běží plain HTTP, runner podpis
-neověřuje), šifrování secrets at-rest, restic orchestrace, web UI, retence, notifikace,
-restore, správa instancí přes API (dnes seed z JSON).
+### Fáze D — mTLS a podpis úloh ✓
+Bezpečnostní model z §7 implementován: `pkg/crypto` (PKI, TLS konfigurace, Ed25519
+podpisy), `pkg/proto/signing.go` (kanonická serializace), `internal/server/auth.go`
+(identita a role z certifikátu), ověření podpisu v runneru před spuštěním.
+Nástroje: `cmd/arcatum-ca` a `deploy/gen-certs.sh`.
 
-**Vyzkoušení lokálně:** viz [README — Rychlý start](../README.md#rychlý-start-lokální-vyzkoušení).
+**Ověřeno E2E s reálným mTLS:** podepsaná úloha proběhne; bez certifikátu spojení
+neprojde; runner cert na admin endpoint → 403; cert od cizí CA → odmítnut při
+handshaku; platný cert hlásící se za jiný host → 403 s jasnou zprávou v logu.
+Jednotkové testy: PKI (chainování, SAN, oddělení rolí, cizí CA), podpisy (poškozená
+data/podpis, cizí klíč, prázdný podpis), kanonická serializace (determinismus,
+nezávislost na pořadí map, detekce změny každého pole, odolnost proti posunu hranic
+polí), autorizace (role, mismatch identity), ověření v runneru.
+
+**Zatím vědomě chybí (další fáze):** automatický enrollment (dnes ruční distribuce
+certifikátů), šifrování secrets at-rest, restic orchestrace, web UI, retence,
+notifikace, restore, správa instancí přes API (dnes seed z JSON), revokace a rotace klíčů.
+
+**Vyzkoušení lokálně:** viz [README — Rychlý start](../README.md#rychlý-start-lokální-vyzkoušení)
+a [Zabezpečení](../README.md#zabezpečení-mtls-a-podpis-úloh).

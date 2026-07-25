@@ -15,6 +15,7 @@ výstup a ukládá ho **centrálně** — na zálohovaném serveru nemá zůstá
 - [Struktura repozitáře](#struktura-repozitáře)
 - [Rychlý start (lokální vyzkoušení)](#rychlý-start-lokální-vyzkoušení)
 - [Konfigurace](#konfigurace)
+- [Zabezpečení (mTLS a podpis úloh)](#zabezpečení-mtls-a-podpis-úloh)
 - [Jak napsat vlastní zálohovací skript](#jak-napsat-vlastní-zálohovací-skript)
 - [Jak přidat instanci](#jak-přidat-instanci)
 - [HTTP API](#http-api)
@@ -85,16 +86,18 @@ Instance míří na **právě jeden runner**. Jeden runner může hostit víc in
 ```
 cmd/server            binárka arcatum-server
 cmd/runner            binárka arcatum-runner
-internal/server       HTTP API, scheduler, SQLite store, katalog skriptů
-internal/runner       checkin smyčka, executor (spuštění + stream výstupu)
-pkg/proto             zprávy protokolu (checkin, dispatch, stream výsledku)
+cmd/arcatum-ca        správa PKI (CA, certifikáty, podepisovací klíč)
+internal/server       HTTP API, scheduler, SQLite store, katalog skriptů, autorizace
+internal/runner       checkin smyčka, executor, ověření podpisu úloh
+pkg/proto             zprávy protokolu + kanonická serializace pro podpis
 pkg/jobspec           parser manifestu skriptu + validace
 pkg/schedule          výpočet „next run" (denní/týdenní/měsíční)
 pkg/config            config serveru (server.toml) i runneru (runner.toml)
-pkg/crypto            mTLS, podpis úloh, šifrování secrets (zatím placeholder)
+pkg/crypto            PKI, mTLS konfigurace, Ed25519 podpisy úloh
 scripts/              DEFINICE skriptů — kód + manifest, bez secrets
 data/                 instances.example.json
 config/               server.example.toml, runner.example.toml
+deploy/gen-certs.sh   vygeneruje celé PKI jedním příkazem
 docs/architecture.md  architektura a rozhodnutí
 ```
 
@@ -154,6 +157,9 @@ curl http://127.0.0.1:8443/api/v1/runs/run-1/output      # zachycený výstup
 
 Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
 
+> Tento rychlý start běží **bez zabezpečení** (plain HTTP, žádné ověřování). Pro reálné
+> nasazení pokračuj sekcí [Zabezpečení](#zabezpečení-mtls-a-podpis-úloh).
+
 ---
 
 ## Konfigurace
@@ -189,6 +195,107 @@ data_dir      = "/var/lib/arcatum-runner"
 > **Kde která adresa žije:** `listen` serveru je v `server.toml`; adresu, **kam runner
 > volá**, drží `runner.toml`. Server svou vlastní dosažitelnou adresu nezná ani znát nemá.
 > Při instalaci runneru ji vyplní `install.sh` z URL, ze které se instalátor stáhl.
+
+---
+
+## Zabezpečení (mTLS a podpis úloh)
+
+Bez sekcí `[tls]` a `[signing]` běží Arcatum **nezabezpečeně** — plain HTTP, server
+neověřuje volající a runner spustí cokoli, co dostane. To je určeno **jen pro lokální
+vývoj**; obě komponenty na to při startu upozorní.
+
+Ochrana má dvě nezávislé vrstvy:
+
+1. **mTLS** — kdo je na drátě. Server i runner mají certifikát od společné Arcatum CA
+   a ověřují se navzájem. Neznámý host neprojde ani TLS handshakem.
+2. **Podpis úloh** — odkud pochází práce. Server podepisuje každou úlohu Ed25519 klíčem
+   a runner podpis **ověří ještě před spuštěním**. Nesouhlasí-li, kód nespustí
+   a nahlásí selhání zpět. Podpis pokrývá i SHA‑256 artefaktu, takže je svázán
+   s konkrétním kódem.
+
+Proč obojí: mTLS chrání spojení, podpis chrání *úlohu*. Kdyby unikl TLS klíč serveru,
+podepisovací klíč je jiný soubor a útočník stále nepodstrčí runneru kód.
+
+### Role v certifikátech
+
+Role je v `OU` certifikátu a server podle ní dělí přístup:
+
+| Role | Kdo | Co smí |
+|---|---|---|
+| `runner` | zálohovaný server | jen `checkin` a hlášení **vlastních** běhů |
+| `admin` | operátor / web UI | ostatní API — spouštění úloh, výpisy, čtení výstupů |
+
+**Identitu určuje certifikát, ne požadavek.** Runner se identifikuje `CN` svého
+certifikátu, které musí odpovídat `runner_id` v instancích. Když se runner s platným
+certifikátem pokusí vydávat za jiný host, server to odmítne (403) — nemlčí.
+
+### Vygenerování certifikátů
+
+Jeden příkaz vytvoří celé PKI — CA, podepisovací klíč, cert serveru, admin cert
+a certifikáty runnerů:
+
+```sh
+deploy/gen-certs.sh -H 172.24.0.60,arcatum.xtuning.local -a petr web-01 db-01
+```
+
+Vznikne adresář `pki/`:
+
+| Soubor | Kam patří |
+|---|---|
+| `ca.pem` | server **i každý runner** |
+| `ca.key` | **jen server** — soukromý klíč CA |
+| `server.pem` / `server.key` | server |
+| `dispatch-signing.key` | **jen server** — podepisuje úlohy |
+| `dispatch-signing.pub` | **každý runner** — ověřuje úlohy |
+| `admin-petr.pem` / `.key` | tvůj počítač (přístup k API/webu) |
+| `runner-web-01.pem` / `.key` | příslušný runner |
+
+> `-H` musí obsahovat **všechny** adresy, na které se runnery připojují (IP i DNS),
+> jinak ověření TLS selže. Opakované spuštění skriptu existující CA ani podepisovací
+> klíč nepřepíše.
+
+Jemnější kontrola přes `arcatum-ca` (`init`, `server`, `runner`, `admin`, `signing`,
+`sign-csr` — poslední je základ pro budoucí enrollment, kdy si runner klíč vygeneruje
+sám a posílá jen CSR):
+
+```sh
+go run ./cmd/arcatum-ca runner -dir pki -id web-02      # přidat runner
+go run ./cmd/arcatum-ca admin  -dir pki -name kolega    # přidat operátora
+```
+
+### Zapojení do konfigurace
+
+```toml
+# server.toml
+[tls]
+ca_cert = "/central_backup/arcatum/pki/ca.pem"
+cert    = "/central_backup/arcatum/pki/server.pem"
+key     = "/central_backup/arcatum/pki/server.key"
+
+[signing]
+key = "/central_backup/arcatum/pki/dispatch-signing.key"
+```
+
+```toml
+# runner.toml (na zálohovaném serveru)
+[tls]
+ca_cert = "/var/lib/arcatum-runner/pki/ca.pem"
+cert    = "/var/lib/arcatum-runner/pki/runner-web-01.pem"
+key     = "/var/lib/arcatum-runner/pki/runner-web-01.key"
+
+[signing]
+public_key = "/var/lib/arcatum-runner/pki/dispatch-signing.pub"
+```
+
+Všechny tři cesty v `[tls]` musí být zadané společně — poloviční konfigurace je chyba,
+kterou server odmítne, aby nedošlo k tichému propadnutí na nezabezpečené HTTP.
+
+### Volání API s certifikátem
+
+```sh
+curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
+  https://172.24.0.60:8443/api/v1/runs
+```
 
 ---
 
@@ -293,19 +400,25 @@ Pozor: `data/instances.json` obsahuje secrets, proto je v `.gitignore`
 
 ## HTTP API
 
-| Metoda a cesta | Účel |
-|---|---|
-| `POST /api/v1/checkin` | runner se hlásí, dostane úlohy k spuštění |
-| `POST /api/v1/runs/updates` | příjem ndjson streamu průběhu a výstupu |
-| `POST /api/v1/instances/{id}/run` | **manuální spuštění** („spusť teď") |
-| `GET /api/v1/instances` | instance včetně `next_run` (secrets maskované) |
-| `GET /api/v1/runs?limit=N` | historie běhů, nejnovější první |
-| `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | zachycený výstup běhu |
-| `GET /api/v1/runners` | evidované runnery (platforma, `last_seen`) |
-| `GET /` | textová status stránka |
+Sloupec „role" platí při zapnutém mTLS — viz
+[Zabezpečení](#zabezpečení-mtls-a-podpis-úloh).
+
+| Metoda a cesta | Role | Účel |
+|---|---|---|
+| `POST /api/v1/checkin` | runner | runner se hlásí, dostane úlohy k spuštění |
+| `POST /api/v1/runs/updates` | runner | příjem ndjson streamu průběhu a výstupu |
+| `POST /api/v1/instances/{id}/run` | admin | **manuální spuštění** („spusť teď") |
+| `GET /api/v1/instances` | admin | instance včetně `next_run` (secrets maskované) |
+| `GET /api/v1/runs?limit=N` | admin | historie běhů, nejnovější první |
+| `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | admin | zachycený výstup běhu |
+| `GET /api/v1/runners` | admin | evidované runnery (platforma, `last_seen`) |
+| `GET /` | admin | textová status stránka |
 
 Hodnoty secrets API **nikdy nevrací** (jen názvy, maskované `***`). Skutečné hodnoty
 opouštějí server pouze v úloze doručené vlastnímu runneru.
+
+Runner smí hlásit průběh jen u běhů, které byly přiděleny jemu — jeden zálohovaný
+server tak nemůže přepsat výsledky jiného.
 
 ---
 
@@ -366,15 +479,18 @@ statický binár bez runtime závislostí.
 - Rozvrh (denní/týdenní/měsíční) + manuální trigger
 - Persistence v SQLite (instance, běhy, evidence runnerů) — přežije restart
 - Tři úrovně konfigurace, manifest s deklarací parametrů
+- **mTLS** mezi serverem a runnery, identita a role z certifikátu, PKI nástroje
+- **Podpis úloh** (Ed25519) — runner ověřuje před spuštěním, jinak odmítne
 - Bezpečné předání secrets (dočasný soubor, ne env), maskování v API, ověření SHA-256 artefaktu
 
 **Chybí (další fáze):**
-- **mTLS + podpis úloh** — teď běží plain HTTP; runner podpis úloh zatím neověřuje
+- **Enrollment** runneru (dnes se certifikáty generují a rozdávají ručně; `sign-csr` už existuje)
 - **Šifrování secrets at-rest** v DB
 - **Orchestrace restic** pro souborové zálohy (dedup, inkrementální)
 - **Web UI** včetně živého tailu výstupu
 - **Retence a rotace** (GFS), **notifikace** při selhání
 - **Restore** (2. fáze podle plánu)
 - Správa instancí přes API/web (dnes seed z JSON), auto-update runneru
+- Revokace certifikátů (CRL/OCSP) a rotace klíčů
 
 Podrobná architektura a rozhodnutí: [docs/architecture.md](docs/architecture.md).
