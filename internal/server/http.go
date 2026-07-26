@@ -34,6 +34,8 @@ type Server struct {
 	// rotation holds the trust material published to runners, and what the server
 	// currently signs certificates with.
 	rotation RotationOptions
+	// dist describes the published runner builds, for auto-update.
+	dist *distCache
 }
 
 // Options carries the security wiring. Both fields are empty/false in development
@@ -53,6 +55,9 @@ type Options struct {
 	// Rotation is the trust material runners fetch, and the authority certificates are
 	// issued under. See rotate.go.
 	Rotation RotationOptions
+	// DistDir holds the published runner binaries and their VERSION file. Empty disables
+	// auto-update entirely.
+	DistDir string
 }
 
 // New builds a Server over an open Store: loads the script catalog and starts
@@ -87,6 +92,7 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		serverCertNotAfter: opts.ServerCertNotAfter,
 		serverCertIssuer:   opts.ServerCertIssuer,
 		rotation:           opts.Rotation,
+		dist:               &distCache{dir: opts.DistDir},
 	}, nil
 }
 
@@ -117,6 +123,9 @@ func (s *Server) Handler() http.Handler {
 	// Trust material: runners fetch it every check-in so a rotation propagates by itself.
 	mux.HandleFunc("GET /api/v1/trust", s.handleTrustBundle)
 	mux.HandleFunc("GET /api/v1/rotation", s.adminOnly(s.handleRotationStatus))
+	// Auto-update: the manifest is signed, and binaries are served only over mTLS.
+	mux.HandleFunc("GET /api/v1/update", s.handleUpdateManifest)
+	mux.HandleFunc("GET /api/v1/update/{name}", s.handleUpdateDownload)
 	mux.HandleFunc("POST /api/v1/secrets/rekey", s.adminOnly(s.handleRekeySecrets))
 	mux.HandleFunc("GET /api/v1/instances/{id}/repo", s.adminOnly(s.handleRepoInfo))
 	// Restore: browse the repository the server already holds and pull files back out.

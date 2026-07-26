@@ -412,8 +412,9 @@ func (s *Store) Instance(id string) (*Instance, error) {
 func (s *Store) RecordCheckin(req proto.CheckinRequest, certNotAfter, now time.Time, certIssuer string) error {
 	ms := toMillis(now)
 	_, err := s.db.Exec(`
-		INSERT INTO runners (id, hostname, os, arch, first_seen, last_seen, cert_not_after, cert_issuer)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO runners (id, hostname, os, arch, first_seen, last_seen, cert_not_after,
+		                     cert_issuer, version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  hostname=excluded.hostname, os=excluded.os, arch=excluded.arch,
 		  last_seen=excluded.last_seen,
@@ -421,8 +422,10 @@ func (s *Store) RecordCheckin(req proto.CheckinRequest, certNotAfter, now time.T
 		  cert_not_after=CASE WHEN excluded.cert_not_after > 0
 		                      THEN excluded.cert_not_after ELSE runners.cert_not_after END,
 		  cert_issuer=CASE WHEN excluded.cert_issuer != ''
-		                   THEN excluded.cert_issuer ELSE runners.cert_issuer END`,
-		req.RunnerID, req.Hostname, req.OS, req.Arch, ms, ms, toMillis(certNotAfter), certIssuer)
+		                   THEN excluded.cert_issuer ELSE runners.cert_issuer END,
+		  version=CASE WHEN excluded.version != '' THEN excluded.version ELSE runners.version END`,
+		req.RunnerID, req.Hostname, req.OS, req.Arch, ms, ms, toMillis(certNotAfter), certIssuer,
+		req.Version)
 	return err
 }
 
@@ -448,10 +451,13 @@ type Runner struct {
 	// CertIssuer is the authority that issued the current certificate, which is how a CA
 	// rotation is tracked to completion.
 	CertIssuer string `json:"cert_issuer,omitempty"`
+	// Version is the runner build last reported, for tracking an update rollout.
+	Version string `json:"version,omitempty"`
 }
 
 const runnerCols = `id, hostname, os, arch, status, cert_fingerprint, enroll_ip,
-                    first_seen, last_seen, enrolled_at, approved_at, cert_not_after, cert_issuer`
+                    first_seen, last_seen, enrolled_at, approved_at, cert_not_after, cert_issuer,
+                    version`
 
 // Runners lists known runners: those waiting for approval first, then the rest by how
 // recently they checked in — so a pending request is never buried at the bottom.
@@ -468,7 +474,7 @@ func (s *Store) Runners() ([]*Runner, error) {
 		var first, last, enrolled, approved, notAfter int64
 		if err := rows.Scan(&r.ID, &r.Hostname, &r.OS, &r.Arch, &r.Status,
 			&r.CertFingerprint, &r.EnrollIP, &first, &last, &enrolled, &approved, &notAfter,
-			&r.CertIssuer); err != nil {
+			&r.CertIssuer, &r.Version); err != nil {
 			return nil, err
 		}
 		r.FirstSeen, r.LastSeen = fromMillis(first), fromMillis(last)

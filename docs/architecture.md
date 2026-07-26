@@ -4,7 +4,8 @@ Zálohovací systém pro interní síť Xtuning. Monorepo, jazyk **Go** pro runn
 
 Stav implementace: fáze A–J hotové — scaffold, protokol, SQLite, mTLS a podpis úloh,
 šifrování secrets, restic zálohy, web UI, instalace a enrollment, životní cyklus
-certifikátů, obnova z webu, rotace klíčů. Přehled v §10, detaily v §11–14.
+certifikátů, obnova z webu, rotace klíčů, správa instancí z webu, auto-update runnerů.
+Přehled v §10, detaily v §11–15.
 
 ---
 
@@ -723,3 +724,65 @@ novým prošla, po cutoveru sada zúžena na jeden a zálohy dál běží.
 **CA** — bundle se dvěma autoritami, runner ho přijal, obnovou přešel na novou CA
 (`CN=Arcatum CA 2026`), stav ohlásil `safe_to_drop_old_ca`, po zúžení bundle záloha
 proběhla. Odhaleny a opraveny **dvě reálné chyby v pořadí**, obě popsané výše.
+
+---
+
+## 15. Správa instancí a aktualizace runnerů
+
+### Instance: z JSON do databáze
+
+Instance se zakládají a mění přes API (`internal/server/instances.go`), takže seed soubor
+přestal být zdroj pravdy. Tři věci, které to musí splňovat:
+
+**Validace proti manifestu.** `Manifest.ValidateParams` kontroluje povinné hodnoty, typy
+a **odmítá neznámé názvy** — překlep `datbase` by jinak tiše ležel v konfiguraci a skript
+by padal z důvodu, který s ním nikdo nespojí. Tohle je to, k čemu byly deklarace
+parametrů v §5.1 navržené; z nich se zároveň staví formulář ve webu.
+
+**Maskovaný secret se nesmí uložit.** API vrací hesla jako `***`. Kdyby se formulář
+odeslal zpátky tak, jak přišel, přepsalo by to každé heslo tím maskováním. Hodnota, která
+přijde jako `***`, prázdná, nebo v payloadu vůbec není, proto **zachová uloženou**.
+
+**Seed už nepřepisuje.** `ImportInstances` s `overwrite=false` vytvoří jen to, co
+neexistuje. Předtím upsertoval při každém startu, takže restart serveru by vrátil zpět
+každou změnu udělanou z webu. Vynutit staré chování jde `-import-force`.
+
+Scheduler se aktualizuje za běhu (`Track` znovu, `Untrack` při smazání), takže změna
+rozvrhu platí okamžitě. Smazání instance **nemaže restic repozitář**: zahodit
+konfiguraci nesmí zahodit zálohy.
+
+### Auto-update: nejrizikovější funkce v systému
+
+Špatná nebo podvržená aktualizace rozbije všechny zálohované servery naráz, a bootstrap
+port je plain HTTP. Bez ochran by auto-update byl ideální cesta, jak podstrčit kód —
+tedy přesně to, čemu podpis úloh brání. Proto:
+
+| Ochrana | Proč |
+|---|---|
+| Manifest **podepsaný podepisovacím klíčem úloh** | publikovat build vyžaduje ten klíč, ne kontrolu serveru |
+| Stahování **přes mTLS**, ne z bootstrapu | aktualizace nesmí přijít neautentizovaným kanálem |
+| Ověření **SHA‑256** před zápisem | manifest pin­uje konkrétní bajty |
+| Zápis vedle + `rename` | atomické; pád v půlce nenechá poloviční binárku |
+| Předchozí build jako `.old` | když nová nejde spustit, je s čím srovnávat |
+| `dev` build se neaktualizuje | vývojářskou binárku fleet nepřepisuje |
+| Jeden pokus na verzi (`update-attempted`) | rozbitý build nezpůsobí restart smyčku |
+
+Kanonická forma manifestu je seřazená a délkově prefixovaná (`updateManifestBytesToSign`,
+shodně na serveru i v runneru), takže build nelze přidat, odebrat ani zaměnit
+nepozorovaně. Bez souboru `VERSION` se nic nenabízí — binárky v adresáři samy o sobě
+aktualizaci nespustí.
+
+Runner hlásí verzi v checkinu (`runners.version`), takže je v UI vidět postup rozjezdu.
+Vypnout to jde per host (`[runner] auto_update = false`).
+
+### Ověřeno E2E
+**Instance:** vytvořena přes API → záloha proběhla **bez restartu serveru** → validace
+odmítla chybějící povinný parametr (400 s jménem parametru) → maskovaný secret se při
+úpravě zachoval → seed soubor nepřepsal instanci spravovanou z API.
+**Auto-update:** runner 1.0.0 → publikováno 2.0.0 → sám stáhl, ověřil hash, nahradil se
+a restartoval; `.old` zůstala. Negativně: **podvržená binárka odmítnuta** (hash
+nesouhlasil, binárka zůstala nedotčená) a **manifest podepsaný cizím klíčem odmítnut**.
+
+Cestou to odhalilo provozní past, která je teď v README: po rotaci podepisovacího klíče je
+`dispatch-signing.pub` na hostu zastaralý a autoritou je stažená sada. Ztráta té sady
+runnera zablokuje (fail closed, správně) — náprava je stáhnout aktuální klíč z bootstrapu.

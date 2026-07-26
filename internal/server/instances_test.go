@@ -1,0 +1,387 @@
+package server
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"arcatum/pkg/crypto"
+	"arcatum/pkg/jobspec"
+	"arcatum/pkg/proto"
+)
+
+// instanceAPIServer builds a server with a script catalogue an instance can refer to.
+func instanceAPIServer(t *testing.T) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	keyPath := masterKeyFile(t, dir, "master.key")
+	kr, err := crypto.LoadKeyring(keyPath, nil)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	st, err := Open(filepath.Join(dir, "test.db"), filepath.Join(dir, "backup"), kr)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	catalog := &Catalog{byName: map[string]*ScriptEntry{
+		"mysql-backup": {Manifest: &jobspec.Manifest{
+			Name: "mysql-backup", Type: proto.TypeBash, Entrypoint: "mysql.sh",
+			Params: []jobspec.Param{
+				{Name: "host", Type: "string", Required: true},
+				{Name: "port", Type: "int", Default: "3306"},
+				{Name: "database", Type: "string", Required: true},
+				{Name: "password", Type: "string", Required: true, Secret: true},
+			},
+		}},
+		"files-backup": {Manifest: &jobspec.Manifest{
+			Name: "files-backup", Type: proto.TypeRestic,
+			Params: []jobspec.Param{
+				{Name: "paths", Type: "string", Required: true},
+				{Name: "restic_password", Type: "string", Required: true, Secret: true},
+			},
+		}},
+	}}
+	return &Server{
+		store:   st,
+		log:     log.New(io.Discard, "", 0),
+		sched:   NewScheduler(time.UTC),
+		catalog: catalog,
+	}
+}
+
+// apiCall performs a JSON request against the mux and returns the recorder.
+func apiCall(t *testing.T, srv *Server, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	r := httptest.NewRequest(method, path, reader)
+	r.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, r)
+	return rec
+}
+
+func validInstance() map[string]any {
+	return map[string]any{
+		"id":        "mysql-web01",
+		"script":    "mysql-backup",
+		"runner_id": "web-01",
+		"params":    map[string]string{"host": "127.0.0.1", "database": "shop"},
+		"secrets":   map[string]string{"password": "hunter2"},
+		"schedule":  map[string]any{"frequency": "daily", "time": "02:30"},
+	}
+}
+
+// Creating an instance through the API is what replaces editing JSON on the server: the
+// secret is encrypted from the moment it is stored, and the schedule takes effect at once.
+func TestCreateInstance(t *testing.T) {
+	srv := instanceAPIServer(t)
+
+	rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	// The response must not echo the secret back.
+	if strings.Contains(rec.Body.String(), "hunter2") {
+		t.Error("the response leaked the secret value")
+	}
+
+	stored, err := srv.store.Instance("mysql-web01")
+	if err != nil || stored == nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	if stored.Secrets["password"] != "hunter2" {
+		t.Errorf("secret round-trip failed: %q", stored.Secrets["password"])
+	}
+	// Scheduled immediately, without a restart.
+	if _, ok := srv.sched.NextRun("mysql-web01"); !ok {
+		t.Error("a new instance must be scheduled straight away")
+	}
+}
+
+func TestCreateInstanceRejectsDuplicate(t *testing.T) {
+	srv := instanceAPIServer(t)
+	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance()); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d", rec.Code)
+	}
+	rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance())
+	if rec.Code != http.StatusConflict {
+		t.Errorf("duplicate create = %d, want 409", rec.Code)
+	}
+}
+
+// Validation against the manifest is the point of declaring parameters: mistakes surface
+// on save, not when the backup runs.
+func TestCreateInstanceValidation(t *testing.T) {
+	srv := instanceAPIServer(t)
+
+	tests := []struct {
+		name    string
+		mutate  func(map[string]any)
+		wantMsg string
+	}{
+		{"missing required param", func(m map[string]any) {
+			m["params"] = map[string]string{"host": "127.0.0.1"} // no database
+		}, "database"},
+		{"missing required secret", func(m map[string]any) {
+			m["secrets"] = map[string]string{}
+		}, "password"},
+		{"typo in parameter name", func(m map[string]any) {
+			m["params"] = map[string]string{"host": "h", "database": "d", "datbase": "oops"}
+		}, "datbase"},
+		{"secret sent as a plain parameter", func(m map[string]any) {
+			p := m["params"].(map[string]string)
+			p["password"] = "hunter2"
+		}, "secret"},
+		{"non-numeric int", func(m map[string]any) {
+			p := m["params"].(map[string]string)
+			p["port"] = "not-a-number"
+		}, "port"},
+		{"unknown script", func(m map[string]any) { m["script"] = "nope" }, "unknown script"},
+		{"no runner", func(m map[string]any) { m["runner_id"] = "" }, "runner_id"},
+		{"bad id", func(m map[string]any) { m["id"] = "../etc/passwd" }, "invalid instance id"},
+		{"bad schedule time", func(m map[string]any) {
+			m["schedule"] = map[string]any{"frequency": "daily", "time": "25:00"}
+		}, "time"},
+		{"bad timeout", func(m map[string]any) { m["timeout"] = "later" }, "timeout"},
+		{"bad capture", func(m map[string]any) { m["capture"] = "maybe" }, "capture"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := validInstance()
+			tc.mutate(payload)
+			rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("create = %d, want 400 (%s)", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantMsg) {
+				t.Errorf("error %q should mention %q", strings.TrimSpace(rec.Body.String()), tc.wantMsg)
+			}
+		})
+	}
+}
+
+// The API hands out secrets masked. Saving a form back must therefore keep the stored
+// value, not overwrite every password with "***".
+func TestUpdateInstanceKeepsMaskedSecret(t *testing.T) {
+	srv := instanceAPIServer(t)
+	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance()); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d", rec.Code)
+	}
+
+	// Exactly what a form round-trip sends back.
+	payload := validInstance()
+	payload["secrets"] = map[string]string{"password": redactedSecret}
+	payload["params"] = map[string]string{"host": "10.0.0.5", "database": "orders"}
+	rec := apiCall(t, srv, http.MethodPut, "/api/v1/instances/mysql-web01", payload)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	stored, err := srv.store.Instance("mysql-web01")
+	if err != nil || stored == nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	if stored.Secrets["password"] != "hunter2" {
+		t.Errorf("password = %q, want the stored value kept", stored.Secrets["password"])
+	}
+	if stored.Params["host"] != "10.0.0.5" || stored.Params["database"] != "orders" {
+		t.Errorf("params not updated: %+v", stored.Params)
+	}
+}
+
+// A secret the payload does not mention at all must also survive.
+func TestUpdateInstanceKeepsOmittedSecret(t *testing.T) {
+	srv := instanceAPIServer(t)
+	apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance())
+
+	payload := validInstance()
+	delete(payload, "secrets")
+	if rec := apiCall(t, srv, http.MethodPut, "/api/v1/instances/mysql-web01", payload); rec.Code != http.StatusOK {
+		t.Fatalf("update = %d (%s)", rec.Code, rec.Body.String())
+	}
+	stored, _ := srv.store.Instance("mysql-web01")
+	if stored.Secrets["password"] != "hunter2" {
+		t.Errorf("password = %q, want it kept", stored.Secrets["password"])
+	}
+}
+
+func TestUpdateInstanceChangesSecret(t *testing.T) {
+	srv := instanceAPIServer(t)
+	apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance())
+
+	payload := validInstance()
+	payload["secrets"] = map[string]string{"password": "new-password"}
+	if rec := apiCall(t, srv, http.MethodPut, "/api/v1/instances/mysql-web01", payload); rec.Code != http.StatusOK {
+		t.Fatalf("update = %d", rec.Code)
+	}
+	stored, _ := srv.store.Instance("mysql-web01")
+	if stored.Secrets["password"] != "new-password" {
+		t.Errorf("password = %q, want the new value", stored.Secrets["password"])
+	}
+}
+
+// A changed schedule must apply without a restart.
+func TestUpdateInstanceRetracksSchedule(t *testing.T) {
+	srv := instanceAPIServer(t)
+	apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance())
+	before, _ := srv.sched.NextRun("mysql-web01")
+
+	payload := validInstance()
+	payload["schedule"] = map[string]any{"frequency": "daily", "time": "23:45"}
+	if rec := apiCall(t, srv, http.MethodPut, "/api/v1/instances/mysql-web01", payload); rec.Code != http.StatusOK {
+		t.Fatalf("update = %d", rec.Code)
+	}
+	after, ok := srv.sched.NextRun("mysql-web01")
+	if !ok {
+		t.Fatal("instance lost its schedule")
+	}
+	if after.Equal(before) || after.Hour() != 23 || after.Minute() != 45 {
+		t.Errorf("next run = %s, want it moved to 23:45", after)
+	}
+}
+
+func TestUpdateUnknownInstance(t *testing.T) {
+	srv := instanceAPIServer(t)
+	rec := apiCall(t, srv, http.MethodPut, "/api/v1/instances/nope", validInstance())
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("update unknown = %d, want 404", rec.Code)
+	}
+}
+
+// Deleting a configuration entry must not throw away the backups it produced.
+func TestDeleteInstanceKeepsRepository(t *testing.T) {
+	srv := instanceAPIServer(t)
+	apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance())
+
+	if rec := apiCall(t, srv, http.MethodDelete, "/api/v1/instances/mysql-web01", nil); rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d", rec.Code)
+	}
+	got, err := srv.store.Instance("mysql-web01")
+	if err != nil || got != nil {
+		t.Errorf("instance still present: %v", err)
+	}
+	// And it stops being scheduled.
+	if _, ok := srv.sched.NextRun("mysql-web01"); ok {
+		t.Error("a deleted instance must stop being scheduled")
+	}
+	if rec := apiCall(t, srv, http.MethodDelete, "/api/v1/instances/mysql-web01", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("deleting twice = %d, want 404", rec.Code)
+	}
+}
+
+// The form is built from these declarations, so they must come through with the flags
+// that decide how each field is rendered.
+func TestListScripts(t *testing.T) {
+	srv := instanceAPIServer(t)
+	rec := apiCall(t, srv, http.MethodGet, "/api/v1/scripts", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scripts = %d", rec.Code)
+	}
+	var out []ScriptInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("got %d scripts, want 2", len(out))
+	}
+	var mysql *ScriptInfo
+	for i := range out {
+		if out[i].Name == "mysql-backup" {
+			mysql = &out[i]
+		}
+	}
+	if mysql == nil {
+		t.Fatal("mysql-backup missing")
+	}
+	byName := map[string]ParamInfo{}
+	for _, p := range mysql.Params {
+		byName[p.Name] = p
+	}
+	if !byName["password"].Secret {
+		t.Error("password must be flagged as a secret so the form masks it")
+	}
+	if !byName["host"].Required {
+		t.Error("host must be flagged required")
+	}
+	if byName["port"].Default != "3306" {
+		t.Errorf("port default = %q, want 3306", byName["port"].Default)
+	}
+}
+
+// Instances are editable through the API, so re-importing the seed file on every start
+// must not undo those edits.
+func TestImportDoesNotClobberManagedInstances(t *testing.T) {
+	srv := instanceAPIServer(t)
+	apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance())
+
+	// The seed file still describes the original state.
+	dir := t.TempDir()
+	path := writeInstances(t, dir, []*Instance{{
+		ID: "mysql-web01", Script: "mysql-backup", RunnerID: "SEEDED-RUNNER",
+		Params:   map[string]string{"host": "seed", "database": "seed"},
+		Secrets:  map[string]string{"password": "seed"},
+		Schedule: ScheduleJSON{Frequency: "daily", Time: "01:00"},
+	}})
+
+	n, err := srv.store.ImportInstances(path, false)
+	if err != nil {
+		t.Fatalf("ImportInstances: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("imported %d, want 0 — the instance is already managed", n)
+	}
+	stored, _ := srv.store.Instance("mysql-web01")
+	if stored.RunnerID != "web-01" {
+		t.Errorf("runner = %q, want the API-managed value kept", stored.RunnerID)
+	}
+
+	// With overwrite the operator can still force the seed in.
+	n, err = srv.store.ImportInstances(path, true)
+	if err != nil {
+		t.Fatalf("ImportInstances(overwrite): %v", err)
+	}
+	if n != 1 {
+		t.Errorf("imported %d, want 1 with overwrite", n)
+	}
+	stored, _ = srv.store.Instance("mysql-web01")
+	if stored.RunnerID != "SEEDED-RUNNER" {
+		t.Errorf("runner = %q, want the seed applied with overwrite", stored.RunnerID)
+	}
+}
+
+func TestInstanceWriteEndpointsRequireAdmin(t *testing.T) {
+	srv := instanceAPIServer(t)
+	srv.requireClientCert = true
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/instances"},
+		{http.MethodPut, "/api/v1/instances/mysql-web01"},
+		{http.MethodDelete, "/api/v1/instances/mysql-web01"},
+		{http.MethodGet, "/api/v1/scripts"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
+			r.TLS = requestWithCert(certWithCNAndRole("web-01", crypto.RoleRunner)).TLS
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, r)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("as runner = %d, want 403", rec.Code)
+			}
+		})
+	}
+}

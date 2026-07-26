@@ -22,6 +22,9 @@ type CheckinRequest struct {
 	Hostname string `json:"hostname"`
 	OS       string `json:"os"`   // linux, ...
 	Arch     string `json:"arch"` // amd64, arm64 — used to pick binary artifacts
+	// Version is the runner's build identity, so the server can tell it a newer build is
+	// available. Empty or "dev" from an unstamped build.
+	Version string `json:"version,omitempty"`
 }
 
 // CheckinResponse returns the jobs the runner should execute now.

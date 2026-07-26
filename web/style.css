@@ -247,3 +247,27 @@ select {
   font-size: .9rem;
 }
 .rot .meta { border-bottom: none; }
+
+/* Instance form: label on the left, inputs on the right */
+.field {
+  display: grid;
+  grid-template-columns: 10rem 1fr;
+  gap: .5rem 1rem;
+  align-items: start;
+  padding: .5rem .8rem;
+  border-bottom: 1px solid var(--border);
+}
+.field > label { color: var(--muted); font-size: .85rem; padding-top: .3rem; }
+.field .hint { color: var(--muted); font-size: .78rem; margin-top: .2rem; }
+.field input, .field select {
+  font: inherit;
+  font-size: .85rem;
+  padding: .3rem .45rem;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-width: 100%;
+}
+.field input[disabled] { opacity: .6; }
+#form-error { color: var(--fail); }

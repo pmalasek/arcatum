@@ -8,6 +8,10 @@ enroll_server = "http://172.24.0.60"         # plain-HTTP bootstrap, used only t
                                              # a certificate on first start
 poll_interval = "30s"                        # how often the runner checks in
 data_dir      = "/var/lib/arcatum-runner"    # identity + temp dispatch files
+# The runner replaces its own binary when the server publishes a newer build (verified
+# against a signed manifest, downloaded over mTLS). Set false to pin this host and update
+# it by hand with install.sh.
+# auto_update   = true
 
 # Client mTLS. The certificate's common name must equal this runner's id (the
 # runner_id used in instances) — the server identifies the runner by it.

@@ -31,6 +31,15 @@ type RunnerSection struct {
 	EnrollServer string `toml:"enroll_server"`
 	PollInterval string `toml:"poll_interval"` // how often to check in, e.g. "30s"
 	DataDir      string `toml:"data_dir"`      // runner state (identity, temp dispatch files)
+	// AutoUpdate lets this host replace its own binary when the server publishes a newer
+	// build. Defaults to true; set false to pin a host and update it by hand.
+	AutoUpdate *bool `toml:"auto_update"`
+}
+
+// AutoUpdateEnabled reports whether auto-update is on, defaulting to true when the key is
+// absent from the file.
+func (c *RunnerConfig) AutoUpdateEnabled() bool {
+	return c.Runner.AutoUpdate == nil || *c.Runner.AutoUpdate
 }
 
 // DefaultRunner returns the built-in runner configuration. Server is empty on

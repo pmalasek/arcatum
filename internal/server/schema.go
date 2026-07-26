@@ -75,4 +75,7 @@ var addColumns = []struct{ table, column, definition string }{
 	// CA rotation can be tracked: an operator needs to know every runner has moved to the
 	// new authority before the old one is dropped from the trust bundle.
 	{"runners", "cert_issuer", "TEXT NOT NULL DEFAULT ''"},
+	// The build a runner reports at check-in, so an operator can see which hosts have
+	// picked up a published update.
+	{"runners", "version", "TEXT NOT NULL DEFAULT ''"},
 }

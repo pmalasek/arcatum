@@ -97,7 +97,12 @@ func main() {
 		logger.Printf("seeded %d new instance(s) from %s", n, *instancesPath)
 	}
 
-	opts := server.Options{RequireClientCert: cfg.TLS.Enabled()}
+	opts := server.Options{
+		RequireClientCert: cfg.TLS.Enabled(),
+		// The same directory the bootstrap listener installs from is what auto-update
+		// publishes; a VERSION file next to the binaries is what makes them an update.
+		DistDir: cfg.Bootstrap.DistDir,
+	}
 	var tlsConfig *tls.Config
 	var signingPubPEM []byte
 	if cfg.TLS.Enabled() {

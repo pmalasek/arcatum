@@ -30,20 +30,23 @@ type Agent struct {
 	tls      TLSFiles
 	// trust is where rotated signing keys and CA bundles are stored once adopted.
 	trust TrustPaths
+	// autoUpdate lets a host opt out of replacing its own binary.
+	autoUpdate bool
 }
 
 // NewAgent builds an agent for a runner identity. When verifier is non-nil every
 // dispatch must carry a valid Arcatum signature or it is refused unexecuted.
 func NewAgent(client *Client, req proto.CheckinRequest, workBase string, logger *log.Logger,
-	verifier crypto.Verifier, tlsFiles TLSFiles, trust TrustPaths) *Agent {
+	verifier crypto.Verifier, tlsFiles TLSFiles, trust TrustPaths, autoUpdate bool) *Agent {
 	return &Agent{
-		client:   client,
-		req:      req,
-		workBase: workBase,
-		log:      logger,
-		verifier: verifier,
-		tls:      tlsFiles,
-		trust:    trust,
+		client:     client,
+		req:        req,
+		workBase:   workBase,
+		log:        logger,
+		verifier:   verifier,
+		tls:        tlsFiles,
+		trust:      trust,
+		autoUpdate: autoUpdate,
 	}
 }
 
@@ -119,6 +122,11 @@ func (a *Agent) RunOnce(ctx context.Context) error {
 	// Pick up a rotated signing key or CA before anything else: a dispatch signed with a
 	// new key has to be verifiable by the time it arrives.
 	if a.RefreshTrust(ctx, a.trust) {
+		return ErrRestartRequired
+	}
+	// Then the binary itself, so a newer build takes over before doing any work with the
+	// old one. The manifest must be signed by a key we trust (see update.go).
+	if a.UpdateIfAvailable(ctx) {
 		return ErrRestartRequired
 	}
 	// Replace the certificate before it expires rather than after, while the current one

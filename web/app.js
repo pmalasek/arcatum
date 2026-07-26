@@ -98,7 +98,7 @@ async function loadInstances() {
     return;
   }
   body.innerHTML = list.map((i) => `
-    <tr>
+    <tr class="clickable" data-instance="${esc(i.id)}">
       <td class="mono">${esc(i.id)}</td>
       <td>${esc(i.script)}</td>
       <td>${esc(i.runner_id)}</td>
@@ -166,10 +166,10 @@ async function loadRunners() {
       : `<button class="action" data-revoke="${esc(r.id)}">zneplatnit</button>`;
     const ident = pending
       ? (r.enroll_ip ? `z ${esc(r.enroll_ip)}` : '')
-      : shortFp(r.cert_fingerprint);
+      : (r.version ? esc(r.version) : '<span class="muted">—</span>');
     return `
     <tr>
-      <td class="mono">${esc(r.id)}</td>
+      <td class="mono" title="${esc(r.cert_fingerprint || '')}">${esc(r.id)}</td>
       <td>${badge(r.status)}</td>
       <td>${esc(r.os)}/${esc(r.arch)}</td>
       <td class="mono">${ident}</td>
@@ -368,6 +368,124 @@ el('restore-crumbs').addEventListener('click', async (e) => {
   await loadRestoreDir();
 });
 
+// --- instance form ----------------------------------------------------------
+
+// Instances are edited here rather than in a JSON file on the server: the form is built
+// from the parameters the script declares, so a missing password or a mistyped name is
+// caught on save, and secrets are encrypted from the moment they are stored.
+let scriptsCache = null;
+let editing = null; // instance id being edited, null when creating
+
+async function scripts() {
+  if (!scriptsCache) scriptsCache = await api('/scripts');
+  return scriptsCache;
+}
+
+function fieldRow(label, inner, hint) {
+  return `<div class="field"><label>${esc(label)}</label><div>${inner}`
+    + (hint ? `<div class="hint">${esc(hint)}</div>` : '') + '</div></div>';
+}
+
+async function openInstanceForm(id) {
+  editing = id || null;
+  el('form-error').textContent = '';
+  el('form-title').textContent = id ? id : 'Nová instance';
+  el('form-delete').classList.toggle('hidden', !id);
+  showView('instance-form');
+
+  const list = await scripts();
+  let inst = null;
+  if (id) {
+    const all = await api('/instances');
+    inst = all.find((i) => i.id === id) || null;
+  }
+  const chosen = inst ? inst.script : (list[0] && list[0].name) || '';
+
+  el('form-body').innerHTML =
+    fieldRow('id', id
+      ? `<input id="f-id" value="${esc(id)}" disabled>`
+      : '<input id="f-id" placeholder="mysql-web01">',
+      id ? 'id nelze změnit' : 'krátký identifikátor, používá se i jako název repozitáře')
+    + fieldRow('skript', `<select id="f-script">${list.map((sc) =>
+        `<option value="${esc(sc.name)}"${sc.name === chosen ? ' selected' : ''}>${esc(sc.name)} (${esc(sc.type)})</option>`).join('')}</select>`)
+    + fieldRow('runner', `<input id="f-runner" value="${esc(inst ? inst.runner_id : '')}" placeholder="web-01">`,
+        'musí odpovídat CN certifikátu runneru')
+    + fieldRow('rozvrh', `
+        <select id="f-freq">
+          ${['daily', 'weekly', 'monthly'].map((f) =>
+            `<option value="${f}"${inst && inst.schedule.frequency === f ? ' selected' : ''}>${f}</option>`).join('')}
+        </select>
+        <input id="f-time" value="${esc(inst ? inst.schedule.time : '02:00')}" placeholder="02:00" size="6">
+        <input id="f-weekdays" value="${esc(inst && inst.schedule.weekdays ? inst.schedule.weekdays.join(',') : '')}" placeholder="mon,thu" size="12">
+        <input id="f-day" value="${inst && inst.schedule.day ? inst.schedule.day : ''}" placeholder="den 1-28" size="8">
+        <input id="f-tz" value="${esc(inst ? inst.schedule.timezone || '' : '')}" placeholder="Europe/Prague" size="16">`,
+        'weekdays platí pro weekly, den pro monthly')
+    + fieldRow('timeout', `<input id="f-timeout" value="${esc(inst ? inst.timeout : '')}" placeholder="1h" size="8">`)
+    + '<div id="f-params"></div>';
+
+  el('f-script').addEventListener('change', () => renderParams(inst));
+  renderParams(inst);
+}
+
+// renderParams builds the inputs for whatever the selected script declares.
+async function renderParams(inst) {
+  const list = await scripts();
+  const name = el('f-script').value;
+  const sc = list.find((s) => s.name === name);
+  const box = el('f-params');
+  if (!sc || sc.params.length === 0) {
+    box.innerHTML = '<div class="field"><label>parametry</label><div class="hint">tento skript žádné nedeklaruje</div></div>';
+    return;
+  }
+  const same = inst && inst.script === name;
+  box.innerHTML = sc.params.map((p) => {
+    // A stored secret comes back masked; leaving the field untouched keeps it.
+    const value = same
+      ? (p.secret ? (inst.secrets[p.name] || '') : (inst.params[p.name] || ''))
+      : '';
+    const hint = [
+      p.type || 'string',
+      p.required ? 'povinné' : 'nepovinné',
+      p.secret ? 'secret' : '',
+      p.default ? `default ${p.default}` : '',
+    ].filter(Boolean).join(' · ');
+    return fieldRow(p.name,
+      `<input data-param="${esc(p.name)}" data-secret="${p.secret}" value="${esc(value)}"`
+      + `${p.secret ? ' placeholder="(nezměněno)"' : ''}>`, hint);
+  }).join('');
+}
+
+function collectInstance() {
+  const params = {};
+  const secrets = {};
+  for (const input of el('f-params').querySelectorAll('[data-param]')) {
+    const name = input.dataset.param;
+    const value = input.value;
+    if (input.dataset.secret === 'true') {
+      // An untouched secret field is left out, so the stored value survives.
+      if (value !== '') secrets[name] = value;
+    } else if (value !== '') {
+      params[name] = value;
+    }
+  }
+  const weekdays = el('f-weekdays').value.split(',').map((s) => s.trim()).filter(Boolean);
+  const day = parseInt(el('f-day').value, 10);
+  return {
+    id: el('f-id').value.trim(),
+    script: el('f-script').value,
+    runner_id: el('f-runner').value.trim(),
+    timeout: el('f-timeout').value.trim(),
+    params, secrets,
+    schedule: {
+      frequency: el('f-freq').value,
+      time: el('f-time').value.trim(),
+      weekdays: weekdays.length ? weekdays : null,
+      day: Number.isFinite(day) ? day : 0,
+      timezone: el('f-tz').value.trim(),
+    },
+  };
+}
+
 // --- key rotation -----------------------------------------------------------
 
 // Rotating a long-lived key means running an overlap window: new material is published,
@@ -448,7 +566,7 @@ async function refresh() {
 
 function showView(name) {
   currentView = name;
-  for (const v of ['runs', 'instances', 'restore', 'runners', 'rotation', 'detail']) {
+  for (const v of ['runs', 'instances', 'instance-form', 'restore', 'runners', 'rotation', 'detail']) {
     el('view-' + v).classList.toggle('hidden', v !== name);
   }
   for (const tab of document.querySelectorAll('.tab')) {
@@ -600,6 +718,44 @@ document.addEventListener('click', async (e) => {
     }
     return;
   }
+  if (e.target.closest('#new-instance')) {
+    await openInstanceForm(null);
+    return;
+  }
+  if (e.target.closest('#form-back')) {
+    showView('instances');
+    return;
+  }
+  if (e.target.closest('#form-save')) {
+    const btn = e.target.closest('#form-save');
+    const payload = collectInstance();
+    btn.disabled = true;
+    try {
+      if (editing) {
+        await api(`/instances/${encodeURIComponent(editing)}`,
+          { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      } else {
+        await api('/instances',
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      }
+      showView('instances');
+    } catch (err) {
+      el('form-error').textContent = err.message;
+    }
+    btn.disabled = false;
+    return;
+  }
+  if (e.target.closest('#form-delete')) {
+    if (!editing || !confirm(`Smazat instanci "${editing}"?\n\n`
+      + 'Zálohy v repozitáři zůstanou — maže se jen konfigurace.')) return;
+    try {
+      await api(`/instances/${encodeURIComponent(editing)}`, { method: 'DELETE' });
+      showView('instances');
+    } catch (err) {
+      el('form-error').textContent = err.message;
+    }
+    return;
+  }
   if (e.target.closest('#rekey')) {
     const btn = e.target.closest('#rekey');
     btn.disabled = true;
@@ -635,6 +791,10 @@ document.addEventListener('click', async (e) => {
 
   const row = e.target.closest('tr.clickable');
   if (!row) return;
+  if (row.dataset.instance) {
+    await openInstanceForm(row.dataset.instance);
+    return;
+  }
   if (row.dataset.dir) {
     // Restore view: descend into the directory.
     restore.path = row.dataset.dir;

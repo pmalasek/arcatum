@@ -43,6 +43,25 @@
       </thead>
       <tbody id="instances-body"><tr><td colspan="6" class="empty">načítám…</td></tr></tbody>
     </table>
+    <div class="section-foot">
+      <button id="new-instance" class="action">nová instance</button>
+      <span class="hint">formulář se sestaví z parametrů, které skript deklaruje</span>
+    </div>
+  </section>
+
+  <!-- Formulář instance (vytvoření i úprava) -->
+  <section id="view-instance-form" class="view hidden">
+    <div class="detail-head">
+      <button id="form-back" class="ghost">‹ zpět</button>
+      <h2 id="form-title">Instance</h2>
+      <span class="grow"></span>
+      <span id="form-error" class="hint"></span>
+    </div>
+    <div id="form-body"></div>
+    <div class="section-foot">
+      <button id="form-save" class="action">uložit</button>
+      <button id="form-delete" class="action danger hidden">smazat</button>
+    </div>
   </section>
 
   <!-- Obnova: snapshoty → procházení → stažení -->
@@ -70,7 +89,7 @@
   <section id="view-runners" class="view hidden">
     <table>
       <thead>
-        <tr><th>Runner</th><th>Stav</th><th>Platforma</th><th>Fingerprint / IP</th><th>Certifikát platí do</th><th>Naposledy viděn</th><th></th></tr>
+        <tr><th>Runner</th><th>Stav</th><th>Platforma</th><th>Verze</th><th>Certifikát platí do</th><th>Naposledy viděn</th><th></th></tr>
       </thead>
       <tbody id="runners-body"><tr><td colspan="7" class="empty">načítám…</td></tr></tbody>
     </table>

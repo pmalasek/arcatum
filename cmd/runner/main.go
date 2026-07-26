@@ -22,6 +22,7 @@ import (
 	"arcatum/pkg/config"
 	"arcatum/pkg/crypto"
 	"arcatum/pkg/proto"
+	"arcatum/pkg/version"
 )
 
 func main() {
@@ -45,7 +46,10 @@ func main() {
 	interval, _ := cfg.Interval()
 
 	host, _ := os.Hostname()
-	req := proto.CheckinRequest{RunnerID: host, Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH}
+	req := proto.CheckinRequest{
+		RunnerID: host, Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH,
+		Version: version.Version,
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -99,10 +103,11 @@ func main() {
 	client := runner.NewClient(cfg.Runner.Server, httpClient)
 	workBase := filepath.Join(cfg.Runner.DataDir, "work")
 	tlsFiles := runner.TLSFiles{CACert: cfg.TLS.CACert, Cert: cfg.TLS.Cert, Key: cfg.TLS.Key}
-	agent := runner.NewAgent(client, req, workBase, logger, verifier, tlsFiles, trustPaths)
+	agent := runner.NewAgent(client, req, workBase, logger, verifier, tlsFiles, trustPaths,
+		cfg.AutoUpdateEnabled())
 
-	logger.Printf("arcatum-runner (protocol %s) — server=%s runner=%q (%s/%s)",
-		proto.Version, cfg.Runner.Server, req.Hostname, req.OS, req.Arch)
+	logger.Printf("arcatum-runner %s (protocol %s) — server=%s runner=%q (%s/%s)",
+		version.Version, proto.Version, cfg.Runner.Server, req.Hostname, req.OS, req.Arch)
 	if verifier != nil {
 		logger.Printf("mTLS enabled; job signatures are verified before execution")
 	} else {

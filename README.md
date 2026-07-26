@@ -24,6 +24,7 @@ výstup a ukládá ho **centrálně** — na zálohovaném serveru nemá zůstá
 - [HTTP API](#http-api)
 - [Ladění skriptů](#ladění-skriptů)
 - [Instalace runneru na zálohovaný server](#instalace-runneru-na-zálohovaný-server)
+- [Aktualizace runnerů](#aktualizace-runnerů)
 - [Vývoj](#vývoj)
 - [Stav a roadmapa](#stav-a-roadmapa)
 
@@ -586,10 +587,10 @@ Tři přehledy a detail běhu:
 | Záložka | Co ukazuje |
 |---|---|
 | **Běhy** | historie: stav, návratový kód, přenesená data, trvání |
-| **Instance** | příští běh, velikost restic repozitáře, tlačítko **spustit teď** |
+| **Instance** | příští běh, velikost restic repozitáře, **spustit teď**; klik otevře úpravu, tlačítko **nová instance** |
 | **Obnova** | snapshoty, procházení stromu, stažení souboru nebo adresáře jako `.tar` |
 | **Klíče** | stav rotace všech tří klíčů, přešifrování secrets, postup migrace CA |
-| **Runnery** | stav (`pending`/`approved`/`rejected`), platforma, expirace certifikátu, kdy se naposledy ohlásil; u čekajících žádostí **schválit / zamítnout**, u schválených **zneplatnit** |
+| **Runnery** | stav, platforma, **verze buildu**, expirace certifikátu, kdy se naposledy ohlásil; **schválit / zamítnout / zneplatnit** |
 
 Klikem na běh se otevře **detail s živým tailem výstupu** — u probíhající úlohy se log
 dosypává, jak přichází. Přepínač `stdout`/`stderr` a zaškrtávátko „sledovat"
@@ -697,34 +698,52 @@ a `mysql_backup` (realistická šablona).
 
 ## Jak přidat instanci
 
-Instance žijí v DB; zatím se seedují z JSON při startu serveru (upsert podle `id`,
-takže opakovaný import bezpečně aktualizuje):
+**Z webu** — záložka **Instance** → **nová instance**. Formulář se sestaví z parametrů,
+které vybraný skript deklaruje, a hodnoty se proti manifestu **zvalidují při uložení**:
+chybějící heslo nebo překlep v názvu parametru se pozná hned, ne až při noční záloze.
 
-```json
-[
-  {
-    "id": "mysql-web01",
-    "script": "mysql-backup",
-    "runner_id": "web-01",
-    "params": { "host": "127.0.0.1", "port": "3306", "database": "shop", "user": "backup" },
-    "secrets": { "password": "…" },
-    "capture": "stream",
-    "timeout": "2h",
-    "schedule": {
-      "frequency": "weekly",
-      "time": "02:30",
-      "weekdays": ["mon", "thu"],
-      "timezone": "Europe/Prague"
-    }
-  }
-]
+Změny platí **okamžitě, bez restartu serveru** — včetně změny rozvrhu. Hesla se šifrují
+už při uložení, takže nikde nezůstávají v plaintextu.
+
+Klik na řádek instance ji otevře k úpravě. U uloženého secretu se zobrazí `(nezměněno)`;
+když pole necháš prázdné, stará hodnota zůstane.
+
+Totéž přes API:
+
+```sh
+A=(--cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key)
+API=https://172.24.0.60:8443/api/v1
+
+curl "${A[@]}" $API/scripts                    # co skripty deklarují (základ formuláře)
+curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
+  "id": "mysql-web01",
+  "script": "mysql-backup",
+  "runner_id": "web-01",
+  "params":  { "host": "127.0.0.1", "port": "3306", "database": "shop", "user": "backup" },
+  "secrets": { "password": "…" },
+  "timeout": "2h",
+  "schedule": { "frequency": "weekly", "time": "02:30",
+                "weekdays": ["mon","thu"], "timezone": "Europe/Prague" }
+}'
+curl "${A[@]}" -X PUT    $API/instances/mysql-web01 -d '…'   # úprava
+curl "${A[@]}" -X DELETE $API/instances/mysql-web01          # smazání
 ```
 
 Rozvrh: `frequency` je `daily` | `weekly` | `monthly`; `weekdays` platí pro `weekly`,
 `day` (1–28) pro `monthly`. `timezone` je nepovinná — jinak platí default ze `server.toml`.
 
-Pozor: `data/instances.json` obsahuje secrets, proto je v `.gitignore`
-(verzovaná je jen `instances.example.json`).
+> **Smazání instance nemaže zálohy.** Odstraní se jen konfigurace; restic repozitář
+> zůstane na disku. Když ho chceš opravdu zahodit, smaž ho ručně z
+> `backup_dir/restic/<instance>/`.
+
+### Seed soubor `data/instances.json`
+
+Zůstává jako **počáteční** naplnění: při startu se z něj vytvoří jen instance, které
+ještě neexistují. Existující se **nepřepisují**, jinak by restart serveru pokaždé vrátil
+změny udělané z webu. Vynutit přepsání jde přepínačem `-import-force`.
+
+Pozor: soubor obsahuje hesla v plaintextu, proto je v `.gitignore`. Když instance
+spravuješ z webu, můžeš ho po naplnění klidně smazat.
 
 ---
 
@@ -739,6 +758,10 @@ Sloupec „role" platí při zapnutém mTLS — viz
 | `POST /api/v1/runs/updates` | runner | příjem ndjson streamu průběhu a výstupu |
 | `POST /api/v1/instances/{id}/run` | admin | **manuální spuštění** („spusť teď") |
 | `GET /api/v1/instances` | admin | instance včetně `next_run` (secrets maskované) |
+| `POST /api/v1/instances` | admin | vytvoří instanci (validuje se proti manifestu) |
+| `PUT /api/v1/instances/{id}` | admin | upraví instanci |
+| `DELETE /api/v1/instances/{id}` | admin | smaže instanci (zálohy zůstanou) |
+| `GET /api/v1/scripts` | admin | skripty a jejich deklarované parametry |
 | `GET /api/v1/runs?limit=N` | admin | historie běhů, nejnovější první |
 | `GET /api/v1/runs/{id}` | admin | detail jednoho běhu |
 | `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | admin | zachycený výstup běhu |
@@ -748,6 +771,8 @@ Sloupec „role" platí při zapnutém mTLS — viz
 | `GET /api/v1/rotation` | admin | stav rotace všech tří klíčů |
 | `POST /api/v1/secrets/rekey` | admin | přešifruje secrets aktuálním master klíčem |
 | `GET /api/v1/trust` | runner / admin | podepsaná sada podepisovacích klíčů a CA bundle |
+| `GET /api/v1/update` | runner / admin | podepsaný manifest publikovaných buildů runneru |
+| `GET /api/v1/update/{name}` | runner / admin | binárka runneru (jen přes mTLS) |
 | `POST /api/v1/runners/{id}/approve` | admin | schválí žádost a podepíše certifikát |
 | `POST /api/v1/runners/{id}/reject` | admin | zamítne žádost |
 | `POST /api/v1/runners/{id}/revoke` | admin | zneplatní certifikát, runner → `pending` |
@@ -880,6 +905,63 @@ go run ./cmd/arcatum-ca runner -dir pki -id web-01
 
 ---
 
+## Aktualizace runnerů
+
+Runnery se aktualizují samy. Publikování je zkopírovat binárky do `dist_dir` a napsat
+vedle nich verzi:
+
+```sh
+V=2026.07.26
+for A in amd64 arm64; do
+  GOOS=linux GOARCH=$A go build -ldflags "-X arcatum/pkg/version.Version=$V" \
+    -o /central_backup/arcatum/dist/arcatum-runner-linux-$A ./cmd/runner
+done
+echo "$V" > /central_backup/arcatum/dist/VERSION
+```
+
+Runner při dalším checkinu zjistí, že běží na starší verzi, novou stáhne, nahradí sám
+sebe a restartuje se. Aktuální verze každého hostu je vidět v záložce **Runnery** —
+podle toho poznáš, jak daleko je rozjezd.
+
+**Bez `VERSION` se nic nenabízí.** Binárky v adresáři samy o sobě aktualizaci nespustí;
+verze je to, co říká „tohle je vydané".
+
+### Proč je to bezpečné
+
+Nahrazení vlastní binárky je nejrizikovější věc, kterou runner dělá — špatná nebo
+podvržená aktualizace rozbije (nebo ovládne) všechny zálohované servery naráz. Proto:
+
+- **Manifest je podepsaný podepisovacím klíčem úloh.** Publikovat build tedy vyžaduje ten
+  klíč, ne jen kontrolu nad serverem — a hlavně ne přístup k plain-HTTP bootstrapu.
+- **Binárka se stahuje přes mTLS**, nikdy z bootstrap portu, a její **SHA‑256 se ověří**
+  proti podepsanému manifestu, teprve pak se cokoli přepisuje.
+- **Nová binárka se zapíše vedle a přejmenuje** (atomicky), předchozí zůstane jako
+  `.old` pro diagnostiku.
+- **Vývojový build se neaktualizuje** — binárka bez vypálené verze hlásí `dev` a nechá se
+  na pokoji.
+- **Jeden pokus na verzi.** Když se po restartu verze nezmění, runner to nezkouší znovu
+  a nahlásí to do logu — rozbitý build tedy nedokáže hosta uvrhnout do restart smyčky.
+
+### Přišpendlení hosta
+
+Když chceš mít nějaký server na pevné verzi:
+
+```toml
+# runner.toml
+[runner]
+auto_update = false
+```
+
+Pak ho aktualizuješ ručně opakovaným `install.sh`.
+
+> **Po rotaci podepisovacího klíče** je `dispatch-signing.pub` na hostu zastaralý —
+> autoritou je stažená sada v `data_dir/pki/signing-keys.pem`. Kdyby se ta sada ztratila
+> (přeinstalace disku, omylem smazaná), runner nedokáže nic ověřit a odmítne pracovat.
+> Náprava je stáhnout aktuální klíč z bootstrapu:
+> `curl -LsSf http://172.24.0.60/arcatum_runner/dispatch-signing.pub -o <data_dir>/pki/dispatch-signing.pub`
+
+---
+
 ## Vývoj
 
 ```sh
@@ -916,6 +998,9 @@ statický binár bez runtime závislostí.
   blížící se expiraci ve webu
 - **Rotace všech tří dlouhodobých klíčů** (master klíč secrets, podepisovací klíč úloh, CA)
   s oknem dvojí platnosti; runnery si nový trust materiál převezmou samy
+- **Správa instancí z webu/API** — formulář z deklarace parametrů, validace při uložení,
+  změny platí bez restartu, hesla šifrovaná od uložení
+- **Auto-update runneru** — podepsaný manifest buildů, stažení přes mTLS, ověření SHA-256
 - Bezpečné předání secrets (dočasný soubor, ne env), maskování v API, ověření SHA-256 artefaktu
 
 - **Obnova z webu** — procházení snapshotů a stažení souboru či adresáře, běží na serveru
@@ -923,8 +1008,8 @@ statický binár bez runtime závislostí.
 
 **Chybí (další fáze):**
 - **Obnova zpět na zálohovaný server** (dnes stáhneš data k sobě a nakopíruješ je sám)
+- **Notifikace** při selhání (e-mail/Slack) a **dry-run** režim
 - **Notifikace** při selhání (e-mail/Slack)
-- Správa instancí přes API/web (dnes seed z JSON), auto-update runneru
 - **CRL/OCSP** — [záměrně nezavedeno](#proč-ne-crlocsp)
 
 Podrobná architektura a rozhodnutí: [docs/architecture.md](docs/architecture.md).
