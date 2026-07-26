@@ -63,7 +63,7 @@ Nejdůležitější rozdělení v celém systému — **šablona** a její **nas
 |---|---|---|
 | Co to je | šablona: kód/binárka + manifest parametrů | konkrétní nasazení na jeden cíl |
 | Kde žije | `scripts/` — verzováno v gitu | databáze (SQLite) |
-| Obsahuje secrets | **ne, nikdy** | ano |
+| Obsahuje secrets | **ne, nikdy** | ano (šifrované v DB) |
 | Rozvrh | ne | **ano** |
 | Příklad | `mysql-backup` | `mysql-web01`, `mysql-web02`, … |
 
@@ -93,7 +93,7 @@ pkg/proto             zprávy protokolu + kanonická serializace pro podpis
 pkg/jobspec           parser manifestu skriptu + validace
 pkg/schedule          výpočet „next run" (denní/týdenní/měsíční)
 pkg/config            config serveru (server.toml) i runneru (runner.toml)
-pkg/crypto            PKI, mTLS konfigurace, Ed25519 podpisy úloh
+pkg/crypto            PKI, mTLS konfigurace, podpisy úloh, šifrování secrets
 scripts/              DEFINICE skriptů — kód + manifest, bez secrets
 data/                 instances.example.json
 config/               server.example.toml, runner.example.toml
@@ -204,7 +204,7 @@ Bez sekcí `[tls]` a `[signing]` běží Arcatum **nezabezpečeně** — plain H
 neověřuje volající a runner spustí cokoli, co dostane. To je určeno **jen pro lokální
 vývoj**; obě komponenty na to při startu upozorní.
 
-Ochrana má dvě nezávislé vrstvy:
+Ochrana má tři nezávislé vrstvy:
 
 1. **mTLS** — kdo je na drátě. Server i runner mají certifikát od společné Arcatum CA
    a ověřují se navzájem. Neznámý host neprojde ani TLS handshakem.
@@ -212,9 +212,33 @@ Ochrana má dvě nezávislé vrstvy:
    a runner podpis **ověří ještě před spuštěním**. Nesouhlasí-li, kód nespustí
    a nahlásí selhání zpět. Podpis pokrývá i SHA‑256 artefaktu, takže je svázán
    s konkrétním kódem.
+3. **Šifrování secrets at-rest** — co leží v databázi. Hesla instancí jsou v `arcatum.db`
+   šifrovaná (AES‑256‑GCM), takže kopie databáze sama o sobě žádné přihlašovací údaje
+   neprozradí.
 
-Proč obojí: mTLS chrání spojení, podpis chrání *úlohu*. Kdyby unikl TLS klíč serveru,
-podepisovací klíč je jiný soubor a útočník stále nepodstrčí runneru kód.
+Proč to není jedna vrstva: mTLS chrání spojení, podpis chrání *úlohu*, šifrování chrání
+*uložená data*. Kdyby unikl TLS klíč serveru, podepisovací klíč je jiný soubor a útočník
+runneru kód nepodstrčí; kdyby unikla záloha databáze, master klíč je také jiný soubor.
+
+### Šifrování secrets at-rest
+
+Každá hodnota se šifruje samostatně, takže **názvy** secrets zůstávají čitelné (web UI
+umí zobrazit, které jsou nastavené) a **hodnoty** ne. V databázi to vypadá takto:
+
+```
+"secrets": {"password": "enc:v1:VzeO2eeBNYagsYJ1HiiMlle5ERZk…"}
+```
+
+Ciphertext je kryptograficky svázán s **konkrétní instancí a názvem parametru**. Kdo umí
+do databáze zapisovat, nemůže tedy zkopírovat heslo z jedné instance do druhé — ověření
+selže.
+
+> **Master klíč si zazálohuj** mimo stroj, který chrání. Jeho ztrátou se všechna uložená
+> hesla stanou nečitelnými. Naopak jeho záměna se pozná okamžitě — čtení skončí chybou,
+> nikoli tichým prázdným heslem.
+
+Zapnutí šifrování na existující instalaci nic nerozbije: hodnoty uložené dříve
+v plaintextu se dál načtou a při nejbližším importu instancí se zašifrují.
 
 ### Role v certifikátech
 
@@ -247,6 +271,7 @@ Vznikne adresář `pki/`:
 | `server.pem` / `server.key` | server |
 | `dispatch-signing.key` | **jen server** — podepisuje úlohy |
 | `dispatch-signing.pub` | **každý runner** — ověřuje úlohy |
+| `secrets-master.key` | **jen server** — šifruje uložené secrets (**zazálohovat!**) |
 | `admin-petr.pem` / `.key` | tvůj počítač (přístup k API/webu) |
 | `runner-web-01.pem` / `.key` | příslušný runner |
 
@@ -255,13 +280,16 @@ Vznikne adresář `pki/`:
 > klíč nepřepíše.
 
 Jemnější kontrola přes `arcatum-ca` (`init`, `server`, `runner`, `admin`, `signing`,
-`sign-csr` — poslední je základ pro budoucí enrollment, kdy si runner klíč vygeneruje
-sám a posílá jen CSR):
+`master-key`, `sign-csr` — poslední je základ pro budoucí enrollment, kdy si runner klíč
+vygeneruje sám a posílá jen CSR):
 
 ```sh
 go run ./cmd/arcatum-ca runner -dir pki -id web-02      # přidat runner
 go run ./cmd/arcatum-ca admin  -dir pki -name kolega    # přidat operátora
 ```
+
+Existující CA, podepisovací klíč ani master klíč se nikdy nepřepíší implicitně — příkaz
+místo toho skončí chybou.
 
 ### Zapojení do konfigurace
 
@@ -274,6 +302,9 @@ key     = "/central_backup/arcatum/pki/server.key"
 
 [signing]
 key = "/central_backup/arcatum/pki/dispatch-signing.key"
+
+[secrets]
+master_key = "/central_backup/arcatum/pki/secrets-master.key"
 ```
 
 ```toml
@@ -481,11 +512,11 @@ statický binár bez runtime závislostí.
 - Tři úrovně konfigurace, manifest s deklarací parametrů
 - **mTLS** mezi serverem a runnery, identita a role z certifikátu, PKI nástroje
 - **Podpis úloh** (Ed25519) — runner ověřuje před spuštěním, jinak odmítne
+- **Šifrování secrets at-rest** (AES-256-GCM, vázané na instanci a název parametru)
 - Bezpečné předání secrets (dočasný soubor, ne env), maskování v API, ověření SHA-256 artefaktu
 
 **Chybí (další fáze):**
 - **Enrollment** runneru (dnes se certifikáty generují a rozdávají ručně; `sign-csr` už existuje)
-- **Šifrování secrets at-rest** v DB
 - **Orchestrace restic** pro souborové zálohy (dedup, inkrementální)
 - **Web UI** včetně živého tailu výstupu
 - **Retence a rotace** (GFS), **notifikace** při selhání

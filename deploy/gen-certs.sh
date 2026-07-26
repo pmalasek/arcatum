@@ -58,13 +58,17 @@ echo "==> PKI directory: $PKI_DIR"
 
 if [ -f "$PKI_DIR/ca.pem" ]; then
   echo "==> CA already exists, keeping it"
-  # init would also create the signing keypair; add it separately if missing.
+  # init would also create these; add whichever is missing.
   if [ ! -f "$PKI_DIR/dispatch-signing.key" ]; then
     echo "==> creating dispatch-signing keypair"
     "${CA[@]}" signing -dir "$PKI_DIR"
   fi
+  if [ ! -f "$PKI_DIR/secrets-master.key" ]; then
+    echo "==> creating secrets master key"
+    "${CA[@]}" master-key -dir "$PKI_DIR"
+  fi
 else
-  echo "==> creating CA and dispatch-signing keypair"
+  echo "==> creating CA, dispatch-signing keypair and secrets master key"
   "${CA[@]}" init -dir "$PKI_DIR"
 fi
 
@@ -88,10 +92,15 @@ Done. Files in $PKI_DIR:
   server.pem/.key         server certificate
   dispatch-signing.key    signs jobs (server only)
   dispatch-signing.pub    verifies jobs (copy to every runner)
+  secrets-master.key      encrypts stored secrets (server only) — BACK THIS UP
   admin-$ADMIN_NAME.pem/.key    your client certificate for the API/web UI
   runner-<id>.pem/.key    one pair per runner
 
-Next: point server.toml at ca.pem, server.pem/.key and dispatch-signing.key;
-point each runner.toml at ca.pem, its runner-<id> pair and dispatch-signing.pub.
+Next: point server.toml at ca.pem, server.pem/.key, dispatch-signing.key and
+secrets-master.key; point each runner.toml at ca.pem, its runner-<id> pair and
+dispatch-signing.pub.
 See README section "Zabezpečení (mTLS a podpis úloh)".
+
+Losing secrets-master.key makes every stored secret unreadable — keep a backup
+somewhere other than the machine it protects.
 EOF

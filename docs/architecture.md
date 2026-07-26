@@ -220,15 +220,15 @@ server je čte do katalogu při startu.
 `backup_dir/runs/<run_id>/{stdout,stderr}.log`. Payload zálohy patří do úložiště, ne
 do tabulky; v DB je jen metadata a počet bajtů.
 
-Časy jsou unix millis (0 = nenastaveno). Secrets jsou zatím v plaintextu — šifrování
-at-rest přijde s `pkg/crypto.SecretBox`. Přechod na Postgres zůstává otevřený.
+Časy jsou unix millis (0 = nenastaveno). **Secrets jsou v `instances.secrets` šifrované**
+(viz §7). Přechod na Postgres zůstává otevřený.
 
 ---
 
 ## 7. Bezpečnost
 
-Implementováno v `pkg/crypto` (PKI, mTLS, podpisy) a `internal/server/auth.go`
-(autorizace). Dvě **nezávislé** vrstvy:
+Implementováno v `pkg/crypto` (PKI, mTLS, podpisy, šifrování secrets) a
+`internal/server/auth.go` (autorizace). Tři **nezávislé** vrstvy:
 
 - **mTLS** — *kdo je na drátě*. Každý runner má klientský cert od Arcatum CA, server
   vyžaduje `RequireAndVerifyClientCert`. Tím je splněno „autorizace oběma směry".
@@ -238,6 +238,10 @@ Implementováno v `pkg/crypto` (PKI, mTLS, podpisy) a `internal/server/auth.go`
   Ed25519, runner ověří **před spuštěním**; při nesouhlasu kód nespustí a nahlásí
   selhání. Podpis je záměrně **jiný klíč než TLS** — kdyby unikl TLS klíč serveru,
   útočník stále nepodstrčí runneru kód.
+- **Šifrování secrets at-rest** — *co leží v databázi*. AES‑256‑GCM, každá hodnota
+  samostatně (názvy secrets zůstávají čitelné pro UI, hodnoty ne). Kopie `arcatum.db`
+  sama o sobě neprozradí žádné přihlašovací údaje. Master klíč je opět **jiný soubor**
+  než TLS i podepisovací klíč.
 
 **Co podpis pokrývá:** kanonická serializace v `pkg/proto/signing.go` — všechna pole
 s délkovými prefixy (aby hodnota nemohla imitovat hranici pole) a mapy se seřazenými
@@ -260,11 +264,16 @@ tiše). Runner také nemůže hlásit výsledky běhu, který nebyl přidělen j
   `cmd/arcatum-ca` a rozdávají se s instalací. `CA.SignCSR` a `CreateCSR` už existují
   jako stavební kameny pro automatický flow (runner pošle CSR → admin schválí → cert).
 - **Secrets** — hesla nikdy v plaintextu v `scripts/`; předávají se v úloze a na
-  runneru dočasným souborem (ne env, viz §5.3). V DB jsou zatím v plaintextu —
-  šifrování at-rest čeká na `pkg/crypto.SecretBox`.
-- **Bez `[tls]`** server běží plain HTTP a nikoho neautentizuje. Je to režim pro
-  lokální vývoj; obě komponenty na to při startu upozorní a poloviční konfiguraci
-  `[tls]` config odmítne, aby nedošlo k tichému propadnutí na nezabezpečený režim.
+  runneru dočasným souborem (ne env, viz §5.3). V DB jsou **šifrovaná** (`enc:v1:` +
+  base64) a ciphertext je přes AAD svázán s **instancí a názvem parametru** — kdo umí
+  do DB zapisovat, nemůže heslo přesunout mezi instancemi. Bez master klíče je uložená
+  hodnota nečitelná a čtení skončí chybou (`ErrSealed`), ne tichým prázdným heslem.
+  Hodnoty uložené před zapnutím šifrování se dál načtou a při dalším importu se zašifrují.
+  **Ztráta master klíče = ztráta secrets** → zálohovat mimo chráněný stroj.
+- **Bez `[tls]`** server běží plain HTTP a nikoho neautentizuje, bez `[secrets]` ukládá
+  hesla v plaintextu. Je to režim pro lokální vývoj; obě komponenty na to při startu
+  upozorní. Poloviční konfiguraci `[tls]` config odmítne a se zapnutým mTLS vyžaduje
+  i `[signing]` a `[secrets]`, aby nedošlo k tichému propadnutí na nezabezpečený režim.
 - **Chybí:** revokace (CRL/OCSP), rotace klíčů, autentizace k webu jinak než certifikátem.
 
 ---
@@ -333,9 +342,21 @@ data/podpis, cizí klíč, prázdný podpis), kanonická serializace (determinis
 nezávislost na pořadí map, detekce změny každého pole, odolnost proti posunu hranic
 polí), autorizace (role, mismatch identity), ověření v runneru.
 
+### Fáze E — šifrování secrets at-rest ✓
+`pkg/crypto/secretbox.go` (AES‑256‑GCM, master klíč, `SealToString`/`OpenFromString`
+s markerem `enc:v1:`), zapojeno ve `internal/server/store.go` (šifrování při zápisu,
+dešifrování při čtení). Master klíč generuje `arcatum-ca master-key` / `init`
+a `deploy/gen-certs.sh`. Nový config `[secrets] master_key`.
+
+**Ověřeno E2E:** v `arcatum.db` (ani ve `-wal`/`-shm`) plaintext hesla není — je tam
+jen `enc:v1:VzeO2ee…`; API vrací `***`; runner přitom dostane skutečnou hodnotu.
+Jednotkové testy: round-trip, různý ciphertext pro stejnou hodnotu, poškozený
+ciphertext, cizí master klíč, **přesun ciphertextu na jinou instanci/parametr**,
+vadné soubory klíče, legacy plaintext, chybějící klíč (`ErrSealed`), zachovaná redakce.
+
 **Zatím vědomě chybí (další fáze):** automatický enrollment (dnes ruční distribuce
-certifikátů), šifrování secrets at-rest, restic orchestrace, web UI, retence,
-notifikace, restore, správa instancí přes API (dnes seed z JSON), revokace a rotace klíčů.
+certifikátů), restic orchestrace, web UI, retence, notifikace, restore, správa instancí
+přes API (dnes seed z JSON), revokace a rotace klíčů.
 
 **Vyzkoušení lokálně:** viz [README — Rychlý start](../README.md#rychlý-start-lokální-vyzkoušení)
 a [Zabezpečení](../README.md#zabezpečení-mtls-a-podpis-úloh).

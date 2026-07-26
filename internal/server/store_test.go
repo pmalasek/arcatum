@@ -14,7 +14,7 @@ import (
 func openTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := Open(filepath.Join(dir, "test.db"), filepath.Join(dir, "backup"))
+	st, err := Open(filepath.Join(dir, "test.db"), filepath.Join(dir, "backup"), nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 	dbPath := filepath.Join(dir, "test.db")
 	backupDir := filepath.Join(dir, "backup")
 
-	st, err := Open(dbPath, backupDir)
+	st, err := Open(dbPath, backupDir, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	reopened, err := Open(dbPath, backupDir)
+	reopened, err := Open(dbPath, backupDir, nil)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

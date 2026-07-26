@@ -22,11 +22,18 @@ type Config struct {
 	Storage Storage `toml:"storage"`
 	TLS     TLS     `toml:"tls"`
 	Signing Signing `toml:"signing"`
+	Secrets Secrets `toml:"secrets"`
 }
 
 // Signing points at the key used to sign job dispatches (server side).
 type Signing struct {
 	Key string `toml:"key"` // Ed25519 private key, e.g. pki/dispatch-signing.key
+}
+
+// Secrets points at the master key encrypting instance secrets in the database.
+// Without it secrets are stored in plaintext (development only).
+type Secrets struct {
+	MasterKey string `toml:"master_key"` // e.g. pki/secrets-master.key
 }
 
 // Server holds process-level settings.
@@ -118,6 +125,9 @@ func (c *Config) Validate() error {
 	}
 	if c.TLS.Enabled() && c.Signing.Key == "" {
 		return errors.New("config: [signing] key is required when mTLS is enabled (runners verify job signatures)")
+	}
+	if c.TLS.Enabled() && c.Secrets.MasterKey == "" {
+		return errors.New("config: [secrets] master_key is required when mTLS is enabled (otherwise credentials sit in the database in plaintext)")
 	}
 	if _, err := c.Location(); err != nil {
 		return err

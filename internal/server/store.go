@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"arcatum/pkg/crypto"
 	"arcatum/pkg/proto"
 
 	_ "modernc.org/sqlite" // pure-Go driver: no CGO, keeps the binary static
@@ -18,13 +19,19 @@ import (
 // Store is the server's persistent state: instances, runs and runner registrations
 // in SQLite. Run *output* is not in the DB — it is streamed to files under
 // backupDir/runs/<run_id>/, since backup payloads belong in storage, not a table.
+//
+// Instance secrets are encrypted with box before they are written, so the database
+// file alone does not reveal credentials. A nil box stores them in plaintext
+// (development only).
 type Store struct {
 	db        *sql.DB
 	backupDir string
+	box       crypto.SecretBox
 }
 
-// Open opens (creating if needed) the SQLite database at dbPath and applies the schema.
-func Open(dbPath, backupDir string) (*Store, error) {
+// Open opens (creating if needed) the SQLite database at dbPath and applies the
+// schema. box may be nil, in which case secrets are stored unencrypted.
+func Open(dbPath, backupDir string, box crypto.SecretBox) (*Store, error) {
 	if dir := filepath.Dir(dbPath); dir != "" {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, fmt.Errorf("db dir: %w", err)
@@ -40,7 +47,7 @@ func Open(dbPath, backupDir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	return &Store{db: db, backupDir: backupDir}, nil
+	return &Store{db: db, backupDir: backupDir, box: box}, nil
 }
 
 // Close releases the database.
@@ -75,7 +82,11 @@ func (s *Store) ImportInstances(path string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		secrets, err := json.Marshal(in.Secrets)
+		sealed, err := s.sealSecrets(in.ID, in.Secrets)
+		if err != nil {
+			return 0, err
+		}
+		secrets, err := json.Marshal(sealed)
 		if err != nil {
 			return 0, err
 		}
@@ -103,7 +114,40 @@ func (s *Store) ImportInstances(path string) (int, error) {
 
 const instanceCols = `id, script, runner_id, params, secrets, capture, timeout, schedule`
 
-func scanInstance(sc interface{ Scan(...any) error }) (*Instance, error) {
+// sealSecrets encrypts each secret value for storage, binding it to this instance and
+// secret name so a ciphertext cannot be relocated within the database.
+func (s *Store) sealSecrets(instanceID string, secrets map[string]string) (map[string]string, error) {
+	if secrets == nil {
+		return nil, nil
+	}
+	out := make(map[string]string, len(secrets))
+	for name, value := range secrets {
+		sealed, err := crypto.SealToString(s.box, value, instanceID, name)
+		if err != nil {
+			return nil, fmt.Errorf("instance %q: seal secret %q: %w", instanceID, name, err)
+		}
+		out[name] = sealed
+	}
+	return out, nil
+}
+
+// openSecrets decrypts stored secret values.
+func (s *Store) openSecrets(instanceID string, stored map[string]string) (map[string]string, error) {
+	if stored == nil {
+		return nil, nil
+	}
+	out := make(map[string]string, len(stored))
+	for name, value := range stored {
+		plain, err := crypto.OpenFromString(s.box, value, instanceID, name)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = plain
+	}
+	return out, nil
+}
+
+func (s *Store) scanInstance(sc interface{ Scan(...any) error }) (*Instance, error) {
 	var in Instance
 	var params, secrets, sched string
 	if err := sc.Scan(&in.ID, &in.Script, &in.RunnerID, &params, &secrets, &in.Capture, &in.Timeout, &sched); err != nil {
@@ -112,9 +156,15 @@ func scanInstance(sc interface{ Scan(...any) error }) (*Instance, error) {
 	if err := json.Unmarshal([]byte(params), &in.Params); err != nil {
 		return nil, fmt.Errorf("instance %q params: %w", in.ID, err)
 	}
-	if err := json.Unmarshal([]byte(secrets), &in.Secrets); err != nil {
+	var stored map[string]string
+	if err := json.Unmarshal([]byte(secrets), &stored); err != nil {
 		return nil, fmt.Errorf("instance %q secrets: %w", in.ID, err)
 	}
+	opened, err := s.openSecrets(in.ID, stored)
+	if err != nil {
+		return nil, err
+	}
+	in.Secrets = opened
 	if err := json.Unmarshal([]byte(sched), &in.Schedule); err != nil {
 		return nil, fmt.Errorf("instance %q schedule: %w", in.ID, err)
 	}
@@ -130,7 +180,7 @@ func (s *Store) Instances() ([]*Instance, error) {
 	defer rows.Close()
 	var out []*Instance
 	for rows.Next() {
-		in, err := scanInstance(rows)
+		in, err := s.scanInstance(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -148,7 +198,7 @@ func (s *Store) InstancesForRunner(runnerID string) ([]*Instance, error) {
 	defer rows.Close()
 	var out []*Instance
 	for rows.Next() {
-		in, err := scanInstance(rows)
+		in, err := s.scanInstance(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -160,7 +210,7 @@ func (s *Store) InstancesForRunner(runnerID string) ([]*Instance, error) {
 // Instance returns one instance by id.
 func (s *Store) Instance(id string) (*Instance, error) {
 	row := s.db.QueryRow(`SELECT `+instanceCols+` FROM instances WHERE id = ?`, id)
-	in, err := scanInstance(row)
+	in, err := s.scanInstance(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

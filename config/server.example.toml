@@ -23,3 +23,9 @@ backup_dir = "/central_backup/arcatum"      # where backup data is stored
 # Required whenever [tls] is set.
 [signing]
 # key = "/central_backup/arcatum/pki/dispatch-signing.key"
+
+# Encrypts instance secrets in the database. Required whenever [tls] is set — without
+# it credentials sit in arcatum.db in plaintext. Back this key up: losing it makes
+# every stored secret unreadable.
+[secrets]
+# master_key = "/central_backup/arcatum/pki/secrets-master.key"

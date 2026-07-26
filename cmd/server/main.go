@@ -34,8 +34,16 @@ func main() {
 		logger.Fatalf("config: %v", err)
 	}
 
+	// Secrets are encrypted at rest whenever a master key is configured.
+	var box crypto.SecretBox
+	if cfg.Secrets.MasterKey != "" {
+		if box, err = crypto.LoadSecretBox(cfg.Secrets.MasterKey); err != nil {
+			logger.Fatalf("secrets master key: %v", err)
+		}
+	}
+
 	dbPath := filepath.Join(cfg.Server.DataDir, "arcatum.db")
-	store, err := server.Open(dbPath, cfg.Storage.BackupDir)
+	store, err := server.Open(dbPath, cfg.Storage.BackupDir, box)
 	if err != nil {
 		logger.Fatalf("open store: %v", err)
 	}
@@ -76,6 +84,11 @@ func main() {
 
 	logger.Printf("arcatum-server listening on %s", cfg.Server.Listen)
 	logger.Printf("  scripts=%s  db=%s  backup_dir=%s", cfg.Server.Scripts, dbPath, cfg.Storage.BackupDir)
+	if box != nil {
+		logger.Printf("  instance secrets are encrypted at rest")
+	} else {
+		logger.Printf("  WARNING: no [secrets] master_key — credentials are stored in the database in plaintext.")
+	}
 	if tlsConfig != nil {
 		logger.Printf("  mTLS enabled (CA %s); job dispatches are signed", cfg.TLS.CACert)
 		err = httpSrv.ListenAndServeTLS("", "") // certificates come from TLSConfig

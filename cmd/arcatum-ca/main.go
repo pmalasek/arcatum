@@ -7,10 +7,12 @@
 //	arcatum-ca server    -dir pki -hosts 172.24.0.60,arcatum.xtuning.local [-days 825]
 //	arcatum-ca runner    -dir pki -id web-01 [-days 825]
 //	arcatum-ca admin     -dir pki -name petr [-days 365]
-//	arcatum-ca signing   -dir pki
-//	arcatum-ca sign-csr  -dir pki -csr web-01.csr -out web-01.pem [-days 825]
+//	arcatum-ca signing    -dir pki
+//	arcatum-ca master-key -dir pki
+//	arcatum-ca sign-csr   -dir pki -csr web-01.csr -out web-01.pem [-days 825]
 //
-// "init" also creates the dispatch-signing keypair, so a fresh PKI needs one command.
+// "init" also creates the dispatch-signing keypair and the secrets master key, so a
+// fresh PKI needs one command.
 package main
 
 import (
@@ -46,6 +48,8 @@ func main() {
 		err = cmdAdmin(args)
 	case "signing":
 		err = cmdSigning(args)
+	case "master-key":
+		err = cmdMasterKey(args)
 	case "sign-csr":
 		err = cmdSignCSR(args)
 	case "-h", "--help", "help":
@@ -65,12 +69,13 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `arcatum-ca — manage Arcatum's PKI
 
-  init      create the CA and the dispatch-signing keypair
-  server    issue the server certificate (needs -hosts)
-  runner    issue a runner client certificate (needs -id, the runner_id)
-  admin     issue an admin client certificate for API/web access
-  signing   (re)create only the dispatch-signing keypair
-  sign-csr  sign a runner CSR (enrollment building block)
+  init        create the CA, the dispatch-signing keypair and the secrets master key
+  server      issue the server certificate (needs -hosts)
+  runner      issue a runner client certificate (needs -id, the runner_id)
+  admin       issue an admin client certificate for API/web access
+  signing     (re)create only the dispatch-signing keypair
+  master-key  (re)create only the secrets master key
+  sign-csr    sign a runner CSR (enrollment building block)
 
 Run "arcatum-ca <command> -h" for the flags of each command.
 `)
@@ -96,7 +101,10 @@ func cmdInit(args []string) error {
 		return err
 	}
 	fmt.Printf("CA certificate: %s\nCA key:         %s (keep private)\n", caCert, caKey)
-	return writeSigningKeys(*dir)
+	if err := writeSigningKeys(*dir); err != nil {
+		return err
+	}
+	return writeMasterKey(*dir)
 }
 
 func cmdServer(args []string) error {
@@ -170,6 +178,13 @@ func cmdSigning(args []string) error {
 	return writeSigningKeys(*dir)
 }
 
+func cmdMasterKey(args []string) error {
+	fs := flag.NewFlagSet("master-key", flag.ExitOnError)
+	dir := fs.String("dir", "pki", "output directory")
+	fs.Parse(args)
+	return writeMasterKey(*dir)
+}
+
 func cmdSignCSR(args []string) error {
 	fs := flag.NewFlagSet("sign-csr", flag.ExitOnError)
 	dir := fs.String("dir", "pki", "PKI directory")
@@ -227,6 +242,27 @@ func writeSigningKeys(dir string) error {
 		return err
 	}
 	fmt.Printf("signing key:    %s (server, keep private)\nsigning pubkey: %s (distribute to runners)\n", privPath, pubPath)
+	return nil
+}
+
+// writeMasterKey creates the secrets master key unless it already exists. Losing this
+// key makes every stored secret unreadable, so overwriting is never implicit.
+func writeMasterKey(dir string) error {
+	path := filepath.Join(dir, "secrets-master.key")
+	if fileExists(path) {
+		return fmt.Errorf("%s already exists — refusing to overwrite (stored secrets would become unreadable)", path)
+	}
+	key, err := crypto.GenerateMasterKey()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, key, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("secrets master key: %s (server only — back it up, losing it loses the secrets)\n", path)
 	return nil
 }
 

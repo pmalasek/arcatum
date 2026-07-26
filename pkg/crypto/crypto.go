@@ -7,8 +7,8 @@
 //   - Signing (sign.go): Ed25519 signatures over a JobDispatch. mTLS proves who the
 //     peer is on the wire; the signature proves the *job* originates from Arcatum
 //     and was not altered.
-//
-// Encryption of instance secrets at rest (SecretBox) is not implemented yet.
+//   - Secrets at rest (secretbox.go): AES-256-GCM encryption of instance secrets in
+//     the database, so a copy of arcatum.db does not leak credentials.
 package crypto
 
 // Signer signs outgoing job dispatches (server side).
@@ -21,15 +21,17 @@ type Verifier interface {
 	Verify(data, sig []byte) error
 }
 
-// SecretBox encrypts and decrypts instance secrets at rest on the server.
-// Not implemented yet: secrets are currently stored in plaintext in the database.
+// SecretBox encrypts and decrypts instance secrets at rest on the server. The context
+// argument is additional authenticated data binding a ciphertext to the instance and
+// secret name it belongs to — see SecretContext.
 type SecretBox interface {
-	Seal(plaintext []byte) (ciphertext []byte, err error)
-	Open(ciphertext []byte) (plaintext []byte, err error)
+	Seal(plaintext, context []byte) (ciphertext []byte, err error)
+	Open(ciphertext, context []byte) (plaintext []byte, err error)
 }
 
 // Compile-time checks that the concrete types satisfy the interfaces.
 var (
-	_ Signer   = (*Ed25519Signer)(nil)
-	_ Verifier = (*Ed25519Verifier)(nil)
+	_ Signer    = (*Ed25519Signer)(nil)
+	_ Verifier  = (*Ed25519Verifier)(nil)
+	_ SecretBox = (*AESSecretBox)(nil)
 )
