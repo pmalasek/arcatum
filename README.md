@@ -26,7 +26,20 @@ výstup a ukládá ho **centrálně** — na zálohovaném serveru nemá zůstá
 - [Instalace runneru na zálohovaný server](#instalace-runneru-na-zálohovaný-server)
 - [Aktualizace runnerů](#aktualizace-runnerů)
 - [Vývoj](#vývoj)
+- [Návody](#návody)
 - [Stav a roadmapa](#stav-a-roadmapa)
+
+---
+
+## Návody
+
+README je referenční přehled. Postupy krok za krokem mají vlastní dokumenty:
+
+| Návod | Kdy ho otevřít |
+|---|---|
+| [Nasazení produkční verze](docs/production.md) | od čistého serveru k běžícímu Arcatum se zapnutým zabezpečením — PKI, systemd, publikování buildů, rollout runnerů, provoz, záloha samotného Arcatum |
+| [Vývoj a ladění backendu](docs/backend-development.md) | práce na Go kódu: lokální prostředí, tok dat jedním během, kam co přidat, testy, ladění, mTLS lokálně |
+| [Vývoj a ladění skriptů](docs/script-development.md) | psaní zálohovacích skriptů: manifest, předání parametrů, vývojová smyčka, katalog chyb |
 
 ---
 
@@ -163,7 +176,8 @@ curl http://127.0.0.1:8443/api/v1/runs/run-1/output      # zachycený výstup
 Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
 
 > Tento rychlý start běží **bez zabezpečení** (plain HTTP, žádné ověřování). Pro reálné
-> nasazení pokračuj sekcí [Zabezpečení](#zabezpečení-mtls-a-podpis-úloh).
+> nasazení pokračuj sekcí [Zabezpečení](#zabezpečení-mtls-a-podpis-úloh) nebo přímo
+> návodem [Nasazení produkční verze](docs/production.md).
 
 ---
 
@@ -825,6 +839,9 @@ curl "http://127.0.0.1:8443/api/v1/runs/run-1/output?stream=stderr"
 Výstup se ukládá do `backup_dir/runs/<run_id>/{stdout,stderr}.log`, takže do něj lze
 kdykoli nahlédnout i přímo na serveru. Chystá se dry-run režim.
 
+Celá vývojová smyčka včetně spuštění skriptu nasucho mimo Arcatum a katalogu chybových
+zpráv: [Vývoj a ladění skriptů](docs/script-development.md).
+
 ---
 
 ## Instalace runneru na zálohovaný server
@@ -974,6 +991,9 @@ go test ./...       # testy
 
 Server běží bez CGO (SQLite přes `modernc.org/sqlite`), takže výsledkem je jeden
 statický binár bez runtime závislostí.
+
+Podrobněji — lokální prostředí, tok dat jedním během, kam přidat endpoint / sloupec /
+typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-development.md).
 
 ---
 
