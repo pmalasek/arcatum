@@ -99,6 +99,7 @@ arcatum/
 │                          # (install.sh generuje server za běhu — §11)
 ├── docs/
 │   └── architecture.md
+├── justfile              # zkratky nad go/curl příkazy z dokumentace (just je nepovinný)
 └── go.mod
 ```
 

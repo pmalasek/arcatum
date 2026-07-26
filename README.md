@@ -116,6 +116,7 @@ scripts/              DEFINICE skriptů — kód + manifest, bez secrets
 data/                 instances.example.json
 config/               server.example.toml, runner.example.toml
 deploy/gen-certs.sh   vygeneruje celé PKI jedním příkazem
+justfile              zkratky pro build, testy a lokální běh (viz Vývoj)
 docs/architecture.md  architektura a rozhodnutí
 ```
 
@@ -174,6 +175,10 @@ curl http://127.0.0.1:8443/api/v1/runs/run-1/output      # zachycený výstup
 ```
 
 Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
+
+> **Se `just`** je celý tenhle postup na čtyři příkazy — `just dev-init` (připraví `local/`
+> s configem i seedem), `just server`, `just trigger` a `just runner-once`. Viz
+> [Zkratky přes just](#zkratky-přes-just).
 
 > Tento rychlý start běží **bez zabezpečení** (plain HTTP, žádné ověřování). Pro reálné
 > nasazení pokračuj sekcí [Zabezpečení](#zabezpečení-mtls-a-podpis-úloh) nebo přímo
@@ -836,6 +841,10 @@ curl http://127.0.0.1:8443/api/v1/runs/run-1/output
 curl "http://127.0.0.1:8443/api/v1/runs/run-1/output?stream=stderr"
 ```
 
+Se [`just`](#zkratky-přes-just) je to `just trigger hello-demo`, `just runner-once`
+a `just run-output 1` (recept přijme `run-1` i holé číslo — přes API je správný tvar
+`run-1`, protože z ID se skládá cesta k logu).
+
 Výstup se ukládá do `backup_dir/runs/<run_id>/{stdout,stderr}.log`, takže do něj lze
 kdykoli nahlédnout i přímo na serveru. Chystá se dry-run režim.
 
@@ -936,6 +945,13 @@ done
 echo "$V" > /central_backup/arcatum/dist/VERSION
 ```
 
+Se [`just`](#zkratky-přes-just) totéž jedním příkazem — postaví obě architektury i soubor
+`VERSION`:
+
+```sh
+V=2026.07.26 just dist-runner /central_backup/arcatum/dist
+```
+
 Runner při dalším checkinu zjistí, že běží na starší verzi, novou stáhne, nahradí sám
 sebe a restartuje se. Aktuální verze každého hostu je vidět v záložce **Runnery** —
 podle toho poznáš, jak daleko je rozjezd.
@@ -991,6 +1007,68 @@ go test ./...       # testy
 
 Server běží bez CGO (SQLite přes `modernc.org/sqlite`), takže výsledkem je jeden
 statický binár bez runtime závislostí.
+
+### Zkratky přes `just`
+
+V kořeni repozitáře je `justfile` — [just](https://just.systems) je task runner, tedy
+„makefile bez závislostí na `make`". Je **nepovinný**: každý recept je jen obal nad
+`go`/`curl` příkazy z tohohle README, takže bez `just` se obejdeš, jen si víc napíšeš.
+
+```sh
+cargo install just     # nebo: apt install just
+just                   # vypíše všechny recepty i s popisem
+```
+
+**Build a kontroly**
+
+| Recept | Co dělá |
+|---|---|
+| `just build` | `go build ./...` |
+| `just build-all` | binárky serveru, runneru a `arcatum-ca` do `./bin` |
+| `just release` | totéž, ale s verzí vypálenou přes `-ldflags` |
+| `just dist-runner [dir]` | runner pro `linux/amd64` i `arm64` + soubor `VERSION` (default `local/dist`) |
+| `just test` / `just test-race` / `just vet` | testy, testy s race detektorem, `go vet` |
+| `just fmt` | `gofmt -w` nad celým stromem |
+| `just check` | gofmt + vet + test + build — co má projít před odesláním změny |
+| `just clean` | smaže `bin/` a `local/dist` (data ani zálohy nesahá) |
+
+**Lokální běh a ladění**
+
+| Recept | Co dělá |
+|---|---|
+| `just dev-init` | vytvoří `local/{data,backup}`, `local/server.toml` a `local/instances.json`, pokud chybí (a doplní do seedu hostname) |
+| `just server` | spustí server nad `local/` configem |
+| `just runner-once` / `just runner` | jeden cyklus runneru, nebo běh jako služba |
+| `just trigger [instance]` | vynutí spuštění instance (default `hello-demo`) |
+| `just runs`, `just instances`, `just runners`, `just status` | přehledy z API |
+| `just run-output <id> [stream]` | zachycený výstup běhu (přijme `run-1` i `1`) |
+| `just run-tail <id> [offset]` | přírůstek výstupu — totéž, co používá živý tail |
+
+**PKI pro lokální vývoj**
+
+| Recept | Co dělá |
+|---|---|
+| `just dev-certs [hosts] [admin]` | celé PKI do `local/pki` (default `127.0.0.1`, admin `dev`) |
+| `just dev-runner-cert [id]` | certifikát runneru z `local/pki` (default hostname stroje) |
+| `just ca <args…>` | libovolný příkaz `arcatum-ca`, např. `just ca admin -dir local/pki -name kolega` |
+
+Chování se ladí proměnnými prostředí, ne úpravou souboru:
+
+```sh
+GO=/usr/local/go/bin/go just build          # Go mimo PATH
+V=2026.07.26 just release                   # verze do binárky (default: dnešní datum)
+SERVER_URL=https://127.0.0.1:8443 just runs # jiný cíl API
+SERVER_CONFIG=local/server-mtls.toml just server
+LISTEN=0.0.0.0:8443 just dev-init           # dostupné i z jiného stroje (viz níže)
+```
+
+> Vývojový config naslouchá jen na `127.0.0.1`, takže z jiného stroje se na server
+> nepřipojíš a v jeho logu po tom nezůstane žádná stopa. `0.0.0.0` ale znamená plain HTTP
+> **bez ověřování volajícího** — pro víc než pokus zapni
+> [zabezpečení](#zabezpečení-mtls-a-podpis-úloh).
+
+Recepty, které berou argument, ho přijímají pozičně: `just trigger mysql-web01`,
+`just run-output 42`, `just dist-runner /central_backup/arcatum/dist`.
 
 Podrobněji — lokální prostředí, tok dat jedním během, kam přidat endpoint / sloupec /
 typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-development.md).

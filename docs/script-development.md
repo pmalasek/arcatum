@@ -207,6 +207,9 @@ curl -X POST http://127.0.0.1:8443/api/v1/instances/mujskript-test/run
 go run ./cmd/runner -server http://127.0.0.1:8443 -once
 ```
 
+Je-li po ruce [`just`](../README.md#zkratky-přes-just), je tohle kolo `just trigger
+mujskript-test && just runner-once` — a `just dev-init` připraví `local/` napoprvé.
+
 Lokální vývojové prostředí (`local/server.toml`) je popsané v
 [návodu na backend](backend-development.md#2-lokální-vývojová-smyčka).
 
@@ -235,15 +238,23 @@ curl -X POST http://127.0.0.1:8443/api/v1/instances/mujskript-test/run
 go run ./cmd/runner -server http://127.0.0.1:8443 -once     # log runneru v terminálu
 
 curl http://127.0.0.1:8443/api/v1/runs                      # stav, exit code, bytes, trvání
-curl http://127.0.0.1:8443/api/v1/runs/1/output             # co skript vypsal
-curl "http://127.0.0.1:8443/api/v1/runs/1/output?stream=stderr"
-curl "http://127.0.0.1:8443/api/v1/runs/1/tail?offset=0"    # přírůstkově, i za běhu
+curl http://127.0.0.1:8443/api/v1/runs/run-1/output         # co skript vypsal
+curl "http://127.0.0.1:8443/api/v1/runs/run-1/output?stream=stderr"
+curl "http://127.0.0.1:8443/api/v1/runs/run-1/tail?offset=0"   # přírůstkově, i za běhu
 ```
+
+> **ID běhu je `run-1`.** S holým číslem vrátí endpointy výstupu prázdné tělo se stavem
+> 200 — snadno se to splete s „skript nic nevypsal". Recepty
+> [`just`](../README.md#zkratky-přes-just) tuhle past obcházejí: `just run-output 1`
+> i `just run-output run-1` míří na totéž.
+
+Se `just` je táž trojice `just trigger mujskript-test`, `just runner-once`, `just runs`
+a `just run-output 1 stderr`.
 
 Na serveru leží výstup i přímo na disku, takže do něj lze nahlédnout bez API:
 
 ```sh
-tail -f /central_backup/arcatum/runs/1/stderr.log
+tail -f /central_backup/arcatum/runs/run-1/stderr.log
 ```
 
 Co si přečíst z hlavičky běhu, než se pustíš do logů:

@@ -36,6 +36,27 @@ go test -race ./...     # data race detektor — hlavně pro executor a schedule
 gofmt -l .              # co není naformátované
 ```
 
+**Task runner `just`** (nepovinný, `cargo install just` nebo `apt install just`) má tyhle
+příkazy jako recepty v kořenovém `justfile`. `just` bez argumentu vypíše všechny:
+
+```sh
+just build     just vet     just test     just test-race     just fmt
+just check                  # gofmt + vet + test + build, tj. celá brána z §10
+just build-all              # binárky do ./bin
+just release                # totéž s verzí vypálenou přes -ldflags (V=…)
+just clean                  # smaže bin/ a local/dist
+```
+
+Recepty jsou tenký obal — nic, co by nešlo napsat ručně. Volají `go` z `PATH`; když ho
+tam nemáš, předej cestu proměnnou místo exportu:
+
+```sh
+GO=/usr/local/go/bin/go just test     # gofmt se odvodí jako <GO>fmt, přebít jde GOFMT=
+```
+
+`just check` na rozdíl od `gofmt -l .` **selže**, když něco není naformátované — `gofmt`
+sám vrací nulu a jen vypíše seznam, což se v CI i v rychlém běhu snadno přehlédne.
+
 Modul se jmenuje `arcatum`, takže importy jsou `arcatum/internal/server`, `arcatum/pkg/proto`, …
 Závislosti jsou záměrně minimální: `BurntSushi/toml` a `modernc.org/sqlite`. **Server běží
 bez CGO** — SQLite je čistě v Go, výsledkem je statický binár. Přidat závislost, která CGO
@@ -72,6 +93,11 @@ cp data/instances.example.json local/instances.json
 hostname
 ```
 
+Totéž udělá `just dev-init` — vytvoří adresáře, zkopíruje oba vzorové soubory a přepíše
+v configu `listen`, `data_dir` a `backup_dir` na lokální cesty a v seedu zástupný
+`REPLACE-WITH-RUNNER-HOSTNAME` na `hostname -s`. Existující soubory **nepřepisuje**,
+takže se dá pustit kdykoli.
+
 `local/` je v `.gitignore`.
 
 **Smyčka:**
@@ -86,8 +112,52 @@ go run ./cmd/runner -server http://127.0.0.1:8443 -once
 
 # výsledek
 curl http://127.0.0.1:8443/api/v1/runs
-curl http://127.0.0.1:8443/api/v1/runs/1/output
+curl http://127.0.0.1:8443/api/v1/runs/run-1/output
 ```
+
+> **ID běhu je `run-1`, ne `1`.** Endpointy pro výstup skládají z ID cestu na disk
+> (`backup_dir/runs/run-1/stdout.log`), takže s holým číslem vrátí prázdné tělo
+> a HTTP 200 — vypadá to jako „skript nic nevypsal". Recepty `just run-output`
+> a `just run-tail` si číslo doplní samy.
+
+Přes `just` je táž smyčka kratší:
+
+```sh
+just server                    # terminál 1
+just trigger                   # terminál 2 — default instance je hello-demo
+just runner-once
+just runs
+just run-output 1
+```
+
+Recepty míří na `local/server.toml`, `local/instances.json` a `http://127.0.0.1:8443`.
+Přepsat je jde proměnnými prostředí, takže ani pro mTLS variantu ([§7](#7-vývoj-se-zapnutým-mtls))
+nemusíš do `justfile` sahat:
+
+| Proměnná | Ovlivňuje | Default |
+|---|---|---|
+| `GO` | čím se překládá a spouští | `go` z `PATH` |
+| `SERVER_CONFIG` | `just server` | `local/server.toml` |
+| `INSTANCES` | seed pro `just server` | `local/instances.json` |
+| `SERVER_URL` | `just trigger`, `runner-once`, `runs`, `run-output` | `http://127.0.0.1:8443` |
+| `LISTEN` | adresa zapsaná do configu, který zakládá `just dev-init` | `127.0.0.1:8443` |
+| `V` | verze v `just release` / `dist-runner` | dnešní datum |
+
+```sh
+SERVER_CONFIG=local/server-mtls.toml INSTANCES=/dev/null just server
+just runner-once http://127.0.0.1:8443 local/runner.toml   # runner s vlastním configem
+```
+
+> **Vývojový server poslouchá jen na loopbacku.** Z jiného stroje (typicky prohlížeč na
+> tvém notebooku proti serveru ve VM) spojení skončí „Chyba spojení" a v logu serveru
+> **není po požadavku ani stopa** — odmítne ho jádro, ne Arcatum. Náprava je
+> `listen = "0.0.0.0:8443"` v configu a restart; `LISTEN=0.0.0.0:8443 just dev-init` to
+> rovnou takhle založí. Takový server je ale plain HTTP **bez ověřování volajícího**,
+> takže admin API má otevřené celé síti — na cokoli delšího než pokus zapni
+> [mTLS](#7-vývoj-se-zapnutým-mtls).
+
+> `just runs` a spol. jsou holé `curl` bez klientského certifikátu — proti serveru
+> se zapnutým mTLS skončí chybou handshaku. Tam používej `curl` s `-A` sadou z [§7](#7-vývoj-se-zapnutým-mtls).
 
 Užitečné přepínače:
 
@@ -251,7 +321,8 @@ Hodnoty secrets uvidíš jako `enc:v1:…` — to je správně; čitelné jsou j
 Přírůstkové čtení, které používá živý tail ve webu:
 
 ```sh
-curl "http://127.0.0.1:8443/api/v1/runs/1/tail?offset=0&stream=stdout"
+curl "http://127.0.0.1:8443/api/v1/runs/run-1/tail?offset=0&stream=stdout"
+just run-tail 1                     # totéž, ID si doplní
 ```
 
 **Strana runneru.** V lokálním vývoji `go run ./cmd/runner … -once` a čti terminál. Na
@@ -285,6 +356,7 @@ Lokální PKI:
 
 ```sh
 deploy/gen-certs.sh -d local/pki -H 127.0.0.1 -a dev
+just dev-certs                       # totéž; jiné hodnoty: just dev-certs 127.0.0.1,localhost petr
 ```
 
 Do `local/server.toml` přidej `[tls]`, `[signing]` a `[secrets]` s cestami do `local/pki`
@@ -294,6 +366,8 @@ Do `local/server.toml` přidej `[tls]`, `[signing]` a `[secrets]` s cestami do `
 ```sh
 # runner certifikát pro tenhle stroj
 go run ./cmd/arcatum-ca runner -dir local/pki -id "$(hostname -s)"
+just dev-runner-cert                        # totéž; jiný host: just dev-runner-cert web-02
+# libovolný jiný příkaz CA: just ca admin -dir local/pki -name kolega
 
 # volání API
 A=(--cacert local/pki/ca.pem --cert local/pki/admin-dev.pem --key local/pki/admin-dev.key)
@@ -349,6 +423,7 @@ websockety: přežije to odpadnutí spojení a nepotřebuje nic navíc na server
 
 ```sh
 gofmt -l . && go vet ./... && go test ./... && go build ./...
+# se just: gofmt -l . && just vet && just test && just build
 ```
 
 - [ ] test na nové chování — u autorizace, podpisů a migrací povinně

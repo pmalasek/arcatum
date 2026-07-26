@@ -97,6 +97,19 @@ go build -ldflags "-X arcatum/pkg/version.Version=$V" -o /usr/local/bin/arcatum-
 go build -ldflags "-X arcatum/pkg/version.Version=$V" -o /usr/local/bin/arcatum-ca     ./cmd/arcatum-ca
 ```
 
+Je-li na serveru [`just`](../README.md#zkratky-přes-just), postaví `just release` obě
+binárky (a navíc runner) se stejnou verzí do `./bin`, odkud je nainstaluješ:
+
+```sh
+cd /opt/arcatum
+just release                    # nebo V=2026.07.26 just release
+install -m 0755 bin/arcatum-server bin/arcatum-ca /usr/local/bin/
+```
+
+Bez `V` se verze odvodí z dnešního data, tedy stejně jako v postupu výše.
+
+`just` na produkci ničím povinným není — recepty jen skládají příkazy výše.
+
 Server běží bez CGO (SQLite přes `modernc.org/sqlite`), takže výsledek je jeden statický
 soubor — žádné runtime závislosti kromě resticu, který se volá jako externí program.
 
@@ -306,6 +319,16 @@ done
 echo "$V" > $D/VERSION
 ```
 
+Se `just` je to jeden příkaz — recept postaví obě architektury i soubor `VERSION`:
+
+```sh
+cd /opt/arcatum
+just dist-runner /central_backup/arcatum/dist
+```
+
+Cílový adresář je poziční argument (bez něj se staví do `local/dist`, což je vývojová
+cesta — na produkci ho tedy uveď). Verzi přebíjíš `V=…` jako u `just release`.
+
 **Bez souboru `VERSION` se aktualizace nikomu nenabídne** — binárky samy o sobě neznamenají
 vydání. To je záměrné: můžeš binárky nakopírovat a vydat je až zápisem verze.
 
@@ -413,9 +436,11 @@ běhu. Ze shellu:
 
 ```sh
 curl "${A[@]}" https://172.24.0.60:8443/api/v1/runs?limit=20
-curl "${A[@]}" https://172.24.0.60:8443/api/v1/runs/42/output
-curl "${A[@]}" "https://172.24.0.60:8443/api/v1/runs/42/output?stream=stderr"
+curl "${A[@]}" https://172.24.0.60:8443/api/v1/runs/run-42/output
+curl "${A[@]}" "https://172.24.0.60:8443/api/v1/runs/run-42/output?stream=stderr"
 ```
+
+ID běhu má tvar `run-42` — s holým číslem vrátí endpointy výstupu prázdné tělo, ne chybu.
 
 Výstup leží i přímo na serveru v `backup_dir/runs/<run_id>/{stdout,stderr}.log`.
 
@@ -452,6 +477,10 @@ mv /usr/local/bin/arcatum-server.new /usr/local/bin/arcatum-server
 systemctl restart arcatum-server
 journalctl -u arcatum-server -n 30
 ```
+
+Se `just` nahradíš první dva řádky buildu `just release` a přesuneš binárku z `bin/`.
+Přepisovat běžící binárku přímo nejde (`Text file busy`), takže dvojice `mv` platí tak
+jako tak — proto tu není recept „nasadit".
 
 Co se u restartu děje:
 
