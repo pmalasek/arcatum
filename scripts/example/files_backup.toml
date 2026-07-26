@@ -1,0 +1,43 @@
+# File backup driven by restic. No entrypoint: the runner runs restic itself from the
+# parameters below, and the repository lives on the Arcatum server.
+name    = "files-backup"
+type    = "restic"
+timeout = "6h"
+
+[[param]]
+name = "paths"
+type = "string"
+required = true
+# Comma-separated list of what to back up, e.g. "/etc,/var/www,/home"
+
+[[param]]
+name = "excludes"
+type = "string"
+# Comma-separated restic exclude patterns, e.g. "*.tmp,/var/www/cache"
+
+[[param]]
+name = "tags"
+type = "string"
+# Comma-separated extra tags added to the snapshot
+
+# Retention (optional). When any keep_* is set, "forget --prune" runs after a
+# successful backup, scoped to this instance's snapshots only.
+[[param]]
+name = "keep_daily"
+type = "int"
+
+[[param]]
+name = "keep_weekly"
+type = "int"
+
+[[param]]
+name = "keep_monthly"
+type = "int"
+
+[[param]]
+name = "restic_password"
+type = "string"
+required = true
+secret = true
+# Password of this instance's restic repository. Losing it makes the backups
+# unreadable — restic cannot recover it.

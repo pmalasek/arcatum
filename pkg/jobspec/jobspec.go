@@ -55,7 +55,9 @@ func (m *Manifest) Validate() error {
 	default:
 		return fmt.Errorf("manifest %q: invalid type %q", m.Name, m.Type)
 	}
-	if m.Entrypoint == "" {
+	// A restic job needs no script: the runner drives restic itself from the
+	// instance's parameters (paths, excludes, retention).
+	if m.Entrypoint == "" && m.Type != proto.TypeRestic {
 		return fmt.Errorf("manifest %q: entrypoint is required", m.Name)
 	}
 	seen := map[string]bool{}

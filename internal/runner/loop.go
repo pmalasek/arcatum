@@ -11,6 +11,14 @@ import (
 	"arcatum/pkg/proto"
 )
 
+// TLSFiles are the mTLS paths from runner.toml. The restic subprocess needs them as
+// files, since it opens its own connection to the server.
+type TLSFiles struct {
+	CACert string
+	Cert   string
+	Key    string
+}
+
 // Agent ties the client and executor together into a check-in loop.
 type Agent struct {
 	client   *Client
@@ -18,12 +26,21 @@ type Agent struct {
 	workBase string // base dir for per-run temp dirs
 	log      *log.Logger
 	verifier crypto.Verifier
+	tls      TLSFiles
 }
 
 // NewAgent builds an agent for a runner identity. When verifier is non-nil every
 // dispatch must carry a valid Arcatum signature or it is refused unexecuted.
-func NewAgent(client *Client, req proto.CheckinRequest, workBase string, logger *log.Logger, verifier crypto.Verifier) *Agent {
-	return &Agent{client: client, req: req, workBase: workBase, log: logger, verifier: verifier}
+func NewAgent(client *Client, req proto.CheckinRequest, workBase string, logger *log.Logger,
+	verifier crypto.Verifier, tlsFiles TLSFiles) *Agent {
+	return &Agent{
+		client:   client,
+		req:      req,
+		workBase: workBase,
+		log:      logger,
+		verifier: verifier,
+		tls:      tlsFiles,
+	}
 }
 
 // verifyDispatch checks the server's signature over the job. This is the runner's own
@@ -98,8 +115,15 @@ func (a *Agent) runDispatch(ctx context.Context, d proto.JobDispatch) {
 	done := make(chan error, 1)
 	go func() { done <- a.client.StreamUpdates(ctx, updates) }()
 
-	a.log.Printf("run=%s: executing script %q (%s)", d.RunID, d.Script, d.Type)
-	Execute(runCtx, d, a.workBase, func(u proto.RunUpdate) { updates <- u })
+	emit := func(u proto.RunUpdate) { updates <- u }
+	if d.Type == proto.TypeRestic {
+		// File backups are driven by restic, not by a shipped script.
+		a.log.Printf("run=%s: restic backup for instance %q", d.RunID, d.InstanceID)
+		a.executeRestic(runCtx, d, emit)
+	} else {
+		a.log.Printf("run=%s: executing script %q (%s)", d.RunID, d.Script, d.Type)
+		Execute(runCtx, d, a.workBase, emit)
+	}
 	close(updates)
 
 	if err := <-done; err != nil {

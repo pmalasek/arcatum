@@ -74,7 +74,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/runs", s.adminOnly(s.handleListRuns))
 	mux.HandleFunc("GET /api/v1/runs/{id}/output", s.adminOnly(s.handleRunOutput))
 	mux.HandleFunc("GET /api/v1/runners", s.adminOnly(s.handleListRunners))
-	mux.HandleFunc("GET /", s.adminOnly(s.handleIndex))
+	mux.HandleFunc("GET /api/v1/instances/{id}/repo", s.adminOnly(s.handleRepoInfo))
+	// restic's REST backend: runners push file backups straight into the server's
+	// repository for their own instances. Authorization is per repository (restic.go).
+	mux.HandleFunc("/restic/", s.handleRestic)
+	// "/{$}" matches only the root path; a bare "GET /" would be a catch-all and
+	// conflict with "/restic/".
+	mux.HandleFunc("GET /{$}", s.adminOnly(s.handleIndex))
 	return mux
 }
 
@@ -311,12 +317,9 @@ func (s *Server) handleListRunners(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, runners)
 }
 
-// handleIndex is a minimal text status page (real web UI later).
+// handleIndex is a minimal text status page (real web UI later). Routed as "/{$}", so
+// it only ever sees the root path.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "arcatum-server\n\nscripts: %v\n", s.catalog.Names())
 

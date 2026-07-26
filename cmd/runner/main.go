@@ -66,7 +66,8 @@ func main() {
 
 	client := runner.NewClient(cfg.Runner.Server, httpClient)
 	workBase := filepath.Join(cfg.Runner.DataDir, "work")
-	agent := runner.NewAgent(client, req, workBase, logger, verifier)
+	tlsFiles := runner.TLSFiles{CACert: cfg.TLS.CACert, Cert: cfg.TLS.Cert, Key: cfg.TLS.Key}
+	agent := runner.NewAgent(client, req, workBase, logger, verifier, tlsFiles)
 
 	logger.Printf("arcatum-runner (protocol %s) — server=%s runner=%q (%s/%s)",
 		proto.Version, cfg.Runner.Server, req.Hostname, req.OS, req.Arch)

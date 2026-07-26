@@ -37,12 +37,13 @@ func LoadCatalog(dir string) (*Catalog, error) {
 		if err != nil {
 			return err
 		}
-		entry := &ScriptEntry{
-			Manifest:       m,
-			EntrypointPath: filepath.Join(filepath.Dir(path), m.Entrypoint),
-		}
-		if _, err := os.Stat(entry.EntrypointPath); err != nil {
-			return fmt.Errorf("script %q: entrypoint not found: %w", m.Name, err)
+		entry := &ScriptEntry{Manifest: m}
+		// restic jobs have no script file to ship (see jobspec.Manifest.Validate).
+		if m.Entrypoint != "" {
+			entry.EntrypointPath = filepath.Join(filepath.Dir(path), m.Entrypoint)
+			if _, err := os.Stat(entry.EntrypointPath); err != nil {
+				return fmt.Errorf("script %q: entrypoint not found: %w", m.Name, err)
+			}
 		}
 		if prev, dup := c.byName[m.Name]; dup {
 			return fmt.Errorf("duplicate script name %q (%s and %s)", m.Name, prev.EntrypointPath, entry.EntrypointPath)
@@ -71,8 +72,12 @@ func (c *Catalog) Names() []string {
 	return names
 }
 
-// readArtifact reads the entrypoint file and returns its bytes and sha256 hex.
+// readArtifact reads the entrypoint file and returns its bytes and sha256 hex. A
+// restic entry has no artifact, in which case both are empty.
 func (e *ScriptEntry) readArtifact() (content []byte, sha string, err error) {
+	if e.EntrypointPath == "" {
+		return nil, "", nil
+	}
 	content, err = os.ReadFile(e.EntrypointPath)
 	if err != nil {
 		return nil, "", err

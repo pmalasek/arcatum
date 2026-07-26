@@ -16,6 +16,7 @@ výstup a ukládá ho **centrálně** — na zálohovaném serveru nemá zůstá
 - [Rychlý start (lokální vyzkoušení)](#rychlý-start-lokální-vyzkoušení)
 - [Konfigurace](#konfigurace)
 - [Zabezpečení (mTLS a podpis úloh)](#zabezpečení-mtls-a-podpis-úloh)
+- [Zálohování souborů (restic)](#zálohování-souborů-restic)
 - [Jak napsat vlastní zálohovací skript](#jak-napsat-vlastní-zálohovací-skript)
 - [Jak přidat instanci](#jak-přidat-instanci)
 - [HTTP API](#http-api)
@@ -87,8 +88,8 @@ Instance míří na **právě jeden runner**. Jeden runner může hostit víc in
 cmd/server            binárka arcatum-server
 cmd/runner            binárka arcatum-runner
 cmd/arcatum-ca        správa PKI (CA, certifikáty, podepisovací klíč)
-internal/server       HTTP API, scheduler, SQLite store, katalog skriptů, autorizace
-internal/runner       checkin smyčka, executor, ověření podpisu úloh
+internal/server       HTTP API, scheduler, SQLite store, autorizace, restic REST backend
+internal/runner       checkin smyčka, executor, ověření podpisu, orchestrace resticu
 pkg/proto             zprávy protokolu + kanonická serializace pro podpis
 pkg/jobspec           parser manifestu skriptu + validace
 pkg/schedule          výpočet „next run" (denní/týdenní/měsíční)
@@ -330,6 +331,111 @@ curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
 
 ---
 
+## Zálohování souborů (restic)
+
+Pro souborové zálohy Arcatum nevymýšlí vlastní formát — řídí **restic**. Deduplikace,
+inkrementální snapshoty, komprese, šifrování a kontrola integrity jsou přesně ty části,
+které se ladí roky.
+
+Repozitář ale **leží na serveru**: Arcatum sám vystavuje restic REST backend, takže pack
+soubory tečou ze zálohovaného hostu na server a nekupí se na něm. Na hostu zůstane jen
+lokální cache resticu.
+
+```
+ zálohovaný host                          arcatum-server
+   restic backup                          /restic/<instance>/
+   │  pack soubory (mTLS)                 │
+   │ ───────────────────────────────────► │ backup_dir/restic/<instance>/
+```
+
+Každá instance má **vlastní repozitář** a runner se dostane jen k repozitářům instancí,
+které jsou cílené na něj. Jeden zálohovaný server tak nemůže číst ani poškodit zálohy
+jiného.
+
+### Předpoklady
+
+Na zálohovaném serveru musí být `restic` (`apt install restic`). Když chybí, úloha selže
+s jasnou zprávou, nikoli záhadně.
+
+### Definice a instance
+
+Skript typu `restic` nemá entrypoint — runner spouští restic sám podle parametrů. Ukázka:
+[scripts/example/files_backup.toml](scripts/example/files_backup.toml).
+
+```toml
+name    = "files-backup"
+type    = "restic"
+timeout = "6h"
+```
+
+Instance pak určuje, co se zálohuje a jak dlouho se to drží:
+
+```json
+{
+  "id": "files-web01",
+  "script": "files-backup",
+  "runner_id": "web-01",
+  "params": {
+    "paths": "/etc,/var/www",
+    "excludes": "*.tmp,/var/www/cache",
+    "keep_daily": "7",
+    "keep_weekly": "4",
+    "keep_monthly": "6"
+  },
+  "secrets": { "restic_password": "dlouhé-náhodné-heslo" },
+  "schedule": { "frequency": "daily", "time": "01:30" }
+}
+```
+
+| Parametr | Význam |
+|---|---|
+| `paths` | **povinné** — co zálohovat, oddělené čárkou |
+| `excludes` | restic exclude vzory, oddělené čárkou |
+| `tags` | další tagy snapshotu |
+| `keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` | retence (GFS) |
+| `restic_password` | **povinný secret** — heslo repozitáře |
+
+Runner repozitář při prvním použití sám inicializuje. Snapshoty dostanou tagy `arcatum`
+a `instance:<id>`.
+
+### Retence
+
+Když je nastavený kterýkoli `keep_*`, spustí se po **úspěšné** záloze `forget --prune`,
+omezený tagem na snapshoty téhle instance. Dvě záměrná rozhodnutí: neúspěšná záloha
+nikdy nesmaže staré snapshoty, a politika jedné instance nemůže zlikvidovat snapshoty
+jiné. Prázdná hodnota znamená „nenastaveno", ne „nedrž nic".
+
+> **Heslo repozitáře je nenahraditelné.** Restic ho neumí obnovit — bez něj jsou zálohy
+> nečitelné. V DB je šifrované (viz [Zabezpečení](#zabezpečení-mtls-a-podpis-úloh)),
+> ale kopii si ulož i mimo Arcatum.
+
+### Obnova dat
+
+Obnovu zatím děláš přímo resticem s **admin certifikátem** (plné restore přes API/web
+přijde v další fázi). Certifikát a klíč restic čeká v jednom souboru:
+
+```sh
+cat pki/admin-petr.pem pki/admin-petr.key > /tmp/admin-combined.pem
+export RESTIC_PASSWORD='dlouhé-náhodné-heslo'
+R="restic -r rest:https://172.24.0.60:8443/restic/files-web01/ \
+     --cacert pki/ca.pem --tls-client-cert /tmp/admin-combined.pem"
+
+$R snapshots                       # co je k dispozici
+$R ls latest                       # obsah posledního snapshotu
+$R restore latest --target /tmp/obnova
+$R restore latest --target /tmp/obnova --include /etc/nginx   # jen část
+$R check                           # kontrola integrity repozitáře
+```
+
+Velikost repozitáře a počet snapshotů zjistíš i z API:
+
+```sh
+curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
+  https://172.24.0.60:8443/api/v1/instances/files-web01/repo
+```
+
+---
+
 ## Jak napsat vlastní zálohovací skript
 
 Skript = dva soubory ve `scripts/<jmeno>/`: **kód** a **manifest**.
@@ -339,7 +445,7 @@ Skript = dva soubory ve `scripts/<jmeno>/`: **kód** a **manifest**.
 ```toml
 # scripts/example/mysql_backup.toml
 name       = "mysql-backup"
-type       = "bash"            # bash | python | binary | restic
+type       = "bash"            # bash | python | binary | restic (viz níže)
 entrypoint = "mysql_backup.sh" # relativně k manifestu
 timeout    = "1h"              # default, instance může přepsat
 
@@ -393,6 +499,9 @@ a `mysql_backup` (realistická šablona).
 > **Binární skripty** (`type = "binary"`) fungují taky — runner artefakt spustí přímo.
 > Runner při checkinu hlásí svou platformu (`linux/amd64`), takže server umí vybrat
 > správný artefakt. U binárek je ověření integrity (SHA-256, později podpis) o to důležitější.
+>
+> **Typ `restic`** žádný skript nemá — runner řídí restic sám podle parametrů instance.
+> Viz [Zálohování souborů](#zálohování-souborů-restic).
 
 ---
 
@@ -443,6 +552,8 @@ Sloupec „role" platí při zapnutém mTLS — viz
 | `GET /api/v1/runs?limit=N` | admin | historie běhů, nejnovější první |
 | `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | admin | zachycený výstup běhu |
 | `GET /api/v1/runners` | admin | evidované runnery (platforma, `last_seen`) |
+| `GET /api/v1/instances/{id}/repo` | admin | velikost restic repozitáře a počet snapshotů |
+| `/restic/{instance}/…` | runner (vlastní) / admin | restic REST backend pro souborové zálohy |
 | `GET /` | admin | textová status stránka |
 
 Hodnoty secrets API **nikdy nevrací** (jen názvy, maskované `***`). Skutečné hodnoty
@@ -513,14 +624,16 @@ statický binár bez runtime závislostí.
 - **mTLS** mezi serverem a runnery, identita a role z certifikátu, PKI nástroje
 - **Podpis úloh** (Ed25519) — runner ověřuje před spuštěním, jinak odmítne
 - **Šifrování secrets at-rest** (AES-256-GCM, vázané na instanci a název parametru)
+- **Zálohování souborů přes restic** — repozitář na serveru (vlastní restic REST backend),
+  dedup a inkrementální snapshoty, izolace repozitářů mezi runnery
+- **Retence (GFS)** — `forget --prune` po úspěšné záloze, omezené na vlastní snapshoty
 - Bezpečné předání secrets (dočasný soubor, ne env), maskování v API, ověření SHA-256 artefaktu
 
 **Chybí (další fáze):**
 - **Enrollment** runneru (dnes se certifikáty generují a rozdávají ručně; `sign-csr` už existuje)
-- **Orchestrace restic** pro souborové zálohy (dedup, inkrementální)
 - **Web UI** včetně živého tailu výstupu
-- **Retence a rotace** (GFS), **notifikace** při selhání
-- **Restore** (2. fáze podle plánu)
+- **Restore přes API/web** (dnes se obnovuje přímo resticem s admin certifikátem)
+- **Notifikace** při selhání (e-mail/Slack)
 - Správa instancí přes API/web (dnes seed z JSON), auto-update runneru
 - Revokace certifikátů (CRL/OCSP) a rotace klíčů
 

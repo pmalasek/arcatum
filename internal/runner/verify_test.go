@@ -119,3 +119,20 @@ func TestVerifyDispatchDevModeAllowsUnsigned(t *testing.T) {
 		t.Errorf("verifyDispatch (no verifier) = %v, want nil", err)
 	}
 }
+
+// writeTestFile and readTestFile are shared helpers for the runner tests.
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func readTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}

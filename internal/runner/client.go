@@ -25,6 +25,9 @@ func NewClient(base string, hc *http.Client) *Client {
 	return &Client{base: base, hc: hc}
 }
 
+// BaseURL returns the server base URL, used to derive the restic repository address.
+func (c *Client) BaseURL() string { return c.base }
+
 // Checkin asks the server for due work.
 func (c *Client) Checkin(ctx context.Context, req proto.CheckinRequest) (*proto.CheckinResponse, error) {
 	body, err := json.Marshal(req)

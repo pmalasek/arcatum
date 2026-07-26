@@ -59,6 +59,12 @@ identitu (klíč + CSR), kterou server při prvním kontaktu schválí (enrollme
 - Runner poll interval konfigurovatelný (default např. 30 s). Pro okamžitý „spusť teď"
   z webu stačí krátký interval nebo long-polling.
 - Scheduler (kdy je úloha „due") žije **na serveru**; runner se jen ptá.
+- Krok 5 je implementovaný jako **restic REST backend na serveru** (`/restic/<instance>/`,
+  `internal/server/restic.go`). Runner spouští restic s repozitářem
+  `rest:https://<server>/restic/<instance>/`, takže pack soubory jdou přímo na server;
+  na zálohovaném hostu zůstane jen lokální cache resticu. Každá instance má **vlastní
+  repozitář** a runner se dostane jen k repozitářům instancí cílených na něj — jeden
+  zálohovaný server tedy nemůže číst ani poškodit zálohy jiného.
 
 ---
 
@@ -289,10 +295,11 @@ tiše). Runner také nemůže hlásit výsledky běhu, který nebyl přidělen j
 
 ## 9. Otevřené otázky / backlog
 
-- **Retence a rotace** záloh (GFS: denní/týdenní/měsíční).
-- **Restore flow** (2. fáze) — návrh dřív než implementace zálohování dokončena.
+- ~~**Retence a rotace** záloh (GFS)~~ — hotovo, parametry `keep_*` u restic instancí (§10, fáze F).
+- **Restore flow** — dnes přímo resticem s admin certifikátem; obnova přes API/web chybí.
 - **Notifikace** při selhání (e-mail/Slack).
-- **Storage backend** serveru (lokální disk / NAS / S3) + šifrování at-rest.
+- **Storage backend** serveru — dnes lokální disk (`backup_dir`); NAS/S3 zatím ne.
+  Šifrování zálohovaných dat řeší restic sám, secrets v DB šifrujeme (§7).
 - **Chování při nedostupnosti** (server dole v čase zálohy → dohnat / přeskočit).
 - **Auto-update runneru**.
 - **Autentizace k webu/API** + audit log.
@@ -354,9 +361,31 @@ Jednotkové testy: round-trip, různý ciphertext pro stejnou hodnotu, poškozen
 ciphertext, cizí master klíč, **přesun ciphertextu na jinou instanci/parametr**,
 vadné soubory klíče, legacy plaintext, chybějící klíč (`ErrSealed`), zachovaná redakce.
 
+### Fáze F — souborové zálohy přes restic ✓
+Server: restic REST backend (`internal/server/restic.go`) — objekty se validují proti
+`^[0-9a-f]{16,64}$`, pack soubory se shardují po prvních dvou znacích, zápis jde do
+temp souboru a přejmenuje se (žádné poloviční packy), existující objekt je immutable.
+Podporuje API v1 i v2 listing, HEAD a Range (přes `http.ServeContent`).
+Runner: `internal/runner/restic.go` — parsování parametrů, inicializace repozitáře při
+prvním použití, `backup` s tagy `arcatum`/`instance:<id>`, retence `forget --prune`
+až **po úspěšné** záloze a omezená tagem. Pro restic se skládá klientský cert a klíč
+do jednoho souboru (`--tls-client-cert`), CA přes `--cacert`.
+Manifest typu `restic` nemá entrypoint (runner řídí restic sám).
+
+**Ověřeno E2E se skutečným resticem přes mTLS:** repozitář se sám inicializoval,
+zálohovaly se 3 soubory (`.tmp` vynechán dle `excludes`), snapshot uložen, retence
+aplikována. **Obnovená data jsou bit za bit identická s originálem** včetně binárního
+souboru (shodný md5). Druhá záloha přenesla jen 2,3 KiB místo 48 KiB (dedup funguje).
+Cizí runner do repozitáře → 403; traversal → 400.
+Jednotkové testy: validace cest a traversal, lifecycle objektů, immutabilita, listing
+v1/v2, skrytí rozpracovaných uploadů, autorizace per repozitář, sestavení příkazů
+`backup`/`forget`, prázdná retence ≠ „nedrž nic", skládání TLS souboru pro restic,
+a **test, že se router poskládá bez kolizí** (tuhle chybu unit testy volající handlery
+přímo minuly a odhalil ji až E2E běh).
+
 **Zatím vědomě chybí (další fáze):** automatický enrollment (dnes ruční distribuce
-certifikátů), restic orchestrace, web UI, retence, notifikace, restore, správa instancí
-přes API (dnes seed z JSON), revokace a rotace klíčů.
+certifikátů), web UI, restore přes API/web (dnes přímo resticem s admin certifikátem),
+notifikace, správa instancí přes API (dnes seed z JSON), revokace a rotace klíčů.
 
 **Vyzkoušení lokálně:** viz [README — Rychlý start](../README.md#rychlý-start-lokální-vyzkoušení)
 a [Zabezpečení](../README.md#zabezpečení-mtls-a-podpis-úloh).

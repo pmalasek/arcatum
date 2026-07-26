@@ -7,5 +7,19 @@
     "secrets": { "token": "s3cr3t-abcdef" },
     "capture": "stream",
     "schedule": { "frequency": "daily", "time": "03:00", "timezone": "Europe/Prague" }
+  },
+  {
+    "id": "files-web01",
+    "script": "files-backup",
+    "runner_id": "REPLACE-WITH-RUNNER-HOSTNAME",
+    "params": {
+      "paths": "/etc,/var/www",
+      "excludes": "*.tmp,/var/www/cache",
+      "keep_daily": "7",
+      "keep_weekly": "4",
+      "keep_monthly": "6"
+    },
+    "secrets": { "restic_password": "REPLACE-WITH-A-LONG-RANDOM-PASSWORD" },
+    "schedule": { "frequency": "daily", "time": "01:30", "timezone": "Europe/Prague" }
   }
 ]
