@@ -29,3 +29,13 @@ backup_dir = "/central_backup/arcatum"      # where backup data is stored
 # every stored secret unreadable.
 [secrets]
 # master_key = "/central_backup/arcatum/pki/secrets-master.key"
+
+# Plain-HTTP listener for installing and enrolling runners. A host with no certificate
+# yet cannot reach the mTLS port at all, so "curl … | sh" talks to this one. It serves
+# only install.sh, the runner binaries, ca.pem, the signing public key, and the
+# enrollment endpoints — none of which is secret. Leave listen empty to disable.
+[bootstrap]
+# listen   = "0.0.0.0:80"
+# dist_dir = "/central_backup/arcatum/dist"          # arcatum-runner-linux-amd64, …
+# api_url  = "https://172.24.0.60:8443"              # written into the generated runner.toml
+# ca_key   = "/central_backup/arcatum/pki/ca.key"    # signs approved enrollment requests

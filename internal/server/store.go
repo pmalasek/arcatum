@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -47,7 +48,55 @@ func Open(dbPath, backupDir string, box crypto.SecretBox) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	return &Store{db: db, backupDir: backupDir, box: box}, nil
+}
+
+// migrate adds any columns introduced after the initial schema. Existing databases are
+// upgraded in place; a fresh one simply already has everything.
+func migrate(db *sql.DB) error {
+	for _, c := range addColumns {
+		has, err := hasColumn(db, c.table, c.column)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.definition)
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			defaultVal any
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultVal, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Close releases the database.
@@ -233,17 +282,30 @@ func (s *Store) RecordCheckin(req proto.CheckinRequest, now time.Time) error {
 
 // Runner is a registered runner as stored by the server.
 type Runner struct {
-	ID        string    `json:"id"`
-	Hostname  string    `json:"hostname"`
-	OS        string    `json:"os"`
-	Arch      string    `json:"arch"`
-	FirstSeen time.Time `json:"first_seen"`
-	LastSeen  time.Time `json:"last_seen"`
+	ID       string `json:"id"`
+	Hostname string `json:"hostname"`
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	// Status is the enrollment state: pending, approved or rejected.
+	Status string `json:"status"`
+	// CertFingerprint of the issued certificate, or of the pending request — it is what
+	// an operator compares against the host to be sure the request is genuine.
+	CertFingerprint string    `json:"cert_fingerprint,omitempty"`
+	EnrollIP        string    `json:"enroll_ip,omitempty"`
+	FirstSeen       time.Time `json:"first_seen"`
+	LastSeen        time.Time `json:"last_seen"`
+	EnrolledAt      time.Time `json:"enrolled_at,omitempty"`
+	ApprovedAt      time.Time `json:"approved_at,omitempty"`
 }
 
-// Runners lists known runners, most recently seen first.
+const runnerCols = `id, hostname, os, arch, status, cert_fingerprint, enroll_ip,
+                    first_seen, last_seen, enrolled_at, approved_at`
+
+// Runners lists known runners: those waiting for approval first, then the rest by how
+// recently they checked in — so a pending request is never buried at the bottom.
 func (s *Store) Runners() ([]*Runner, error) {
-	rows, err := s.db.Query(`SELECT id, hostname, os, arch, first_seen, last_seen FROM runners ORDER BY last_seen DESC`)
+	rows, err := s.db.Query(`SELECT ` + runnerCols + ` FROM runners
+		ORDER BY (status = 'pending') DESC, last_seen DESC, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -251,11 +313,13 @@ func (s *Store) Runners() ([]*Runner, error) {
 	var out []*Runner
 	for rows.Next() {
 		var r Runner
-		var first, last int64
-		if err := rows.Scan(&r.ID, &r.Hostname, &r.OS, &r.Arch, &first, &last); err != nil {
+		var first, last, enrolled, approved int64
+		if err := rows.Scan(&r.ID, &r.Hostname, &r.OS, &r.Arch, &r.Status,
+			&r.CertFingerprint, &r.EnrollIP, &first, &last, &enrolled, &approved); err != nil {
 			return nil, err
 		}
 		r.FirstSeen, r.LastSeen = fromMillis(first), fromMillis(last)
+		r.EnrolledAt, r.ApprovedAt = fromMillis(enrolled), fromMillis(approved)
 		out = append(out, &r)
 	}
 	return out, rows.Err()
@@ -404,6 +468,38 @@ func (s *Store) AppendOutput(runID, stream string, data []byte) (int, error) {
 // OutputPath returns where a run's stdout is stored (for the UI/inspection).
 func (s *Store) OutputPath(runID string) string {
 	return s.StreamPath(runID, "stdout")
+}
+
+// ReadOutputFrom reads up to max bytes of a run's output starting at offset, and
+// returns the new offset. This backs the web UI's live tail: the browser keeps asking
+// from where it left off while the run is still producing output.
+func (s *Store) ReadOutputFrom(runID, stream string, offset int64, max int) (data []byte, newOffset int64, err error) {
+	f, err := os.Open(s.StreamPath(runID, stream))
+	if os.IsNotExist(err) {
+		return nil, offset, nil // nothing captured yet
+	}
+	if err != nil {
+		return nil, offset, err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, offset, err
+	}
+	// A shrunken file means the run was reset; start over rather than read garbage.
+	if offset > info.Size() {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset, err
+	}
+	buf := make([]byte, max)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, offset, err
+	}
+	return buf[:n], offset + int64(n), nil
 }
 
 // StreamPath returns the file backing one of a run's streams ("stdout"/"stderr").

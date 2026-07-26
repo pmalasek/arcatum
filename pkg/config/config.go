@@ -18,12 +18,26 @@ import (
 
 // Config is the full server configuration.
 type Config struct {
-	Server  Server  `toml:"server"`
-	Storage Storage `toml:"storage"`
-	TLS     TLS     `toml:"tls"`
-	Signing Signing `toml:"signing"`
-	Secrets Secrets `toml:"secrets"`
+	Server    Server    `toml:"server"`
+	Storage   Storage   `toml:"storage"`
+	TLS       TLS       `toml:"tls"`
+	Signing   Signing   `toml:"signing"`
+	Secrets   Secrets   `toml:"secrets"`
+	Bootstrap Bootstrap `toml:"bootstrap"`
 }
+
+// Bootstrap configures the plain-HTTP listener used to install and enrol runners. A
+// host that has no certificate yet cannot reach the mTLS listener at all, so this is
+// what "curl … | sh" talks to. Leave listen empty to disable it.
+type Bootstrap struct {
+	Listen  string `toml:"listen"`   // e.g. "0.0.0.0:80"
+	DistDir string `toml:"dist_dir"` // runner binaries: arcatum-runner-<os>-<arch>
+	APIURL  string `toml:"api_url"`  // mTLS address written into the generated runner.toml
+	CAKey   string `toml:"ca_key"`   // CA private key, needed to sign approved requests
+}
+
+// Enabled reports whether the bootstrap listener should run.
+func (b Bootstrap) Enabled() bool { return b.Listen != "" }
 
 // Signing points at the key used to sign job dispatches (server side).
 type Signing struct {
@@ -128,6 +142,17 @@ func (c *Config) Validate() error {
 	}
 	if c.TLS.Enabled() && c.Secrets.MasterKey == "" {
 		return errors.New("config: [secrets] master_key is required when mTLS is enabled (otherwise credentials sit in the database in plaintext)")
+	}
+	if c.Bootstrap.Enabled() {
+		if c.Bootstrap.APIURL == "" {
+			return errors.New("config: [bootstrap] api_url is required (runners are told to check in there)")
+		}
+		if c.Bootstrap.CAKey == "" {
+			return errors.New("config: [bootstrap] ca_key is required to sign approved enrollment requests")
+		}
+		if !c.TLS.Enabled() {
+			return errors.New("config: [bootstrap] needs [tls] as well — enrolling runners into a server that does not use mTLS would hand out certificates nothing checks")
+		}
 	}
 	if _, err := c.Location(); err != nil {
 		return err

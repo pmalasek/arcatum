@@ -17,6 +17,7 @@ výstup a ukládá ho **centrálně** — na zálohovaném serveru nemá zůstá
 - [Konfigurace](#konfigurace)
 - [Zabezpečení (mTLS a podpis úloh)](#zabezpečení-mtls-a-podpis-úloh)
 - [Zálohování souborů (restic)](#zálohování-souborů-restic)
+- [Web UI](#web-ui)
 - [Jak napsat vlastní zálohovací skript](#jak-napsat-vlastní-zálohovací-skript)
 - [Jak přidat instanci](#jak-přidat-instanci)
 - [HTTP API](#http-api)
@@ -95,6 +96,7 @@ pkg/jobspec           parser manifestu skriptu + validace
 pkg/schedule          výpočet „next run" (denní/týdenní/měsíční)
 pkg/config            config serveru (server.toml) i runneru (runner.toml)
 pkg/crypto            PKI, mTLS konfigurace, podpisy úloh, šifrování secrets
+web/                  web UI zabalené do binárky (embed.FS)
 scripts/              DEFINICE skriptů — kód + manifest, bez secrets
 data/                 instances.example.json
 config/               server.example.toml, runner.example.toml
@@ -436,6 +438,55 @@ curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
 
 ---
 
+## Web UI
+
+Web běží na stejné adrese jako API — otevři `https://172.24.0.60:8443/`. Je **zabalený
+v binárce** (`embed.FS`), takže se nic zvlášť neinstaluje a nemůže se rozejít s verzí
+serveru.
+
+Tři přehledy a detail běhu:
+
+| Záložka | Co ukazuje |
+|---|---|
+| **Běhy** | historie: stav, návratový kód, přenesená data, trvání |
+| **Instance** | příští běh, velikost restic repozitáře, tlačítko **spustit teď** |
+| **Runnery** | stav (`pending`/`approved`/`rejected`), platforma, kdy se naposledy ohlásil, a u čekajících žádostí tlačítka **schválit / zamítnout** |
+
+Klikem na běh se otevře **detail s živým tailem výstupu** — u probíhající úlohy se log
+dosypává, jak přichází. Přepínač `stdout`/`stderr` a zaškrtávátko „sledovat"
+(automatické odscrollování). Přesně to, na co jsi mířil požadavkem usnadnit ladění
+skriptů: spustit ručně a hned vidět, co skript píše.
+
+Živý tail nepoužívá websockety — prohlížeč se ptá `GET /api/v1/runs/{id}/tail?offset=N`
+a server pošle jen to, co od posledního dotazu přibylo. Jednodušší, přežije to odpadnutí
+spojení a nepotřebuje to nic navíc na serveru.
+
+### Přístup z prohlížeče (klientský certifikát)
+
+Web má **stejnou ochranu jako API** — vyžaduje admin certifikát. Aby ho prohlížeč
+poslal, naimportuj ho jako PKCS#12:
+
+```sh
+openssl pkcs12 -export \
+  -inkey pki/admin-petr.key -in pki/admin-petr.pem -certfile pki/ca.pem \
+  -out admin-petr.p12
+```
+
+Vzniklý `.p12` naimportuj do prohlížeče (Firefox: *Nastavení → Certifikáty → Vaše
+certifikáty*; Chrome/Windows: dvojklik na soubor). Aby prohlížeč nehlásil neznámou
+autoritu, přidej `pki/ca.pem` mezi důvěryhodné CA.
+
+> Bez certifikátu vrátí server 401 a spojení neprojde — to je záměr, ne chyba.
+
+Textový přehled pro shell zůstává na `/status`:
+
+```sh
+curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
+  https://172.24.0.60:8443/status
+```
+
+---
+
 ## Jak napsat vlastní zálohovací skript
 
 Skript = dva soubory ve `scripts/<jmeno>/`: **kód** a **manifest**.
@@ -550,11 +601,27 @@ Sloupec „role" platí při zapnutém mTLS — viz
 | `POST /api/v1/instances/{id}/run` | admin | **manuální spuštění** („spusť teď") |
 | `GET /api/v1/instances` | admin | instance včetně `next_run` (secrets maskované) |
 | `GET /api/v1/runs?limit=N` | admin | historie běhů, nejnovější první |
+| `GET /api/v1/runs/{id}` | admin | detail jednoho běhu |
 | `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | admin | zachycený výstup běhu |
-| `GET /api/v1/runners` | admin | evidované runnery (platforma, `last_seen`) |
+| `GET /api/v1/runs/{id}/tail?offset=N&stream=` | admin | přírůstek výstupu — základ živého tailu |
+| `GET /api/v1/runners` | admin | evidované runnery (stav, platforma, `last_seen`) |
+| `POST /api/v1/runners/{id}/approve` | admin | schválí žádost a podepíše certifikát |
+| `POST /api/v1/runners/{id}/reject` | admin | zamítne žádost |
 | `GET /api/v1/instances/{id}/repo` | admin | velikost restic repozitáře a počet snapshotů |
 | `/restic/{instance}/…` | runner (vlastní) / admin | restic REST backend pro souborové zálohy |
-| `GET /` | admin | textová status stránka |
+| `GET /` | admin | [web UI](#web-ui) (zabalené v binárce) |
+| `GET /status` | admin | textová status stránka pro shell |
+
+Na **bootstrap portu** (plain HTTP, viz [instalace runneru](#instalace-runneru-na-zálohovaný-server))
+běží jen tohle — dostupné i bez certifikátu, protože nový host žádný nemá:
+
+| Metoda a cesta | Účel |
+|---|---|
+| `GET /arcatum_runner/install.sh` | instalátor, generovaný s adresou serveru |
+| `GET /arcatum_runner/arcatum-runner-<os>-<arch>` | binárka runneru |
+| `GET /arcatum_runner/ca.pem`, `…/dispatch-signing.pub` | veřejné trust materiály |
+| `POST /api/v1/enroll` | podání žádosti o certifikát (CSR) |
+| `GET /api/v1/enroll/{id}` | vyzvednutí podepsaného certifikátu |
 
 Hodnoty secrets API **nikdy nevrací** (jen názvy, maskované `***`). Skutečné hodnoty
 opouštějí server pouze v úloze doručené vlastnímu runneru.
@@ -566,7 +633,8 @@ server tak nemůže přepsat výsledky jiného.
 
 ## Ladění skriptů
 
-Ladění bylo od začátku prioritou, takže:
+Nejpohodlnější cesta je [web UI](#web-ui): záložka **Instance** → **spustit teď**, pak
+klik na běh a sleduješ živý tail výstupu. Ze shellu totéž:
 
 ```sh
 # 1) spustit hned, bez čekání na rozvrh
@@ -581,21 +649,85 @@ curl "http://127.0.0.1:8443/api/v1/runs/run-1/output?stream=stderr"
 ```
 
 Výstup se ukládá do `backup_dir/runs/<run_id>/{stdout,stderr}.log`, takže do něj lze
-kdykoli nahlédnout i přímo na serveru. Chystá se živý tail ve web UI a dry-run režim.
+kdykoli nahlédnout i přímo na serveru. Chystá se dry-run režim.
 
 ---
 
 ## Instalace runneru na zálohovaný server
 
-Zamýšlený tvar (instalátor se dopisuje):
+Na zálohovaném serveru stačí jeden příkaz:
 
 ```sh
-curl -LsSf http://172.24.0.60/arcatum_runner/install.sh | sh
+curl -LsSf http://172.24.0.60/arcatum_runner/install.sh | sudo sh
 ```
 
-Instalátor stáhne statický binár, založí systemd službu, vytvoří `runner.toml`
-s adresou serveru (odvozenou z instalační URL) a vygeneruje runneru identitu (klíč
-+ CSR), kterou server po schválení podepíše.
+Skript stáhne binárku pro danou platformu, `ca.pem` a podepisovací veřejný klíč, vypíše
+`runner.toml`, nainstaluje systemd službu a spustí ji. **Adresu serveru si odvodí z URL,
+ze které se sám stáhl** — nezadáváš ji tedy dvakrát. Opakované spuštění binárku
+aktualizuje, ale existující `runner.toml` nechá být.
+
+Pak už zbývá jen **schválit hosta ve webu** (záložka Runnery). Do té doby runner
+opakovaně dotazuje a nic nedělá — to je v pořádku.
+
+```sh
+systemctl status arcatum-runner
+journalctl -u arcatum-runner -f
+```
+
+### Jak runner získá certifikát (enrollment)
+
+Privátní klíč **nikdy neopustí zálohovaný server**:
+
+1. Runner si při prvním startu vygeneruje vlastní klíč a pošle jen **žádost o podpis** (CSR)
+2. Server ji zapíše jako **`pending`** — nic jí zatím nevěří a žádnou práci nepřidělí
+3. Ty ji schválíš ve webu; vidíš přitom **IP adresu a fingerprint žádosti**, takže poznáš,
+   že jde o pravý host
+4. Server CSR podepíše a runner si certifikát vyzvedne
+5. Od té chvíle jde všechno přes mTLS
+
+Schválení je hlavní bezpečnostní pojistka. Podvržená žádost bez tvého kliknutí nic nezmůže,
+a **u už schváleného runneru server další žádost odmítne** (HTTP 409) — nikdo ti tedy
+nemůže přepsat certifikát běžícího hosta. Zamítnutí runneru ve webu ho odřízne okamžitě,
+i kdyby ještě držel platný certifikát.
+
+### Co k tomu server potřebuje
+
+Bootstrap běží na **samostatném plain-HTTP portu**. Nemůže sdílet ten hlavní: mTLS
+listener vyžaduje klientský certifikát a nový host žádný nemá — spojení by neprošlo už
+při handshaku.
+
+```toml
+# server.toml
+[bootstrap]
+listen   = "0.0.0.0:80"
+dist_dir = "/central_backup/arcatum/dist"       # arcatum-runner-linux-amd64, …
+api_url  = "https://172.24.0.60:8443"           # kam se runner bude hlásit
+ca_key   = "/central_backup/arcatum/pki/ca.key" # podepisuje schválené žádosti
+```
+
+Binárky pro publikování se sestaví takto:
+
+```sh
+GOOS=linux GOARCH=amd64 go build -o /central_backup/arcatum/dist/arcatum-runner-linux-amd64 ./cmd/runner
+GOOS=linux GOARCH=arm64 go build -o /central_backup/arcatum/dist/arcatum-runner-linux-arm64 ./cmd/runner
+```
+
+Bootstrap port vydává **jen** `install.sh`, binárky, `ca.pem`, podepisovací veřejný klíč
+a enrollment endpointy. Nic z toho není tajné a administrátorské API tam není dostupné.
+
+> **Pozor na `curl … | sh`:** zálohovaný server si spustí jako root skript stažený ze
+> sítě. Přes plain HTTP ho může kdokoli s přístupem k provozu vnitřní sítě vyměnit. Pro
+> interní síť Xtuning je to běžný kompromis; kdo chce víc, může `ca.pem` rozdat předem
+> (např. konfiguračním nástrojem) a stahovat přes plně ověřené HTTPS.
+
+### Ruční vydání certifikátu
+
+Enrollment nepotřebuješ, když certifikát vydáš sám — pak stačí soubory nakopírovat
+a runner se enrollmentem vůbec nezabývá:
+
+```sh
+go run ./cmd/arcatum-ca runner -dir pki -id web-01
+```
 
 ---
 
@@ -627,11 +759,12 @@ statický binár bez runtime závislostí.
 - **Zálohování souborů přes restic** — repozitář na serveru (vlastní restic REST backend),
   dedup a inkrementální snapshoty, izolace repozitářů mezi runnery
 - **Retence (GFS)** — `forget --prune` po úspěšné záloze, omezené na vlastní snapshoty
+- **Web UI** zabalené v binárce — běhy, instance, runnery, **živý tail výstupu**, „spustit teď"
+- **Instalace jedním příkazem** (`install.sh`) a **enrollment** — runner si vygeneruje vlastní
+  klíč, pošle jen CSR a čeká na schválení ve webu
 - Bezpečné předání secrets (dočasný soubor, ne env), maskování v API, ověření SHA-256 artefaktu
 
 **Chybí (další fáze):**
-- **Enrollment** runneru (dnes se certifikáty generují a rozdávají ručně; `sign-csr` už existuje)
-- **Web UI** včetně živého tailu výstupu
 - **Restore přes API/web** (dnes se obnovuje přímo resticem s admin certifikátem)
 - **Notifikace** při selhání (e-mail/Slack)
 - Správa instancí přes API/web (dnes seed z JSON), auto-update runneru

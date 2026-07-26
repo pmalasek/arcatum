@@ -22,8 +22,8 @@ Instalace runneru:
 curl -LsSf http://172.24.0.60/arcatum_runner/install.sh | sh
 ```
 
-Install skript stáhne statický binár, založí systemd službu a vygeneruje runneru
-identitu (klíč + CSR), kterou server při prvním kontaktu schválí (enrollment).
+Install skript stáhne statický binár, založí systemd službu a runner si vygeneruje
+vlastní identitu (klíč + CSR); certifikát dostane po schválení operátorem — viz §11.
 
 ---
 
@@ -83,7 +83,7 @@ arcatum/
 ├── internal/
 │   ├── server/           # scheduler, API, DB vrstva, storage
 │   └── runner/           # executor skriptů, restic wrapper, streaming
-├── web/                  # embed.FS – jednoduché web UI
+├── web/                  # web UI zabalené do binárky (embed.FS)
 ├── scripts/              # DEFINICE skriptů (kód + manifest) – verzované v gitu, bez secrets
 │   └── example/
 │       ├── mysql_backup.sh       # nebo binárka (type=binary)
@@ -266,9 +266,10 @@ svázán s konkrétním kódem.
 odpovídat `runner_id` instance. Pokus vydávat se za jiný host končí 403 (neselhává
 tiše). Runner také nemůže hlásit výsledky běhu, který nebyl přidělen jemu.
 
-- **Enrollment** — zatím ruční: certifikáty generuje `deploy/gen-certs.sh` /
-  `cmd/arcatum-ca` a rozdávají se s instalací. `CA.SignCSR` a `CreateCSR` už existují
-  jako stavební kameny pro automatický flow (runner pošle CSR → admin schválí → cert).
+- **Enrollment** — automatický: runner si vygeneruje vlastní klíč (ten **nikdy neopustí
+  host**), pošle jen CSR, server ho zapíše jako `pending`, operátor schválí ve webu
+  a runner si podepsaný certifikát vyzvedne. Detail v §11. Ruční vydání přes
+  `arcatum-ca runner` zůstává jako alternativa.
 - **Secrets** — hesla nikdy v plaintextu v `scripts/`; předávají se v úloze a na
   runneru dočasným souborem (ne env, viz §5.3). V DB jsou **šifrovaná** (`enc:v1:` +
   base64) a ciphertext je přes AAD svázán s **instancí a názvem parametru** — kdo umí
@@ -286,10 +287,20 @@ tiše). Runner také nemůže hlásit výsledky běhu, který nebyl přidělen j
 
 ## 8. Ladění skriptů (priorita zadavatele)
 
-- **Manuální trigger** z web UI: „spusť teď na hostu X".
-- **Živý tail** stdout/stderr ve webu během běhu.
-- **Dry-run** režim.
-- Verbose log a uchování posledních N běhů pro srovnání.
+- ✓ **Manuální trigger** z web UI („spustit teď") i přes API.
+- ✓ **Živý tail** stdout/stderr ve webu během běhu.
+- ✓ Uchování běhů a jejich výstupů pro srovnání (`backup_dir/runs/<run_id>/`).
+- **Dry-run** režim — zbývá.
+
+**Jak je živý tail udělaný:** žádné websockety ani SSE. Prohlížeč se ptá
+`GET /api/v1/runs/{id}/tail?offset=N` a server vrátí jen přírůstek plus nový offset
+(`handleRunTail` + `Store.ReadOutputFrom`). Je to jednodušší, přežije to odpadnutí
+spojení a nepotřebuje to na serveru žádný stav.
+
+Jedna subtilita, která rozhoduje o tom, jestli se neztratí poslední řádky: stav běhu se
+čte **před** výstupem. Když úloha dobehne mezi tím, odpověď ještě říká „running", takže
+si klient vyžádá ještě jeden dotaz. Při obráceném pořadí by mohl dostat `done=true`
+a přijít o výstup zapsaný po čtení.
 
 ---
 
@@ -383,9 +394,107 @@ v1/v2, skrytí rozpracovaných uploadů, autorizace per repozitář, sestavení 
 a **test, že se router poskládá bez kolizí** (tuhle chybu unit testy volající handlery
 přímo minuly a odhalil ji až E2E běh).
 
-**Zatím vědomě chybí (další fáze):** automatický enrollment (dnes ruční distribuce
-certifikátů), web UI, restore přes API/web (dnes přímo resticem s admin certifikátem),
-notifikace, správa instancí přes API (dnes seed z JSON), revokace a rotace klíčů.
+### Fáze G — web UI ✓
+UI je v `web/` a zabalené do binárky přes `embed.FS` (balíček `arcatum/web`), servírované
+z `/` pod stejnou admin autorizací jako API. Textový přehled se přesunul na `/status`.
+Vanilla JS bez build stepu — cílem je, aby server zůstal jeden samostatný soubor.
+Nové endpointy: `GET /api/v1/runs/{id}` a `GET /api/v1/runs/{id}/tail?offset=`.
+
+Obsah: záložky Běhy / Instance / Runnery, detail běhu se **živým tailem**, přepínač
+stdout/stderr, „sledovat" (autoscroll) a tlačítko **spustit teď** (§8).
+
+**Ověřeno E2E:** UI i assety se servírují (HTTP 200), bez certifikátu spojení neprojde,
+každý endpoint, který UI volá, odpovídá 200. Živý tail odsimulován proti skutečně běžící
+úloze: přírůstky bez duplikátů i mezer, `done=true` teprve s posledním řádkem.
+Jednotkové testy: `ReadOutputFrom` (offset, prázdný soubor, cap, offset za koncem,
+oddělení stdout/stderr), tail přes celý životní cyklus běhu, servírování assetů
+a jejich Content-Type, admin ochrana UI.
+
+**Nevykresleno v prohlížeči** — v tomhle prostředí není headless browser, takže vzhled
+UI ověřen nebyl, jen že se soubory servírují a API pod nimi funguje.
+
+### Fáze H — instalace jedním příkazem a enrollment ✓
+Viz §11.
+
+**Zatím vědomě chybí (další fáze):** restore přes API/web (dnes přímo resticem s admin
+certifikátem), notifikace, dry-run, správa instancí přes API (dnes seed z JSON),
+revokace a rotace klíčů, auto-update runneru.
+
+---
+
+## 11. Instalace runneru a enrollment
+
+### Proč samostatný plain-HTTP listener
+
+Nový host nemá klientský certifikát, a hlavní listener má
+`RequireAndVerifyClientCert` — spojení by neprošlo už při TLS handshaku. Bootstrap
+soubory proto obsluhuje **druhý listener** (`[bootstrap] listen`, typicky `:80`,
+`internal/server/bootstrap.go`) a vydává **jen**:
+
+```
+/arcatum_runner/install.sh              generovaný instalátor
+/arcatum_runner/arcatum-runner-<os>-<arch>
+/arcatum_runner/ca.pem
+/arcatum_runner/dispatch-signing.pub
+POST /api/v1/enroll        podání CSR
+GET  /api/v1/enroll/{id}   vyzvednutí certifikátu
+```
+
+Nic z toho není tajné: CA certifikát a podepisovací **veřejný** klíč jsou veřejné svou
+povahou, CSR nese jen veřejný klíč a vydaný certifikát je bez privátního klíče
+nepoužitelný. Administrátorské API na tomto portu **není** (pokryto testem).
+
+### install.sh se generuje za běhu
+
+Šablona `internal/server/install.sh.tmpl` (embedded) se renderuje per-request a adresu
+serveru bere z **Host hlavičky requestu** — runner se tak konfiguruje na tu adresu, ze
+které se právě stáhl, a nikde se nezadává dvakrát. `api_url` (mTLS port) je z configu.
+Opakovaná instalace binárku aktualizuje, ale existující `runner.toml` nechá být.
+
+### Tok enrollmentu
+
+```
+ runner (nový host)                       server
+   1. vygeneruje vlastní klíč (zůstává)
+   2. POST /api/v1/enroll  {CSR}          → status pending, uloží IP + fingerprint
+   3. GET /api/v1/enroll/{id} … pending      (operátor vidí žádost ve webu)
+                                          ← operátor schválí → SignCSR
+   4. GET /api/v1/enroll/{id} → cert      zapíše cert, přejde na mTLS
+```
+
+**Schválení je bezpečnostní pojistka**, ne formalita — endpoint musí být dostupný bez
+autentizace, takže žádost může podat kdokoli ze sítě, ale bez schválení nedostane nic.
+Aby šla podvržená žádost poznat, ukládá se **IP adresa** a **fingerprint** a UI je
+zobrazuje.
+
+Rozhodnutá pravidla:
+- **Opakované podání během `pending` je povolené** — přeinstalace je běžná věc.
+- **U schváleného runneru se další žádost odmítne (409)** — jinak by kdokoli ze sítě
+  přepsal certifikát běžícího hosta.
+- **CN v CSR musí odpovídat `runner_id`**, jinak by operátor schvaloval jinou identitu,
+  než jaká se vydá.
+- **Zamítnutý runner je odmítnut i s platným certifikátem** (kontrola při checkinu), takže
+  zamítnutí platí okamžitě a nečeká na revokaci.
+- Runnery s ručně vydaným certifikátem mají stav `approved` **defaultně** (migrace), aby
+  upgrade nerozbil existující instalace.
+
+### Databáze
+
+Sloupce `status`, `csr`, `cert_pem`, `cert_fingerprint`, `enroll_ip`, `enrolled_at`,
+`approved_at` v `runners`. Přidávají se **migrací** (`addColumns` + `migrate()` v
+`store.go`), protože `CREATE TABLE IF NOT EXISTS` by existující DB neupravil.
+
+### Ověřeno E2E
+Celý tok proti běžícímu serveru: stažení `install.sh` (syntaxe ověřena `bash -n`,
+obsahuje správné adresy) → runner si vygeneroval klíč `0600` a poslal CSR → server ho
+vedl jako `pending` s IP a fingerprintem → schválení přes admin API → runner si vyzvedl
+certifikát (`CN=backup-cental, OU=runner`, podepsaný Arcatum CA) → přešel na mTLS →
+**proběhla skutečná restic záloha s podepsanou úlohou**. Negativně: útočníkova žádost
+o už schváleného runnera → 409, admin API na bootstrap portu → 404.
+
+**Neověřeno:** root části `install.sh` (zápis do `/usr/local/bin`, `/etc`, instalace
+systemd unit) se v tomto prostředí nespouštěly — ověřena je syntaxe skriptu a jeho
+vygenerovaná konfigurace, kterou runner reálně použil.
 
 **Vyzkoušení lokálně:** viz [README — Rychlý start](../README.md#rychlý-start-lokální-vyzkoušení)
 a [Zabezpečení](../README.md#zabezpečení-mtls-a-podpis-úloh).

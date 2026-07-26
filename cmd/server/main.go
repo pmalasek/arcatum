@@ -60,6 +60,7 @@ func main() {
 
 	opts := server.Options{RequireClientCert: cfg.TLS.Enabled()}
 	var tlsConfig *tls.Config
+	var signingPubPEM []byte
 	if cfg.TLS.Enabled() {
 		if tlsConfig, err = crypto.ServerTLSConfig(cfg.TLS.Cert, cfg.TLS.Key, cfg.TLS.CACert); err != nil {
 			logger.Fatalf("tls: %v", err)
@@ -69,11 +70,44 @@ func main() {
 			logger.Fatalf("signing key: %v", err)
 		}
 		opts.Signer = signer
+		// Derived from the loaded key, so what runners verify with always matches what
+		// the server signs with.
+		if signingPubPEM, err = signer.Public(); err != nil {
+			logger.Fatalf("signing public key: %v", err)
+		}
+	}
+	// The CA is only needed to sign enrollment requests from new runners.
+	if cfg.Bootstrap.Enabled() {
+		ca, err := crypto.LoadCA(cfg.TLS.CACert, cfg.Bootstrap.CAKey)
+		if err != nil {
+			logger.Fatalf("bootstrap CA: %v", err)
+		}
+		opts.CA = ca
 	}
 
 	srv, err := server.New(store, cfg.Server.Scripts, loc, logger, opts)
 	if err != nil {
 		logger.Fatalf("init server: %v", err)
+	}
+
+	// The bootstrap listener is plain HTTP on purpose: a host that has no certificate
+	// yet cannot get through the mTLS handshake, so this is what install.sh talks to.
+	if cfg.Bootstrap.Enabled() {
+		bootstrapSrv := &http.Server{
+			Addr: cfg.Bootstrap.Listen,
+			Handler: srv.BootstrapHandler(server.BootstrapConfig{
+				DistDir:       cfg.Bootstrap.DistDir,
+				CACert:        cfg.TLS.CACert,
+				SigningPubPEM: signingPubPEM,
+				APIURL:        cfg.Bootstrap.APIURL,
+			}),
+		}
+		go func() {
+			logger.Printf("  bootstrap (plain HTTP) on %s — install.sh and enrollment", cfg.Bootstrap.Listen)
+			if err := bootstrapSrv.ListenAndServe(); err != nil {
+				logger.Printf("bootstrap listener stopped: %v", err)
+			}
+		}()
 	}
 
 	httpSrv := &http.Server{

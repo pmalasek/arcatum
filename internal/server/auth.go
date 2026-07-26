@@ -57,6 +57,40 @@ func (s *Server) runnerIdentity(r *http.Request, claimed string) (string, error)
 	return id, nil
 }
 
+// activeRunnerIdentity resolves the calling runner and refuses one that an operator has
+// rejected. Every path a runner can take must go through this rather than
+// runnerIdentity: a rejected host still holds a cryptographically valid certificate
+// until it expires, so refusing it is an application-level decision that has to be made
+// consistently. Checking it only at check-in would leave the backup repository open.
+func (s *Server) activeRunnerIdentity(r *http.Request, claimed string) (string, error) {
+	id, err := s.runnerIdentity(r, claimed)
+	if err != nil {
+		return "", err
+	}
+	if err := s.checkRunnerNotRejected(id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// checkRunnerNotRejected refuses a runner that has been rejected.
+func (s *Server) checkRunnerNotRejected(runnerID string) error {
+	if !s.requireClientCert {
+		return nil // development mode: no identity to act on
+	}
+	status, err := s.store.RunnerStatus(runnerID)
+	if err != nil {
+		// Failing closed would break every runner on a database hiccup; log and allow,
+		// since the certificate itself was already verified.
+		s.log.Printf("runner status lookup for %q failed: %v", runnerID, err)
+		return nil
+	}
+	if status == EnrollRejected {
+		return fmt.Errorf("runner %q has been rejected", runnerID)
+	}
+	return nil
+}
+
 // adminOnly wraps a handler so it can only be reached with an admin certificate.
 func (s *Server) adminOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

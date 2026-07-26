@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arcatum</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Arcatum</h1>
+  <span class="sub">zálohovací systém — Xtuning</span>
+  <span id="conn" class="conn"></span>
+</header>
+
+<nav>
+  <button class="tab active" data-view="runs">Běhy</button>
+  <button class="tab" data-view="instances">Instance</button>
+  <button class="tab" data-view="runners">Runnery</button>
+</nav>
+
+<main>
+  <!-- Seznam běhů -->
+  <section id="view-runs" class="view">
+    <table>
+      <thead>
+        <tr><th>Běh</th><th>Instance</th><th>Stav</th><th>Kód</th><th>Data</th><th>Začátek</th><th>Trvání</th><th></th></tr>
+      </thead>
+      <tbody id="runs-body"><tr><td colspan="8" class="empty">načítám…</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- Instance -->
+  <section id="view-instances" class="view hidden">
+    <table>
+      <thead>
+        <tr><th>Instance</th><th>Skript</th><th>Runner</th><th>Příští běh</th><th>Repozitář</th><th></th></tr>
+      </thead>
+      <tbody id="instances-body"><tr><td colspan="6" class="empty">načítám…</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- Runnery -->
+  <section id="view-runners" class="view hidden">
+    <table>
+      <thead>
+        <tr><th>Runner</th><th>Stav</th><th>Platforma</th><th>Fingerprint / IP</th><th>Naposledy viděn</th><th></th></tr>
+      </thead>
+      <tbody id="runners-body"><tr><td colspan="6" class="empty">načítám…</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- Detail běhu s živým tailem -->
+  <section id="view-detail" class="view hidden">
+    <div class="detail-head">
+      <button id="back" class="ghost">‹ zpět</button>
+      <h2 id="detail-title">Běh</h2>
+      <span id="detail-status" class="badge"></span>
+      <span class="grow"></span>
+      <label class="follow"><input type="checkbox" id="follow" checked> sledovat</label>
+      <select id="stream">
+        <option value="stdout">stdout</option>
+        <option value="stderr">stderr</option>
+      </select>
+    </div>
+    <dl id="detail-meta" class="meta"></dl>
+    <pre id="log" class="log"></pre>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

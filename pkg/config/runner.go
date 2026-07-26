@@ -25,7 +25,10 @@ type RunnerSigning struct {
 
 // RunnerSection holds the runner's process-level settings.
 type RunnerSection struct {
-	Server       string `toml:"server"`        // base URL of arcatum-server, e.g. https://172.24.0.60:8443
+	Server string `toml:"server"` // base URL of arcatum-server, e.g. https://172.24.0.60:8443
+	// EnrollServer is the plain-HTTP bootstrap address used only to obtain a
+	// certificate on first start; afterwards everything goes over mTLS to Server.
+	EnrollServer string `toml:"enroll_server"`
 	PollInterval string `toml:"poll_interval"` // how often to check in, e.g. "30s"
 	DataDir      string `toml:"data_dir"`      // runner state (identity, temp dispatch files)
 }

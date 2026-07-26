@@ -46,6 +46,27 @@ func main() {
 	host, _ := os.Hostname()
 	req := proto.CheckinRequest{RunnerID: host, Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// First start after install.sh: no certificate yet. Generate a key locally, ask for
+	// a certificate, and wait until an operator approves it.
+	if runner.NeedsEnrollment(cfg.TLS.Cert, cfg.TLS.Key) {
+		enrollCfg := runner.EnrollConfig{
+			RunnerID:     req.RunnerID,
+			Hostname:     req.Hostname,
+			OS:           req.OS,
+			Arch:         req.Arch,
+			EnrollServer: cfg.Runner.EnrollServer,
+			CertPath:     cfg.TLS.Cert,
+			KeyPath:      cfg.TLS.Key,
+			PollInterval: interval,
+		}
+		if err := runner.Enroll(ctx, enrollCfg, logger); err != nil {
+			logger.Fatalf("enrollment: %v", err)
+		}
+	}
+
 	// With mTLS configured, the server identifies this runner by its certificate's
 	// common name, so the certificate must be issued for this runner_id.
 	httpClient := &http.Client{Timeout: 0} // no global timeout: runs stream for as long as they take
@@ -77,9 +98,6 @@ func main() {
 		logger.Printf("WARNING: no [tls] configured — plain HTTP and job signatures are NOT verified.")
 		logger.Printf("         Development only. See README: Zabezpečení (mTLS a podpis úloh).")
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	if *once {
 		if err := agent.Tick(ctx); err != nil {

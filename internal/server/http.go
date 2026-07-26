@@ -11,6 +11,7 @@ import (
 
 	"arcatum/pkg/crypto"
 	"arcatum/pkg/proto"
+	"arcatum/web"
 )
 
 // Server wires the HTTP API to the store, scheduler and script catalog.
@@ -21,6 +22,9 @@ type Server struct {
 	log               *log.Logger
 	signer            crypto.Signer
 	requireClientCert bool
+	// ca signs enrollment requests. Nil when the server has no CA key, in which case
+	// approving a runner is not possible and says so.
+	ca *crypto.CA
 }
 
 // Options carries the security wiring. Both fields are empty/false in development
@@ -30,6 +34,8 @@ type Options struct {
 	Signer crypto.Signer
 	// RequireClientCert enables certificate-based identity and role checks.
 	RequireClientCert bool
+	// CA signs enrollment requests from newly installed runners.
+	CA *crypto.CA
 }
 
 // New builds a Server over an open Store: loads the script catalog and starts
@@ -60,6 +66,7 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		log:               logger,
 		signer:            opts.Signer,
 		requireClientCert: opts.RequireClientCert,
+		ca:                opts.CA,
 	}, nil
 }
 
@@ -72,15 +79,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/instances/{id}/run", s.adminOnly(s.handleTrigger))
 	mux.HandleFunc("GET /api/v1/instances", s.adminOnly(s.handleListInstances))
 	mux.HandleFunc("GET /api/v1/runs", s.adminOnly(s.handleListRuns))
+	mux.HandleFunc("GET /api/v1/runs/{id}", s.adminOnly(s.handleRunDetail))
 	mux.HandleFunc("GET /api/v1/runs/{id}/output", s.adminOnly(s.handleRunOutput))
+	mux.HandleFunc("GET /api/v1/runs/{id}/tail", s.adminOnly(s.handleRunTail))
 	mux.HandleFunc("GET /api/v1/runners", s.adminOnly(s.handleListRunners))
+	mux.HandleFunc("POST /api/v1/runners/{id}/approve", s.adminOnly(s.handleApproveRunner))
+	mux.HandleFunc("POST /api/v1/runners/{id}/reject", s.adminOnly(s.handleRejectRunner))
 	mux.HandleFunc("GET /api/v1/instances/{id}/repo", s.adminOnly(s.handleRepoInfo))
 	// restic's REST backend: runners push file backups straight into the server's
 	// repository for their own instances. Authorization is per repository (restic.go).
 	mux.HandleFunc("/restic/", s.handleRestic)
-	// "/{$}" matches only the root path; a bare "GET /" would be a catch-all and
-	// conflict with "/restic/".
-	mux.HandleFunc("GET /{$}", s.adminOnly(s.handleIndex))
+	// Plain-text status, handy from a shell where the browser UI is not.
+	mux.HandleFunc("GET /status", s.adminOnly(s.handleIndex))
+	// The embedded web UI. A bare "GET /" would be a catch-all and conflict with
+	// "/restic/", so the root is matched exactly and assets get their own patterns.
+	uiHandler := s.adminOnly(http.FileServerFS(web.FS()).ServeHTTP)
+	mux.HandleFunc("GET /{$}", uiHandler)
+	for _, asset := range []string{"app.js", "style.css", "index.html"} {
+		mux.HandleFunc("GET /"+asset, uiHandler)
+	}
 	return mux
 }
 
@@ -91,7 +108,9 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	runnerID, err := s.runnerIdentity(r, req.RunnerID)
+	// A rejected runner is refused even though it still holds a valid certificate, so
+	// rejecting one in the UI takes effect without waiting for revocation.
+	runnerID, err := s.activeRunnerIdentity(r, req.RunnerID)
 	if err != nil {
 		s.log.Printf("checkin denied: %v", err)
 		http.Error(w, err.Error(), http.StatusForbidden)
@@ -176,7 +195,7 @@ func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 // may only report on runs dispatched to it, so one host cannot overwrite another's
 // results.
 func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
-	runnerID, err := s.runnerIdentity(r, "")
+	runnerID, err := s.activeRunnerIdentity(r, "")
 	if err != nil && s.requireClientCert {
 		s.log.Printf("updates denied: %v", err)
 		http.Error(w, err.Error(), http.StatusForbidden)
@@ -283,6 +302,69 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, runs)
+}
+
+// handleRunDetail returns one run.
+func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
+	run, err := s.store.Run(r.PathValue("id"))
+	if err != nil || run == nil {
+		http.Error(w, "unknown run", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, run)
+}
+
+// tailResponse is one chunk of a run's output plus where to continue from.
+type tailResponse struct {
+	Data   string    `json:"data"`
+	Offset int64     `json:"offset"`
+	Status RunStatus `json:"status"`
+	Done   bool      `json:"done"` // the run finished, so no more output is coming
+}
+
+// maxTailChunk caps one tail response, so a huge log cannot be pulled in one request.
+const maxTailChunk = 256 * 1024
+
+// handleRunTail returns output from ?offset= onwards. The web UI calls this repeatedly
+// while a run is in progress, which is how the live tail works without websockets.
+func (s *Server) handleRunTail(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("id")
+	run, err := s.store.Run(runID)
+	if err != nil || run == nil {
+		http.Error(w, "unknown run", http.StatusNotFound)
+		return
+	}
+	offset := int64(0)
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	data, newOffset, err := s.store.ReadOutputFrom(runID, r.URL.Query().Get("stream"), offset, maxTailChunk)
+	if err != nil {
+		s.log.Printf("tail run=%s: %v", runID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// The status was read *before* the output on purpose. If the run finishes in
+	// between, this response still says "running", so the client polls once more and
+	// cannot miss the final lines. Reading it afterwards could report "done" while
+	// output written after our read was still unsent.
+	writeJSON(w, tailResponse{
+		Data:   string(data),
+		Offset: newOffset,
+		Status: run.Status,
+		Done:   isTerminal(run.Status),
+	})
+}
+
+// isTerminal reports whether a run has reached a final state.
+func isTerminal(st RunStatus) bool {
+	switch st {
+	case StatusSuccess, StatusFailed, StatusError:
+		return true
+	}
+	return false
 }
 
 // handleRunOutput serves a run's captured output (?stream=stdout|stderr). This backs

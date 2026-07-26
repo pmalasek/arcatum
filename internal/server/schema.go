@@ -49,3 +49,20 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS idx_runs_instance ON runs(instance_id);
 CREATE INDEX IF NOT EXISTS idx_runs_created  ON runs(created_at DESC);
 `
+
+// addColumns lists columns added after the initial schema. They are applied only when
+// missing, so an existing database is upgraded in place instead of needing a rebuild.
+//
+// The enrollment columns default to 'approved'/empty on purpose: runners that already
+// exist got their certificate by hand, and their check-ins must keep working.
+var addColumns = []struct{ table, column, definition string }{
+	// Enrollment state: a runner that asked for a certificate starts as 'pending' and
+	// only becomes 'approved' once an operator says so.
+	{"runners", "status", "TEXT NOT NULL DEFAULT 'approved'"},
+	{"runners", "csr", "TEXT NOT NULL DEFAULT ''"},
+	{"runners", "cert_pem", "TEXT NOT NULL DEFAULT ''"},
+	{"runners", "cert_fingerprint", "TEXT NOT NULL DEFAULT ''"},
+	{"runners", "enroll_ip", "TEXT NOT NULL DEFAULT ''"},
+	{"runners", "enrolled_at", "INTEGER NOT NULL DEFAULT 0"},
+	{"runners", "approved_at", "INTEGER NOT NULL DEFAULT 0"},
+}
