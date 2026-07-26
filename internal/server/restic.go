@@ -127,7 +127,7 @@ func (s *Server) authorizeRepo(r *http.Request, instanceID string) error {
 		}
 		// A rejected runner must not reach the backups either, or rejecting it would
 		// stop new jobs while leaving the repository readable and writable.
-		return s.checkRunnerNotRejected(cert.Subject.CommonName)
+		return s.requireApprovedRunner(cert.Subject.CommonName)
 	default:
 		return fmt.Errorf("certificate role %q may not access repositories", role)
 	}

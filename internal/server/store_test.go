@@ -231,11 +231,13 @@ func TestRecordCheckinUpsertsRunner(t *testing.T) {
 	st, _ := openTestStore(t)
 	first := time.Now().Add(-time.Hour)
 	req := proto.CheckinRequest{RunnerID: "host-1", Hostname: "host-1", OS: "linux", Arch: "amd64"}
-	if err := st.RecordCheckin(req, first); err != nil {
+	expiry := time.Now().Add(825 * 24 * time.Hour)
+	if err := st.RecordCheckin(req, expiry, first); err != nil {
 		t.Fatalf("RecordCheckin: %v", err)
 	}
 	later := time.Now()
-	if err := st.RecordCheckin(req, later); err != nil {
+	// A later check-in without a certificate expiry must not erase the known one.
+	if err := st.RecordCheckin(req, time.Time{}, later); err != nil {
 		t.Fatalf("RecordCheckin again: %v", err)
 	}
 	runners, err := st.Runners()
@@ -358,5 +360,43 @@ func TestInstanceRedactedMasksSecretValues(t *testing.T) {
 	// The original must be untouched, or dispatch would ship masked secrets.
 	if in.Secrets["password"] != "hunter2" {
 		t.Errorf("Redacted mutated the original: %v", in.Secrets)
+	}
+}
+
+// The certificate expiry recorded at check-in is what lets the UI warn before a runner
+// silently stops working.
+func TestRecordCheckinTracksCertificateExpiry(t *testing.T) {
+	st, _ := openTestStore(t)
+	req := proto.CheckinRequest{RunnerID: "host-1", Hostname: "host-1", OS: "linux", Arch: "amd64"}
+	expiry := time.Now().Add(30 * 24 * time.Hour).Truncate(time.Millisecond)
+
+	if err := st.RecordCheckin(req, expiry, time.Now()); err != nil {
+		t.Fatalf("RecordCheckin: %v", err)
+	}
+	runners, err := st.Runners()
+	if err != nil || len(runners) != 1 {
+		t.Fatalf("Runners: %v (%d)", err, len(runners))
+	}
+	if !runners[0].CertNotAfter.Equal(expiry.UTC()) {
+		t.Errorf("cert_not_after = %s, want %s", runners[0].CertNotAfter, expiry.UTC())
+	}
+
+	// A check-in with no certificate (development mode) must keep the known expiry.
+	if err := st.RecordCheckin(req, time.Time{}, time.Now()); err != nil {
+		t.Fatalf("RecordCheckin: %v", err)
+	}
+	runners, _ = st.Runners()
+	if runners[0].CertNotAfter.IsZero() {
+		t.Error("a check-in without a certificate erased the known expiry")
+	}
+
+	// A renewed certificate updates it.
+	newExpiry := expiry.Add(365 * 24 * time.Hour)
+	if err := st.RecordCheckin(req, newExpiry, time.Now()); err != nil {
+		t.Fatalf("RecordCheckin: %v", err)
+	}
+	runners, _ = st.Runners()
+	if !runners[0].CertNotAfter.Equal(newExpiry.UTC()) {
+		t.Errorf("cert_not_after = %s, want the renewed %s", runners[0].CertNotAfter, newExpiry.UTC())
 	}
 }

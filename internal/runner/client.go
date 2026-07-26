@@ -28,6 +28,29 @@ func NewClient(base string, hc *http.Client) *Client {
 // BaseURL returns the server base URL, used to derive the restic repository address.
 func (c *Client) BaseURL() string { return c.base }
 
+// HTTPClient exposes the underlying client so renewal reuses the same mTLS connection
+// settings.
+func (c *Client) HTTPClient() *http.Client { return c.hc }
+
+// DeniedError is returned when the server refuses this runner and says why, so the
+// runner can tell "your certificate was revoked, ask for a new one" apart from "an
+// operator rejected you".
+type DeniedError struct {
+	Reason  string
+	Status  string
+	Message string
+}
+
+func (e *DeniedError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("server refused this runner (%s): %s", e.Reason, e.Message)
+	}
+	return fmt.Sprintf("server refused this runner: %s", e.Message)
+}
+
+// EnrollRequired reports whether the runner should obtain a new certificate.
+func (e *DeniedError) EnrollRequired() bool { return e.Reason == "enroll_required" }
+
 // Checkin asks the server for due work.
 func (c *Client) Checkin(ctx context.Context, req proto.CheckinRequest) (*proto.CheckinResponse, error) {
 	body, err := json.Marshal(req)
@@ -44,6 +67,23 @@ func (c *Client) Checkin(ctx context.Context, req proto.CheckinRequest) (*proto.
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+		var body struct {
+			Error  string `json:"error"`
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(payload, &body)
+		reason := body.Reason
+		if reason == "" {
+			reason = resp.Header.Get("X-Arcatum-Reason")
+		}
+		msg := body.Error
+		if msg == "" {
+			msg = string(bytes.TrimSpace(payload))
+		}
+		return nil, &DeniedError{Reason: reason, Status: resp.Status, Message: msg}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("checkin: server returned %s", resp.Status)
 	}

@@ -74,6 +74,22 @@ nav {
   color: var(--text);
 }
 
+/* Expiry warnings sit above the content: easy to notice, easy to ignore once read. */
+.warnings { padding: .75rem 1.25rem 0; display: grid; gap: .4rem; }
+.warning {
+  padding: .5rem .75rem;
+  border-radius: 6px;
+  font-size: .85rem;
+  border: 1px solid currentColor;
+}
+.warning.warn { color: var(--warn); }
+.warning.alert { color: var(--fail); }
+
+.expiry.warn { color: var(--warn); font-weight: 600; }
+.expiry.alert { color: var(--fail); font-weight: 600; }
+.expiry .days { opacity: .7; font-weight: 400; }
+.muted { color: var(--muted); }
+
 main { padding: 0 1.25rem 2rem; }
 .view {
   background: var(--panel);
@@ -135,6 +151,41 @@ button.action:hover { border-color: var(--accent); color: var(--accent); }
 button.action[disabled] { opacity: .5; cursor: default; }
 button.ghost { border-color: transparent; color: var(--muted); }
 button.ghost:hover { color: var(--text); }
+button.action.danger { color: var(--fail); }
+button.action.danger:hover { border-color: var(--fail); }
+
+.section-foot {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .7rem .8rem;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.section-foot .hint { color: var(--muted); font-size: .8rem; }
+.detail-head .hint { color: var(--muted); font-size: .8rem; }
+
+/* Breadcrumbs for browsing a snapshot */
+.crumbs {
+  padding: .5rem .8rem;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: .82rem;
+}
+.crumbs a { color: var(--accent); text-decoration: none; }
+.crumbs a:hover { text-decoration: underline; }
+.crumbs .sep { color: var(--muted); margin: 0 .15rem; }
+
+a.action {
+  display: inline-block;
+  text-decoration: none;
+  font-size: .82rem;
+  padding: .3rem .7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+a.action:hover { border-color: var(--accent); color: var(--accent); }
 
 .detail-head {
   display: flex;

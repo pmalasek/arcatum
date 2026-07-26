@@ -268,15 +268,22 @@ func (s *Store) Instance(id string) (*Instance, error) {
 
 // --- runners ----------------------------------------------------------------
 
-// RecordCheckin registers or refreshes a runner's last-seen state.
-func (s *Store) RecordCheckin(req proto.CheckinRequest, now time.Time) error {
+// RecordCheckin registers or refreshes a runner's last-seen state. certNotAfter is the
+// expiry of the certificate the runner presented; pass the zero time when there is none
+// (development mode). Taking it from the live connection means expiry is tracked for
+// hand-issued certificates as well as enrolled ones.
+func (s *Store) RecordCheckin(req proto.CheckinRequest, certNotAfter, now time.Time) error {
 	ms := toMillis(now)
 	_, err := s.db.Exec(`
-		INSERT INTO runners (id, hostname, os, arch, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO runners (id, hostname, os, arch, first_seen, last_seen, cert_not_after)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-		  hostname=excluded.hostname, os=excluded.os, arch=excluded.arch, last_seen=excluded.last_seen`,
-		req.RunnerID, req.Hostname, req.OS, req.Arch, ms, ms)
+		  hostname=excluded.hostname, os=excluded.os, arch=excluded.arch,
+		  last_seen=excluded.last_seen,
+		  -- Keep a known expiry if this check-in did not carry one.
+		  cert_not_after=CASE WHEN excluded.cert_not_after > 0
+		                      THEN excluded.cert_not_after ELSE runners.cert_not_after END`,
+		req.RunnerID, req.Hostname, req.OS, req.Arch, ms, ms, toMillis(certNotAfter))
 	return err
 }
 
@@ -296,10 +303,13 @@ type Runner struct {
 	LastSeen        time.Time `json:"last_seen"`
 	EnrolledAt      time.Time `json:"enrolled_at,omitempty"`
 	ApprovedAt      time.Time `json:"approved_at,omitempty"`
+	// CertNotAfter is when the runner's certificate expires. Zero means unknown, which
+	// is normal until the runner has checked in once.
+	CertNotAfter time.Time `json:"cert_not_after,omitempty"`
 }
 
 const runnerCols = `id, hostname, os, arch, status, cert_fingerprint, enroll_ip,
-                    first_seen, last_seen, enrolled_at, approved_at`
+                    first_seen, last_seen, enrolled_at, approved_at, cert_not_after`
 
 // Runners lists known runners: those waiting for approval first, then the rest by how
 // recently they checked in — so a pending request is never buried at the bottom.
@@ -313,13 +323,14 @@ func (s *Store) Runners() ([]*Runner, error) {
 	var out []*Runner
 	for rows.Next() {
 		var r Runner
-		var first, last, enrolled, approved int64
+		var first, last, enrolled, approved, notAfter int64
 		if err := rows.Scan(&r.ID, &r.Hostname, &r.OS, &r.Arch, &r.Status,
-			&r.CertFingerprint, &r.EnrollIP, &first, &last, &enrolled, &approved); err != nil {
+			&r.CertFingerprint, &r.EnrollIP, &first, &last, &enrolled, &approved, &notAfter); err != nil {
 			return nil, err
 		}
 		r.FirstSeen, r.LastSeen = fromMillis(first), fromMillis(last)
 		r.EnrolledAt, r.ApprovedAt = fromMillis(enrolled), fromMillis(approved)
+		r.CertNotAfter = fromMillis(notAfter)
 		out = append(out, &r)
 	}
 	return out, rows.Err()

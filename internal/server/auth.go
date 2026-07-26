@@ -2,8 +2,11 @@ package server
 
 import (
 	"crypto/x509"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"arcatum/pkg/crypto"
 )
@@ -57,24 +60,44 @@ func (s *Server) runnerIdentity(r *http.Request, claimed string) (string, error)
 	return id, nil
 }
 
-// activeRunnerIdentity resolves the calling runner and refuses one that an operator has
-// rejected. Every path a runner can take must go through this rather than
-// runnerIdentity: a rejected host still holds a cryptographically valid certificate
-// until it expires, so refusing it is an application-level decision that has to be made
-// consistently. Checking it only at check-in would leave the backup repository open.
+// Reasons a runner is turned away, sent as a machine-readable code so the runner can
+// tell "ask for a new certificate" apart from "an operator refused you".
+const (
+	// ReasonEnrollRequired means the certificate was revoked: the runner should enrol
+	// again and wait for approval.
+	ReasonEnrollRequired = "enroll_required"
+	// ReasonRejected means an operator refused this runner. Enrolling again would only
+	// fill the queue with requests nobody wants.
+	ReasonRejected = "rejected"
+)
+
+// notApprovedError carries the reason a runner was refused.
+type notApprovedError struct {
+	reason  string
+	message string
+}
+
+func (e *notApprovedError) Error() string { return e.message }
+
+// activeRunnerIdentity resolves the calling runner and refuses any runner that is not
+// approved. Every path a runner can take must go through this rather than
+// runnerIdentity: a revoked or rejected host still holds a cryptographically valid
+// certificate until it expires, so refusing it is an application-level decision that has
+// to be made consistently. Checking it only at check-in would leave the backup
+// repository open.
 func (s *Server) activeRunnerIdentity(r *http.Request, claimed string) (string, error) {
 	id, err := s.runnerIdentity(r, claimed)
 	if err != nil {
 		return "", err
 	}
-	if err := s.checkRunnerNotRejected(id); err != nil {
+	if err := s.requireApprovedRunner(id); err != nil {
 		return "", err
 	}
 	return id, nil
 }
 
-// checkRunnerNotRejected refuses a runner that has been rejected.
-func (s *Server) checkRunnerNotRejected(runnerID string) error {
+// requireApprovedRunner allows only an approved runner through.
+func (s *Server) requireApprovedRunner(runnerID string) error {
 	if !s.requireClientCert {
 		return nil // development mode: no identity to act on
 	}
@@ -85,10 +108,79 @@ func (s *Server) checkRunnerNotRejected(runnerID string) error {
 		s.log.Printf("runner status lookup for %q failed: %v", runnerID, err)
 		return nil
 	}
-	if status == EnrollRejected {
-		return fmt.Errorf("runner %q has been rejected", runnerID)
+	switch status {
+	case EnrollApproved:
+		return nil
+	case "":
+		// No record yet. The runner holds a certificate this CA issued, which is itself
+		// the authorization — a hand-issued runner has no row until its first check-in
+		// creates one (as approved).
+		return nil
+	case EnrollRejected:
+		return &notApprovedError{ReasonRejected,
+			fmt.Sprintf("runner %q has been rejected by an operator", runnerID)}
+	default:
+		// Pending: either enrolled and not approved yet, or its certificate was
+		// revoked. Either way the certificate it is holding is no longer trusted.
+		return &notApprovedError{ReasonEnrollRequired,
+			fmt.Sprintf("runner %q is not approved (%s) — enrol again", runnerID, status)}
 	}
-	return nil
+}
+
+// denyRunner answers a refused runner with the reason in a form it can act on.
+func (s *Server) denyRunner(w http.ResponseWriter, err error) {
+	reason := ""
+	var nae *notApprovedError
+	if errors.As(err, &nae) {
+		reason = nae.reason
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if reason != "" {
+		w.Header().Set("X-Arcatum-Reason", reason)
+	}
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "reason": reason})
+}
+
+// Identity describes the caller and the state of the certificate they used. The web UI
+// reads it to warn before that certificate expires — an admin certificate is valid for a
+// year by default, and the failure mode without a warning is a browser that suddenly
+// cannot connect.
+type Identity struct {
+	Name         string    `json:"name"`
+	Role         string    `json:"role"`
+	CertNotAfter time.Time `json:"cert_not_after,omitempty"`
+	DaysLeft     int       `json:"days_left,omitempty"`
+	// ServerCertNotAfter is when the server's own certificate expires. Runners stop
+	// trusting the server after that, so it needs watching too.
+	ServerCertNotAfter time.Time `json:"server_cert_not_after,omitempty"`
+	ServerDaysLeft     int       `json:"server_days_left,omitempty"`
+	// Secured reports whether mTLS is on at all; false means development mode.
+	Secured bool `json:"secured"`
+}
+
+// handleWhoAmI reports the caller's identity and certificate expiry.
+func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	id := Identity{Secured: s.requireClientCert}
+	if cert := peerCert(r); cert != nil {
+		id.Name = cert.Subject.CommonName
+		id.Role = crypto.CertRole(cert)
+		id.CertNotAfter = cert.NotAfter
+		id.DaysLeft = daysUntil(cert.NotAfter)
+	}
+	if !s.serverCertNotAfter.IsZero() {
+		id.ServerCertNotAfter = s.serverCertNotAfter
+		id.ServerDaysLeft = daysUntil(s.serverCertNotAfter)
+	}
+	writeJSON(w, id)
+}
+
+// daysUntil rounds down, so "0 days left" means it expires today rather than tomorrow.
+func daysUntil(t time.Time) int {
+	if t.IsZero() {
+		return 0
+	}
+	return int(time.Until(t).Hours() / 24)
 }
 
 // adminOnly wraps a handler so it can only be reached with an admin certificate.

@@ -25,6 +25,9 @@ type Server struct {
 	// ca signs enrollment requests. Nil when the server has no CA key, in which case
 	// approving a runner is not possible and says so.
 	ca *crypto.CA
+	// serverCertNotAfter is when this server's own certificate expires. Zero when mTLS
+	// is off.
+	serverCertNotAfter time.Time
 }
 
 // Options carries the security wiring. Both fields are empty/false in development
@@ -36,6 +39,9 @@ type Options struct {
 	RequireClientCert bool
 	// CA signs enrollment requests from newly installed runners.
 	CA *crypto.CA
+	// ServerCertNotAfter is this server's certificate expiry, surfaced in the UI so it
+	// does not lapse unnoticed.
+	ServerCertNotAfter time.Time
 }
 
 // New builds a Server over an open Store: loads the script catalog and starts
@@ -60,13 +66,14 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		}
 	}
 	return &Server{
-		store:             store,
-		sched:             sched,
-		catalog:           cat,
-		log:               logger,
-		signer:            opts.Signer,
-		requireClientCert: opts.RequireClientCert,
-		ca:                opts.CA,
+		store:              store,
+		sched:              sched,
+		catalog:            cat,
+		log:                logger,
+		signer:             opts.Signer,
+		requireClientCert:  opts.RequireClientCert,
+		ca:                 opts.CA,
+		serverCertNotAfter: opts.ServerCertNotAfter,
 	}, nil
 }
 
@@ -82,10 +89,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.adminOnly(s.handleRunDetail))
 	mux.HandleFunc("GET /api/v1/runs/{id}/output", s.adminOnly(s.handleRunOutput))
 	mux.HandleFunc("GET /api/v1/runs/{id}/tail", s.adminOnly(s.handleRunTail))
+	mux.HandleFunc("GET /api/v1/whoami", s.adminOnly(s.handleWhoAmI))
 	mux.HandleFunc("GET /api/v1/runners", s.adminOnly(s.handleListRunners))
 	mux.HandleFunc("POST /api/v1/runners/{id}/approve", s.adminOnly(s.handleApproveRunner))
 	mux.HandleFunc("POST /api/v1/runners/{id}/reject", s.adminOnly(s.handleRejectRunner))
+	mux.HandleFunc("POST /api/v1/runners/{id}/revoke", s.adminOnly(s.handleRevokeRunner))
+	mux.HandleFunc("POST /api/v1/runners/revoke-all", s.adminOnly(s.handleRevokeAllRunners))
+	// Renewal is authenticated by the runner's current certificate, not by an operator.
+	mux.HandleFunc("POST /api/v1/renew", s.handleRenew)
 	mux.HandleFunc("GET /api/v1/instances/{id}/repo", s.adminOnly(s.handleRepoInfo))
+	// Restore: browse the repository the server already holds and pull files back out.
+	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots", s.adminOnly(s.handleSnapshots))
+	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots/{snapshot}/ls", s.adminOnly(s.handleSnapshotLS))
+	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots/{snapshot}/download", s.adminOnly(s.handleRestoreDownload))
 	// restic's REST backend: runners push file backups straight into the server's
 	// repository for their own instances. Authorization is per repository (restic.go).
 	mux.HandleFunc("/restic/", s.handleRestic)
@@ -113,13 +129,19 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	runnerID, err := s.activeRunnerIdentity(r, req.RunnerID)
 	if err != nil {
 		s.log.Printf("checkin denied: %v", err)
-		http.Error(w, err.Error(), http.StatusForbidden)
+		s.denyRunner(w, err)
 		return
 	}
 	req.RunnerID = runnerID // the certificate is authoritative
 
 	now := time.Now()
-	if err := s.store.RecordCheckin(req, now); err != nil {
+	// Record when this runner's certificate expires, taken from the live connection so
+	// an operator can see it coming instead of the runner just stopping one day.
+	var certNotAfter time.Time
+	if cert := peerCert(r); cert != nil {
+		certNotAfter = cert.NotAfter
+	}
+	if err := s.store.RecordCheckin(req, certNotAfter, now); err != nil {
 		s.log.Printf("checkin: record runner %q: %v", runnerID, err)
 	}
 
@@ -198,7 +220,7 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	runnerID, err := s.activeRunnerIdentity(r, "")
 	if err != nil && s.requireClientCert {
 		s.log.Printf("updates denied: %v", err)
-		http.Error(w, err.Error(), http.StatusForbidden)
+		s.denyRunner(w, err)
 		return
 	}
 

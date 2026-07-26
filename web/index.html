@@ -16,8 +16,12 @@
 <nav>
   <button class="tab active" data-view="runs">Běhy</button>
   <button class="tab" data-view="instances">Instance</button>
+  <button class="tab" data-view="restore">Obnova</button>
   <button class="tab" data-view="runners">Runnery</button>
 </nav>
+
+<!-- Varování na blížící se expiraci certifikátů; skryté, dokud není co hlásit -->
+<div id="warnings" class="warnings hidden"></div>
 
 <main>
   <!-- Seznam běhů -->
@@ -40,14 +44,39 @@
     </table>
   </section>
 
+  <!-- Obnova: snapshoty → procházení → stažení -->
+  <section id="view-restore" class="view hidden">
+    <div class="detail-head">
+      <label class="follow">instance
+        <select id="restore-instance"><option value="">…</option></select>
+      </label>
+      <label class="follow">snapshot
+        <select id="restore-snapshot"><option value="">…</option></select>
+      </label>
+      <span class="grow"></span>
+      <span id="restore-info" class="hint"></span>
+    </div>
+    <div id="restore-crumbs" class="crumbs"></div>
+    <table>
+      <thead>
+        <tr><th>Název</th><th>Typ</th><th>Velikost</th><th>Změněno</th><th></th></tr>
+      </thead>
+      <tbody id="restore-body"><tr><td colspan="5" class="empty">vyber instanci</td></tr></tbody>
+    </table>
+  </section>
+
   <!-- Runnery -->
   <section id="view-runners" class="view hidden">
     <table>
       <thead>
-        <tr><th>Runner</th><th>Stav</th><th>Platforma</th><th>Fingerprint / IP</th><th>Naposledy viděn</th><th></th></tr>
+        <tr><th>Runner</th><th>Stav</th><th>Platforma</th><th>Fingerprint / IP</th><th>Certifikát platí do</th><th>Naposledy viděn</th><th></th></tr>
       </thead>
-      <tbody id="runners-body"><tr><td colspan="6" class="empty">načítám…</td></tr></tbody>
+      <tbody id="runners-body"><tr><td colspan="7" class="empty">načítám…</td></tr></tbody>
     </table>
+    <div class="section-foot">
+      <button id="revoke-all" class="action danger">zneplatnit certifikáty všech runnerů</button>
+      <span class="hint">při podezření na kompromitaci CA — zastaví zálohování, než runnery znovu schválíš</span>
+    </div>
   </section>
 
   <!-- Detail běhu s živým tailem -->

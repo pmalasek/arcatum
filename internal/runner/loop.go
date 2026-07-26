@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -56,10 +57,20 @@ func (a *Agent) verifyDispatch(d proto.JobDispatch) error {
 	return a.verifier.Verify(d.SigningBytes(), d.Signature)
 }
 
+// ErrRestartRequired means the runner's certificate changed (renewed, or revoked and
+// discarded). Rather than hot-swapping the TLS configuration mid-flight, the process
+// exits cleanly and the service manager starts it again with the new material — the
+// systemd unit installed by install.sh has Restart=always for exactly this.
+var ErrRestartRequired = errors.New("certificate changed, restart required")
+
 // Tick performs a single check-in and runs any dispatched jobs sequentially.
 func (a *Agent) Tick(ctx context.Context) error {
 	resp, err := a.client.Checkin(ctx, a.req)
 	if err != nil {
+		var denied *DeniedError
+		if errors.As(err, &denied) {
+			return a.handleDenied(denied)
+		}
 		return err
 	}
 	if len(resp.Due) == 0 {
@@ -72,20 +83,60 @@ func (a *Agent) Tick(ctx context.Context) error {
 	return nil
 }
 
-// Run loops Tick every interval until the context is cancelled.
-func (a *Agent) Run(ctx context.Context, interval time.Duration) {
+// handleDenied reacts to the server refusing this runner.
+func (a *Agent) handleDenied(denied *DeniedError) error {
+	if !denied.EnrollRequired() {
+		// An operator rejected this runner. Enrolling again would just queue requests
+		// nobody wants, so only say so and keep quiet.
+		a.log.Printf("%v — no work will be dispatched until an operator changes this", denied)
+		return nil
+	}
+	// The certificate was revoked. Discard it so the next start enrols again; the key is
+	// replaced at the same time, since a revocation usually means it may have leaked.
+	a.log.Printf("%v — discarding the certificate and enrolling again", denied)
+	for _, p := range []string{a.tls.Cert, a.tls.Key, a.tls.Key + ".csr"} {
+		if p == "" {
+			continue
+		}
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			a.log.Printf("cannot remove %s: %v", p, err)
+			return nil // keep running; nothing better to do
+		}
+	}
+	return ErrRestartRequired
+}
+
+// Run loops Tick every interval until the context is cancelled, or until the
+// certificate changes and the process needs restarting.
+func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	if err := a.Tick(ctx); err != nil {
-		a.log.Printf("checkin error: %v", err)
+
+	tick := func() error {
+		// Replace the certificate before it expires rather than after, while the current
+		// one still authenticates the request.
+		if a.RenewIfNeeded(ctx, a.tls.Cert, a.tls.Key) {
+			return ErrRestartRequired
+		}
+		if err := a.Tick(ctx); err != nil {
+			if errors.Is(err, ErrRestartRequired) {
+				return err
+			}
+			a.log.Printf("checkin error: %v", err)
+		}
+		return nil
+	}
+
+	if err := tick(); err != nil {
+		return err
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-t.C:
-			if err := a.Tick(ctx); err != nil {
-				a.log.Printf("checkin error: %v", err)
+			if err := tick(); err != nil {
+				return err
 			}
 		}
 	}

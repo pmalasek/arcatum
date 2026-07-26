@@ -324,6 +324,49 @@ public_key = "/var/lib/arcatum-runner/pki/dispatch-signing.pub"
 Všechny tři cesty v `[tls]` musí být zadané společně — poloviční konfigurace je chyba,
 kterou server odmítne, aby nedošlo k tichému propadnutí na nezabezpečené HTTP.
 
+### Životní cyklus certifikátů
+
+**Automatická obnova.** Runner si sám vyžádá nový certifikát, když se blíží expirace
+(30 dní předem). Nepotřebuje na to schválení — žádost jde přes mTLS, takže se prokázal
+tím certifikátem, který mění. Bez toho by ti všechny runnery přestaly fungovat naráz
+v den, kdy vyprší původní certifikáty. Obnova zároveň **vymění i klíč**.
+
+Runner se pak sám restartuje, aby nový certifikát začal používat (systemd unit má
+`Restart=always`).
+
+**Zneplatnění při kompromitaci.** Ve webu u runneru klikneš na **zneplatnit**:
+
+1. Certifikát okamžitě přestane platit **všude** — checkin, hlášení výsledků i přístup
+   k restic repozitáři
+2. Runner přejde do stavu **`pending`**
+3. Runner to při dalším checkinu pozná, zahodí certifikát **i klíč** a sám pošle novou
+   žádost
+4. Ty ho schválíš — nebo mu certifikát předáš ručně (`arcatum-ca runner -id <id>`)
+
+Při podezření na kompromitaci **CA** je ve spodní části záložky Runnery tlačítko
+**zneplatnit certifikáty všech runnerů**. Zastaví to zálohování, dokud runnery znovu
+neschválíš.
+
+> Rozdíl mezi **zneplatnit** a **zamítnout**: zneplatnění znamená „začni znovu" a runner
+> sám požádá o nový certifikát. Zamítnutí je „ne" — runner se pak už neozývá, aby ti
+> nezaplňoval frontu žádostmi.
+
+**Varování před expirací.** Web hlásí nahoře, když se blíží konec platnosti tvého
+admin certifikátu (default **1 rok** — vyprší první), certifikátu serveru, nebo
+certifikátů runnerů. Datum je i ve sloupci u každého runneru.
+
+Obnovu certifikátů, které se neobnovují samy, uděláš takto:
+
+```sh
+go run ./cmd/arcatum-ca admin  -dir pki -name petr           # tvůj přístup k webu
+go run ./cmd/arcatum-ca server -dir pki -hosts 172.24.0.60   # certifikát serveru
+```
+
+**Co chybí:** CRL ani OCSP zavedené nejsou. Zneplatnění se vynucuje kontrolou stavu
+v databázi, což pro uzavřenou síť stačí a účinkuje okamžitě. Kdyby unikl klíč
+**serveru**, runnery to nezjistí — tam zbývá vydat novou CA a rozdat nový `ca.pem`.
+Rotace podepisovacího klíče úloh a master klíče secrets se také dělá ručně.
+
 ### Volání API s certifikátem
 
 ```sh
@@ -413,8 +456,35 @@ jiné. Prázdná hodnota znamená „nenastaveno", ne „nedrž nic".
 
 ### Obnova dat
 
-Obnovu zatím děláš přímo resticem s **admin certifikátem** (plné restore přes API/web
-přijde v další fázi). Certifikát a klíč restic čeká v jednom souboru:
+**Z webu** — záložka **Obnova**: vybereš instanci a snapshot, procházíš strom a stáhneš
+jednotlivý soubor nebo celý adresář jako `.tar`.
+
+Obnova běží **na serveru** proti repozitáři, který už tam je, a heslo si server
+dešifruje sám. Runner do toho není zapojený — a to je záměr: potřeba obnovy často
+znamená, že zálohovaný stroj je nedostupný, takže obnova na něm nesmí být závislá.
+
+> Server k tomu potřebuje nainstalovaný `restic` (`apt install restic`). Bez něj vrátí
+> obnova jasnou chybu.
+
+Data se streamují přímo z repozitáře do prohlížeče (`restic dump`), takže se nikde
+nestagují na disk a velký archiv začne přicházet hned.
+
+Totéž přes API:
+
+```sh
+A=(--cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key)
+I=https://172.24.0.60:8443/api/v1/instances/files-web01
+
+curl "${A[@]}" $I/snapshots                                  # co je k dispozici
+curl "${A[@]}" "$I/snapshots/latest/ls?path=/etc"             # procházení
+curl "${A[@]}" "$I/snapshots/latest/download?path=/etc/nginx/nginx.conf" -o nginx.conf
+curl "${A[@]}" "$I/snapshots/latest/download?path=/etc&archive=tar" -o etc.tar
+```
+
+Místo `latest` jde použít ID konkrétního snapshotu — tím se vracíš k datům v čase.
+
+**Chybí:** obnova **zpět na zálohovaný server** (dnes stáhneš data k sobě a nakopíruješ
+je sám). Pro plnou katastrofickou obnovu se dá pořád použít restic přímo:
 
 ```sh
 cat pki/admin-petr.pem pki/admin-petr.key > /tmp/admin-combined.pem
@@ -450,7 +520,8 @@ Tři přehledy a detail běhu:
 |---|---|
 | **Běhy** | historie: stav, návratový kód, přenesená data, trvání |
 | **Instance** | příští běh, velikost restic repozitáře, tlačítko **spustit teď** |
-| **Runnery** | stav (`pending`/`approved`/`rejected`), platforma, kdy se naposledy ohlásil, a u čekajících žádostí tlačítka **schválit / zamítnout** |
+| **Obnova** | snapshoty, procházení stromu, stažení souboru nebo adresáře jako `.tar` |
+| **Runnery** | stav (`pending`/`approved`/`rejected`), platforma, expirace certifikátu, kdy se naposledy ohlásil; u čekajících žádostí **schválit / zamítnout**, u schválených **zneplatnit** |
 
 Klikem na běh se otevře **detail s živým tailem výstupu** — u probíhající úlohy se log
 dosypává, jak přichází. Přepínač `stdout`/`stderr` a zaškrtávátko „sledovat"
@@ -605,9 +676,16 @@ Sloupec „role" platí při zapnutém mTLS — viz
 | `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | admin | zachycený výstup běhu |
 | `GET /api/v1/runs/{id}/tail?offset=N&stream=` | admin | přírůstek výstupu — základ živého tailu |
 | `GET /api/v1/runners` | admin | evidované runnery (stav, platforma, `last_seen`) |
+| `GET /api/v1/whoami` | admin | tvoje identita a expirace certifikátů |
 | `POST /api/v1/runners/{id}/approve` | admin | schválí žádost a podepíše certifikát |
 | `POST /api/v1/runners/{id}/reject` | admin | zamítne žádost |
+| `POST /api/v1/runners/{id}/revoke` | admin | zneplatní certifikát, runner → `pending` |
+| `POST /api/v1/runners/revoke-all` | admin | zneplatní certifikáty všech runnerů |
+| `POST /api/v1/renew` | runner | obnova certifikátu (bez schvalování) |
 | `GET /api/v1/instances/{id}/repo` | admin | velikost restic repozitáře a počet snapshotů |
+| `GET /api/v1/instances/{id}/snapshots` | admin | seznam snapshotů, nejnovější první |
+| `GET /api/v1/instances/{id}/snapshots/{snap}/ls?path=` | admin | obsah adresáře ve snapshotu |
+| `GET /api/v1/instances/{id}/snapshots/{snap}/download?path=&archive=tar` | admin | **obnova** — soubor nebo adresář jako tar |
 | `/restic/{instance}/…` | runner (vlastní) / admin | restic REST backend pro souborové zálohy |
 | `GET /` | admin | [web UI](#web-ui) (zabalené v binárce) |
 | `GET /status` | admin | textová status stránka pro shell |
@@ -762,12 +840,18 @@ statický binár bez runtime závislostí.
 - **Web UI** zabalené v binárce — běhy, instance, runnery, **živý tail výstupu**, „spustit teď"
 - **Instalace jedním příkazem** (`install.sh`) a **enrollment** — runner si vygeneruje vlastní
   klíč, pošle jen CSR a čeká na schválení ve webu
+- **Automatická obnova certifikátů** před expirací (včetně výměny klíče) a **zneplatnění
+  při kompromitaci** — runner přejde do `pending` a sám požádá o nový; varování na
+  blížící se expiraci ve webu
 - Bezpečné předání secrets (dočasný soubor, ne env), maskování v API, ověření SHA-256 artefaktu
 
+- **Obnova z webu** — procházení snapshotů a stažení souboru či adresáře, běží na serveru
+  (nezávisle na zálohovaném hostu)
+
 **Chybí (další fáze):**
-- **Restore přes API/web** (dnes se obnovuje přímo resticem s admin certifikátem)
+- **Obnova zpět na zálohovaný server** (dnes stáhneš data k sobě a nakopíruješ je sám)
 - **Notifikace** při selhání (e-mail/Slack)
 - Správa instancí přes API/web (dnes seed z JSON), auto-update runneru
-- Revokace certifikátů (CRL/OCSP) a rotace klíčů
+- **CRL/OCSP** a rotace CA, podepisovacího klíče úloh a master klíče secrets (dnes ručně)
 
 Podrobná architektura a rozhodnutí: [docs/architecture.md](docs/architecture.md).

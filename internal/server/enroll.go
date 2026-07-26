@@ -140,18 +140,99 @@ func (s *Server) handleApproveRunner(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "signing failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	fingerprint, err := certFingerprint(certPEM)
+	fingerprint, notAfter, err := inspectCert(certPEM)
 	if err != nil {
-		s.log.Printf("approve %q: fingerprint: %v", runnerID, err)
+		s.log.Printf("approve %q: inspect certificate: %v", runnerID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if err := s.store.ApproveEnrollment(runnerID, string(certPEM), fingerprint, time.Now()); err != nil {
+	if err := s.store.ApproveEnrollment(runnerID, string(certPEM), fingerprint, notAfter, time.Now()); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	s.log.Printf("approve: runner %q approved, certificate issued (%s)", runnerID, shortFingerprint(fingerprint))
 	writeJSON(w, map[string]string{"status": EnrollApproved, "runner": runnerID, "fingerprint": fingerprint})
+}
+
+// handleRevokeRunner invalidates a runner's certificate (admin only). The runner drops
+// back to pending: its old certificate stops being accepted anywhere, and it will ask
+// for a new one at its next check-in.
+func (s *Server) handleRevokeRunner(w http.ResponseWriter, r *http.Request) {
+	runnerID := r.PathValue("id")
+	if err := s.store.RevokeEnrollment(runnerID, time.Now()); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	s.log.Printf("revoke: runner %q certificate invalidated, back to pending", runnerID)
+	writeJSON(w, map[string]string{"status": EnrollPending, "runner": runnerID})
+}
+
+// handleRevokeAllRunners invalidates every certificate at once, for a suspected CA
+// compromise (admin only).
+func (s *Server) handleRevokeAllRunners(w http.ResponseWriter, r *http.Request) {
+	n, err := s.store.RevokeAll(time.Now())
+	if err != nil {
+		s.log.Printf("revoke all: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	s.log.Printf("revoke: invalidated certificates of %d runner(s)", n)
+	writeJSON(w, map[string]any{"status": EnrollPending, "revoked": n})
+}
+
+// handleRenew issues a fresh certificate to a runner that already has a valid one.
+//
+// This runs on the mTLS listener, so the caller has already proved possession of the
+// current certificate — that is what makes renewal safe to do without an operator. It
+// is what stops every runner going dark on the same day when the original certificates
+// reach their expiry.
+func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
+	runnerID, err := s.activeRunnerIdentity(r, "")
+	if err != nil {
+		s.log.Printf("renew denied: %v", err)
+		s.denyRunner(w, err)
+		return
+	}
+	if s.ca == nil {
+		http.Error(w, "server has no CA configured, cannot sign certificates", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		CSR string `json:"csr"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, csrCN, err := inspectCSR(req.CSR)
+	if err != nil {
+		http.Error(w, "invalid csr: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// A runner may only renew its own identity, never someone else's.
+	if csrCN != runnerID {
+		http.Error(w, fmt.Sprintf("csr common name %q does not match the calling runner %q", csrCN, runnerID),
+			http.StatusForbidden)
+		return
+	}
+	certPEM, err := s.ca.SignCSR([]byte(req.CSR), enrollValidity)
+	if err != nil {
+		s.log.Printf("renew %q: %v", runnerID, err)
+		http.Error(w, "signing failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	fingerprint, notAfter, err := inspectCert(certPEM)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := s.store.RenewCertificate(runnerID, string(certPEM), fingerprint, notAfter, time.Now()); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	s.log.Printf("renew: runner %q got a new certificate valid until %s (%s)",
+		runnerID, notAfter.Format(time.RFC3339), shortFingerprint(fingerprint))
+	writeJSON(w, EnrollResponse{Status: EnrollApproved, CertPEM: string(certPEM)})
 }
 
 // handleRejectRunner refuses a pending request (admin only).
@@ -185,15 +266,19 @@ func inspectCSR(csrPEM string) (fingerprint, commonName string, err error) {
 	return hex.EncodeToString(sum[:]), csr.Subject.CommonName, nil
 }
 
-// certFingerprint is the SHA-256 of the DER certificate, the value normally shown by
-// other tooling.
-func certFingerprint(certPEM []byte) (string, error) {
+// inspectCert returns a certificate's SHA-256 fingerprint (the value other tooling
+// shows) and its expiry.
+func inspectCert(certPEM []byte) (fingerprint string, notAfter time.Time, err error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return "", errors.New("no PEM block in certificate")
+		return "", time.Time{}, errors.New("no PEM block in certificate")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", time.Time{}, err
 	}
 	sum := sha256.Sum256(block.Bytes)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:]), cert.NotAfter, nil
 }
 
 // shortFingerprint abbreviates a fingerprint for log lines.

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
@@ -105,5 +106,12 @@ func main() {
 		}
 		return
 	}
-	agent.Run(ctx, interval)
+	// Exiting on a certificate change is deliberate: the service manager restarts us and
+	// we pick the new material up cleanly, instead of swapping TLS state mid-flight.
+	if err := agent.Run(ctx, interval); errors.Is(err, runner.ErrRestartRequired) {
+		logger.Printf("restarting to pick up the new certificate")
+		return
+	} else if err != nil {
+		logger.Fatalf("runner stopped: %v", err)
+	}
 }

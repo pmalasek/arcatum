@@ -94,12 +94,14 @@ func (s *Store) PendingCSR(runnerID string) (string, error) {
 }
 
 // ApproveEnrollment stores the signed certificate and marks the runner approved, so
-// its next check-in is accepted.
-func (s *Store) ApproveEnrollment(runnerID, certPEM, fingerprint string, now time.Time) error {
+// its next check-in is accepted. notAfter is the new certificate's expiry, recorded so
+// the UI can warn before it runs out.
+func (s *Store) ApproveEnrollment(runnerID, certPEM, fingerprint string, notAfter, now time.Time) error {
 	res, err := s.db.Exec(`
-		UPDATE runners SET status = ?, cert_pem = ?, cert_fingerprint = ?, approved_at = ?, csr = ''
+		UPDATE runners SET status = ?, cert_pem = ?, cert_fingerprint = ?, approved_at = ?,
+		                   cert_not_after = ?, csr = ''
 		WHERE id = ? AND status = ?`,
-		EnrollApproved, certPEM, fingerprint, toMillis(now), runnerID, EnrollPending)
+		EnrollApproved, certPEM, fingerprint, toMillis(now), toMillis(notAfter), runnerID, EnrollPending)
 	if err != nil {
 		return err
 	}
@@ -115,6 +117,67 @@ func (s *Store) RejectEnrollment(runnerID string, now time.Time) error {
 		return err
 	}
 	return requireOneRow(res, runnerID, "reject")
+}
+
+// RevokeEnrollment invalidates a runner's certificate and puts it back to pending, so
+// its old certificate is refused everywhere from now on. The runner notices at its next
+// check-in and enrols again; an operator can also hand it a certificate by hand.
+//
+// Unlike rejection this is not a "no" — it is "start over", which is what a suspected
+// key compromise or a decommissioned host calls for.
+func (s *Store) RevokeEnrollment(runnerID string, now time.Time) error {
+	res, err := s.db.Exec(`
+		UPDATE runners SET status = ?, cert_pem = '', cert_fingerprint = '', csr = '',
+		                   cert_not_after = 0, revoked_at = ?, approved_at = 0
+		WHERE id = ? AND status != ?`,
+		EnrollPending, toMillis(now), runnerID, EnrollPending)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("cannot revoke runner %q: unknown, or already awaiting approval", runnerID)
+	}
+	return nil
+}
+
+// RevokeAll invalidates every runner's certificate at once, for when the CA itself is
+// suspected. It returns how many were affected.
+func (s *Store) RevokeAll(now time.Time) (int, error) {
+	res, err := s.db.Exec(`
+		UPDATE runners SET status = ?, cert_pem = '', cert_fingerprint = '', csr = '',
+		                   cert_not_after = 0, revoked_at = ?, approved_at = 0
+		WHERE status != ?`,
+		EnrollPending, toMillis(now), EnrollPending)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+// RenewCertificate stores a certificate issued to an already-approved runner. Renewal
+// needs no operator action: the runner proved its identity with the certificate it is
+// replacing.
+func (s *Store) RenewCertificate(runnerID, certPEM, fingerprint string, notAfter, now time.Time) error {
+	res, err := s.db.Exec(`
+		UPDATE runners SET cert_pem = ?, cert_fingerprint = ?, cert_not_after = ?, renewed_at = ?
+		WHERE id = ? AND status = ?`,
+		certPEM, fingerprint, toMillis(notAfter), toMillis(now), runnerID, EnrollApproved)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("cannot renew runner %q: not approved", runnerID)
+	}
+	return nil
 }
 
 // RunnerStatus reports a runner's enrollment status; an unknown runner reports "".

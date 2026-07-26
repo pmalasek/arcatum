@@ -7,11 +7,13 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"arcatum/internal/server"
 	"arcatum/pkg/config"
@@ -74,6 +76,14 @@ func main() {
 		// the server signs with.
 		if signingPubPEM, err = signer.Public(); err != nil {
 			logger.Fatalf("signing public key: %v", err)
+		}
+		// Surface our own certificate's expiry: once it lapses, runners stop trusting
+		// this server, and that should not come as a surprise.
+		if len(tlsConfig.Certificates) > 0 && len(tlsConfig.Certificates[0].Certificate) > 0 {
+			if leaf, err := x509.ParseCertificate(tlsConfig.Certificates[0].Certificate[0]); err == nil {
+				opts.ServerCertNotAfter = leaf.NotAfter
+				logger.Printf("  server certificate valid until %s", leaf.NotAfter.Format(time.RFC3339))
+			}
 		}
 	}
 	// The CA is only needed to sign enrollment requests from new runners.

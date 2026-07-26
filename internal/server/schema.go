@@ -65,4 +65,10 @@ var addColumns = []struct{ table, column, definition string }{
 	{"runners", "enroll_ip", "TEXT NOT NULL DEFAULT ''"},
 	{"runners", "enrolled_at", "INTEGER NOT NULL DEFAULT 0"},
 	{"runners", "approved_at", "INTEGER NOT NULL DEFAULT 0"},
+	// When the runner's certificate expires. Recorded from the certificate presented at
+	// check-in, so it is known for hand-issued certificates too — without it, every
+	// runner would silently stop working on the same day.
+	{"runners", "cert_not_after", "INTEGER NOT NULL DEFAULT 0"},
+	{"runners", "revoked_at", "INTEGER NOT NULL DEFAULT 0"},
+	{"runners", "renewed_at", "INTEGER NOT NULL DEFAULT 0"},
 }
