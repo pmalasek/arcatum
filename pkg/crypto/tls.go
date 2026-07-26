@@ -45,15 +45,27 @@ func ClientTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {
 	}, nil
 }
 
-// LoadCAPool reads a PEM bundle into a certificate pool.
+// LoadCAPool reads a PEM bundle into a certificate pool. The file may hold several
+// certificates, which is what makes a CA rotation possible: both the outgoing and the
+// incoming authority are trusted during the overlap.
 func LoadCAPool(caPath string) (*x509.CertPool, error) {
 	pem, err := os.ReadFile(caPath)
 	if err != nil {
 		return nil, fmt.Errorf("read CA: %w", err)
 	}
+	pool, err := ParseCAPool(pem)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", caPath, err)
+	}
+	return pool, nil
+}
+
+// ParseCAPool builds a certificate pool from a PEM bundle in memory. It is used to check
+// a freshly received bundle is usable *before* it replaces a working one.
+func ParseCAPool(bundlePEM []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("%s: no certificates found", caPath)
+	if !pool.AppendCertsFromPEM(bundlePEM) {
+		return nil, fmt.Errorf("no certificates found")
 	}
 	return pool, nil
 }

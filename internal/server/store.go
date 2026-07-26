@@ -27,12 +27,14 @@ import (
 type Store struct {
 	db        *sql.DB
 	backupDir string
-	box       crypto.SecretBox
+	// box holds the secrets master key and its predecessors, so a rotation can read
+	// values written under an older key. Nil means secrets are stored in plaintext.
+	box *crypto.Keyring
 }
 
 // Open opens (creating if needed) the SQLite database at dbPath and applies the
 // schema. box may be nil, in which case secrets are stored unencrypted.
-func Open(dbPath, backupDir string, box crypto.SecretBox) (*Store, error) {
+func Open(dbPath, backupDir string, box *crypto.Keyring) (*Store, error) {
 	if dir := filepath.Dir(dbPath); dir != "" {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, fmt.Errorf("db dir: %w", err)
@@ -104,15 +106,24 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // --- instances ---------------------------------------------------------------
 
-// ImportInstances upserts instances from a JSON array file and returns how many were
-// imported. A missing file is not an error: instances may be managed via the API instead.
-func (s *Store) ImportInstances(path string) (int, error) {
+// ImportInstances seeds instances from a JSON array file and returns how many were
+// created. A missing or empty file is not an error.
+//
+// Existing instances are left alone unless overwrite is set. Instances are editable
+// through the API now, and re-importing on every start would silently undo those edits —
+// the seed file describes the initial state, not the authoritative one.
+func (s *Store) ImportInstances(path string, overwrite bool) (int, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, err
+	}
+	// An empty file is a plausible operator state (instances managed elsewhere, or the
+	// seed emptied deliberately) and must not stop the server from starting.
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return 0, nil
 	}
 	var list []*Instance
 	if err := json.Unmarshal(data, &list); err != nil {
@@ -123,9 +134,19 @@ func (s *Store) ImportInstances(path string) (int, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	imported := 0
 	for _, in := range list {
 		if in.ID == "" {
 			return 0, fmt.Errorf("instances %s: an instance is missing id", path)
+		}
+		if !overwrite {
+			var one int
+			err := tx.QueryRow(`SELECT 1 FROM instances WHERE id = ?`, in.ID).Scan(&one)
+			if err == nil {
+				continue // already managed; do not clobber it
+			} else if err != sql.ErrNoRows {
+				return 0, err
+			}
 		}
 		params, err := json.Marshal(in.Params)
 		if err != nil {
@@ -154,14 +175,130 @@ func (s *Store) ImportInstances(path string) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("upsert instance %q: %w", in.ID, err)
 		}
+		imported++
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return len(list), nil
+	return imported, nil
 }
 
 const instanceCols = `id, script, runner_id, params, secrets, capture, timeout, schedule`
+
+// sealValue encrypts one secret value with the primary master key. Without a keyring the
+// value is stored as-is (development mode).
+func (s *Store) sealValue(value, instanceID, name string) (string, error) {
+	if s.box == nil {
+		return value, nil
+	}
+	return s.box.SealString(value, instanceID, name)
+}
+
+// openValue decrypts one stored secret value.
+func (s *Store) openValue(stored, instanceID, name string) (string, error) {
+	if s.box == nil {
+		if crypto.IsAnySealed(stored) {
+			return "", fmt.Errorf("%s/%s: %w", instanceID, name, crypto.ErrSealed)
+		}
+		return stored, nil
+	}
+	return s.box.OpenString(stored, instanceID, name)
+}
+
+// RekeyResult reports what a re-encryption pass did.
+type RekeyResult struct {
+	Instances int    `json:"instances"`      // instances examined
+	Secrets   int    `json:"secrets"`        // values re-encrypted
+	Skipped   int    `json:"skipped"`        // already on the current key
+	KeyID     string `json:"key_id"`         // the key everything is now sealed with
+	Remaining int    `json:"remaining"`      // values still not on the current key
+	Note      string `json:"note,omitempty"` // e.g. why nothing happened
+}
+
+// RekeySecrets re-encrypts every stored secret with the primary master key, which is what
+// completes a master-key rotation.
+//
+// It is safe to run repeatedly: values already on the current key are skipped, so an
+// interrupted pass simply resumes. Each instance is committed on its own, so a failure
+// part-way leaves earlier instances done rather than rolling everything back — the mixed
+// state is readable either way, because the keyring still holds the old key.
+func (s *Store) RekeySecrets() (*RekeyResult, error) {
+	res := &RekeyResult{}
+	if s.box == nil {
+		res.Note = "no master key configured, secrets are stored in plaintext"
+		return res, nil
+	}
+	res.KeyID = s.box.PrimaryID()
+
+	rows, err := s.db.Query(`SELECT id, secrets FROM instances ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	type pending struct {
+		id      string
+		secrets map[string]string
+	}
+	var todo []pending
+	for rows.Next() {
+		var id, secretsJSON string
+		if err := rows.Scan(&id, &secretsJSON); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		var stored map[string]string
+		if err := json.Unmarshal([]byte(secretsJSON), &stored); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("instance %q secrets: %w", id, err)
+		}
+		todo = append(todo, pending{id: id, secrets: stored})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for _, p := range todo {
+		res.Instances++
+		if len(p.secrets) == 0 {
+			continue
+		}
+		changed := false
+		next := make(map[string]string, len(p.secrets))
+		for name, value := range p.secrets {
+			if s.box.IsOnPrimary(value) {
+				res.Skipped++
+				next[name] = value
+				continue
+			}
+			plain, err := s.box.OpenString(value, p.id, name)
+			if err != nil {
+				// Report rather than abort: one unreadable value should not block
+				// rotating everything else.
+				res.Remaining++
+				next[name] = value
+				continue
+			}
+			sealed, err := s.box.SealString(plain, p.id, name)
+			if err != nil {
+				return nil, fmt.Errorf("instance %q: seal %q: %w", p.id, name, err)
+			}
+			next[name] = sealed
+			changed = true
+			res.Secrets++
+		}
+		if !changed {
+			continue
+		}
+		encoded, err := json.Marshal(next)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.db.Exec(`UPDATE instances SET secrets = ? WHERE id = ?`, string(encoded), p.id); err != nil {
+			return nil, fmt.Errorf("instance %q: %w", p.id, err)
+		}
+	}
+	return res, nil
+}
 
 // sealSecrets encrypts each secret value for storage, binding it to this instance and
 // secret name so a ciphertext cannot be relocated within the database.
@@ -171,7 +308,7 @@ func (s *Store) sealSecrets(instanceID string, secrets map[string]string) (map[s
 	}
 	out := make(map[string]string, len(secrets))
 	for name, value := range secrets {
-		sealed, err := crypto.SealToString(s.box, value, instanceID, name)
+		sealed, err := s.sealValue(value, instanceID, name)
 		if err != nil {
 			return nil, fmt.Errorf("instance %q: seal secret %q: %w", instanceID, name, err)
 		}
@@ -187,7 +324,7 @@ func (s *Store) openSecrets(instanceID string, stored map[string]string) (map[st
 	}
 	out := make(map[string]string, len(stored))
 	for name, value := range stored {
-		plain, err := crypto.OpenFromString(s.box, value, instanceID, name)
+		plain, err := s.openValue(value, instanceID, name)
 		if err != nil {
 			return nil, err
 		}
@@ -272,18 +409,20 @@ func (s *Store) Instance(id string) (*Instance, error) {
 // expiry of the certificate the runner presented; pass the zero time when there is none
 // (development mode). Taking it from the live connection means expiry is tracked for
 // hand-issued certificates as well as enrolled ones.
-func (s *Store) RecordCheckin(req proto.CheckinRequest, certNotAfter, now time.Time) error {
+func (s *Store) RecordCheckin(req proto.CheckinRequest, certNotAfter, now time.Time, certIssuer string) error {
 	ms := toMillis(now)
 	_, err := s.db.Exec(`
-		INSERT INTO runners (id, hostname, os, arch, first_seen, last_seen, cert_not_after)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO runners (id, hostname, os, arch, first_seen, last_seen, cert_not_after, cert_issuer)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  hostname=excluded.hostname, os=excluded.os, arch=excluded.arch,
 		  last_seen=excluded.last_seen,
-		  -- Keep a known expiry if this check-in did not carry one.
+		  -- Keep what is already known if this check-in did not carry a certificate.
 		  cert_not_after=CASE WHEN excluded.cert_not_after > 0
-		                      THEN excluded.cert_not_after ELSE runners.cert_not_after END`,
-		req.RunnerID, req.Hostname, req.OS, req.Arch, ms, ms, toMillis(certNotAfter))
+		                      THEN excluded.cert_not_after ELSE runners.cert_not_after END,
+		  cert_issuer=CASE WHEN excluded.cert_issuer != ''
+		                   THEN excluded.cert_issuer ELSE runners.cert_issuer END`,
+		req.RunnerID, req.Hostname, req.OS, req.Arch, ms, ms, toMillis(certNotAfter), certIssuer)
 	return err
 }
 
@@ -306,10 +445,13 @@ type Runner struct {
 	// CertNotAfter is when the runner's certificate expires. Zero means unknown, which
 	// is normal until the runner has checked in once.
 	CertNotAfter time.Time `json:"cert_not_after,omitempty"`
+	// CertIssuer is the authority that issued the current certificate, which is how a CA
+	// rotation is tracked to completion.
+	CertIssuer string `json:"cert_issuer,omitempty"`
 }
 
 const runnerCols = `id, hostname, os, arch, status, cert_fingerprint, enroll_ip,
-                    first_seen, last_seen, enrolled_at, approved_at, cert_not_after`
+                    first_seen, last_seen, enrolled_at, approved_at, cert_not_after, cert_issuer`
 
 // Runners lists known runners: those waiting for approval first, then the rest by how
 // recently they checked in — so a pending request is never buried at the bottom.
@@ -325,7 +467,8 @@ func (s *Store) Runners() ([]*Runner, error) {
 		var r Runner
 		var first, last, enrolled, approved, notAfter int64
 		if err := rows.Scan(&r.ID, &r.Hostname, &r.OS, &r.Arch, &r.Status,
-			&r.CertFingerprint, &r.EnrollIP, &first, &last, &enrolled, &approved, &notAfter); err != nil {
+			&r.CertFingerprint, &r.EnrollIP, &first, &last, &enrolled, &approved, &notAfter,
+			&r.CertIssuer); err != nil {
 			return nil, err
 		}
 		r.FirstSeen, r.LastSeen = fromMillis(first), fromMillis(last)

@@ -368,11 +368,73 @@ el('restore-crumbs').addEventListener('click', async (e) => {
   await loadRestoreDir();
 });
 
+// --- key rotation -----------------------------------------------------------
+
+// Rotating a long-lived key means running an overlap window: new material is published,
+// runners adopt it by themselves, and the window is closed once the server can confirm
+// everyone has moved. This view shows how far along each of the three is.
+async function loadRotation() {
+  const box = el('rotation-body');
+  let st;
+  try {
+    st = await api('/rotation');
+  } catch (err) {
+    box.innerHTML = `<p class="empty">${esc(err.message)}</p>`;
+    return;
+  }
+
+  const secretsRotating = st.secrets_keys > 1;
+  const secretsDone = st.secrets_pending === 0;
+  const cas = st.trusted_cas || [];
+  const caRotating = cas.length > 1;
+  const stale = (st.runners_on_old_ca || []).concat(st.runners_unknown_ca || []);
+
+  box.innerHTML = `
+    <div class="rot">
+      <h3>Secrets — master klíč</h3>
+      <dl class="meta">
+        <dt>aktuální klíč</dt><dd>${st.secrets_key_id ? esc(st.secrets_key_id) : '<span class="muted">žádný (plaintext)</span>'}</dd>
+        <dt>načtených klíčů</dt><dd>${st.secrets_keys}${secretsRotating ? ' <span class="expiry warn">rotace probíhá</span>' : ''}</dd>
+        <dt>nepřešifrováno</dt><dd>${st.secrets_pending}${secretsDone ? '' : ' <span class="expiry warn">zbývá přešifrovat</span>'}</dd>
+      </dl>
+      ${st.secrets_key_id ? `<div class="section-foot">
+        <button id="rekey" class="action">přešifrovat vším aktuálním klíčem</button>
+        <span class="hint">bezpečné spustit opakovaně — už přešifrované hodnoty přeskočí</span>
+      </div>` : ''}
+    </div>
+
+    <div class="rot">
+      <h3>Podpis úloh</h3>
+      <dl class="meta">
+        <dt>důvěryhodných klíčů</dt><dd>${st.signing_keys}${st.signing_keys > 1
+          ? ' <span class="expiry warn">rotace probíhá — až runnery přejdou, odeber starý z previous_keys</span>' : ''}</dd>
+      </dl>
+    </div>
+
+    <div class="rot">
+      <h3>Certifikační autorita</h3>
+      <dl class="meta">
+        <dt>vydává se pod</dt><dd>${st.signing_ca ? esc(st.signing_ca) : '<span class="muted">—</span>'}</dd>
+        <dt>důvěryhodné CA</dt><dd>${cas.length === 0 ? '<span class="muted">—</span>' : cas.map((c) =>
+          `${esc(c.common_name)}${c.is_signer ? ' <span class="expiry">(vydávající)</span>' : ''}`
+          + ` <span class="days">· platí ${c.days_left} d</span>`).join('<br>')}</dd>
+        ${caRotating || stale.length ? `<dt>runnery na staré CA</dt><dd>${
+          stale.length === 0 ? '<span class="expiry">žádné</span>' : esc(stale.join(', '))}</dd>` : ''}
+      </dl>
+      ${caRotating ? `<div class="section-foot">
+        ${st.safe_to_drop_old_ca
+          ? '<span class="expiry">Všechny runnery jsou na aktuální CA — starou lze z bundle odebrat.</span>'
+          : '<span class="expiry warn">Starou CA zatím neodebírej: některé runnery na ni ještě spoléhají.</span>'}
+      </div>` : ''}
+    </div>`;
+}
+
 const loaders = {
   runs: loadRuns,
   instances: loadInstances,
   restore: loadRestore,
   runners: loadRunners,
+  rotation: loadRotation,
 };
 
 async function refresh() {
@@ -386,7 +448,7 @@ async function refresh() {
 
 function showView(name) {
   currentView = name;
-  for (const v of ['runs', 'instances', 'restore', 'runners', 'detail']) {
+  for (const v of ['runs', 'instances', 'restore', 'runners', 'rotation', 'detail']) {
     el('view-' + v).classList.toggle('hidden', v !== name);
   }
   for (const tab of document.querySelectorAll('.tab')) {
@@ -535,6 +597,22 @@ document.addEventListener('click', async (e) => {
     } catch (err) {
       showError(err);
       btn.disabled = false;
+    }
+    return;
+  }
+  if (e.target.closest('#rekey')) {
+    const btn = e.target.closest('#rekey');
+    btn.disabled = true;
+    btn.textContent = 'přešifrovávám…';
+    try {
+      const res = await api('/secrets/rekey', { method: 'POST' });
+      alert(`Přešifrováno hodnot: ${res.secrets}\nJiž aktuálních: ${res.skipped}`
+        + (res.remaining ? `\nNečitelných: ${res.remaining} — chybí starý klíč v previous_keys?` : ''));
+      await loadRotation();
+    } catch (err) {
+      showError(err);
+      btn.disabled = false;
+      btn.textContent = 'přešifrovat vším aktuálním klíčem';
     }
     return;
   }

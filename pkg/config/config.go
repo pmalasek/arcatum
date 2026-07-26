@@ -34,6 +34,20 @@ type Bootstrap struct {
 	DistDir string `toml:"dist_dir"` // runner binaries: arcatum-runner-<os>-<arch>
 	APIURL  string `toml:"api_url"`  // mTLS address written into the generated runner.toml
 	CAKey   string `toml:"ca_key"`   // CA private key, needed to sign approved requests
+	// CACert is the certificate matching CAKey — the authority new certificates are
+	// issued under. It is separate from [tls] ca_cert, which is a *bundle* of every
+	// authority still trusted: during a CA rotation the two differ, and signing must
+	// use the new one while verification still accepts both.
+	CACert string `toml:"ca_cert"`
+}
+
+// SigningCA returns the certificate to issue new certificates under, defaulting to the
+// trust bundle when no rotation is in progress.
+func (b Bootstrap) SigningCA(trustBundle string) string {
+	if b.CACert != "" {
+		return b.CACert
+	}
+	return trustBundle
 }
 
 // Enabled reports whether the bootstrap listener should run.
@@ -42,12 +56,21 @@ func (b Bootstrap) Enabled() bool { return b.Listen != "" }
 // Signing points at the key used to sign job dispatches (server side).
 type Signing struct {
 	Key string `toml:"key"` // Ed25519 private key, e.g. pki/dispatch-signing.key
+	// PreviousKeys are the *private* keys of predecessors, kept during a rotation. Their
+	// public parts are published so runners still accept dispatches signed with them, and
+	// the server co-signs the published trust material with each — which is what lets a
+	// runner still on an old key accept the new set. Private, not public, for that reason.
+	PreviousKeys []string `toml:"previous_keys"` // e.g. ["pki/dispatch-signing.key"]
 }
 
 // Secrets points at the master key encrypting instance secrets in the database.
 // Without it secrets are stored in plaintext (development only).
 type Secrets struct {
 	MasterKey string `toml:"master_key"` // e.g. pki/secrets-master.key
+	// PreviousKeys are master keys that older values are still sealed with. Rotation
+	// means adding a new master_key and listing the old one here until everything has
+	// been re-encrypted.
+	PreviousKeys []string `toml:"previous_keys"`
 }
 
 // Server holds process-level settings.

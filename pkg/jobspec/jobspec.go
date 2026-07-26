@@ -7,6 +7,8 @@ package jobspec
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"arcatum/pkg/proto"
 
@@ -79,6 +81,78 @@ func (m *Manifest) ParamByName(name string) *Param {
 		if m.Params[i].Name == name {
 			return &m.Params[i]
 		}
+	}
+	return nil
+}
+
+// ValidateParams checks an instance's values against what the script declares. This is
+// what the parameter declarations in a manifest are for: catching a missing password or a
+// mistyped parameter name when the instance is saved, rather than when the backup runs at
+// two in the morning.
+//
+// Unknown names are rejected on purpose. A typo like "datbase" would otherwise sit there
+// silently, with the script failing for a reason nobody connects to the typo.
+func (m *Manifest) ValidateParams(params, secrets map[string]string) error {
+	declared := map[string]*Param{}
+	for i := range m.Params {
+		declared[m.Params[i].Name] = &m.Params[i]
+	}
+
+	for name := range params {
+		p, ok := declared[name]
+		if !ok {
+			return fmt.Errorf("script %q has no parameter %q", m.Name, name)
+		}
+		if p.Secret {
+			return fmt.Errorf("parameter %q is a secret and must be given as a secret, not a parameter", name)
+		}
+	}
+	for name := range secrets {
+		p, ok := declared[name]
+		if !ok {
+			return fmt.Errorf("script %q has no parameter %q", m.Name, name)
+		}
+		if !p.Secret {
+			return fmt.Errorf("parameter %q is not declared as a secret", name)
+		}
+	}
+
+	for _, p := range m.Params {
+		value, given := params[p.Name]
+		if p.Secret {
+			value, given = secrets[p.Name]
+		}
+		if !given || strings.TrimSpace(value) == "" {
+			// A default covers a missing optional value; anything required must be set.
+			if p.Required && strings.TrimSpace(p.Default) == "" {
+				return fmt.Errorf("parameter %q is required", p.Name)
+			}
+			continue
+		}
+		if err := checkParamType(p, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkParamType rejects a value that cannot be what the manifest says it is.
+func checkParamType(p Param, value string) error {
+	switch p.Type {
+	case "", "string":
+		return nil
+	case "int":
+		if _, err := strconv.Atoi(strings.TrimSpace(value)); err != nil {
+			return fmt.Errorf("parameter %q must be a whole number, got %q", p.Name, value)
+		}
+	case "bool":
+		if _, err := strconv.ParseBool(strings.TrimSpace(value)); err != nil {
+			return fmt.Errorf("parameter %q must be true or false, got %q", p.Name, value)
+		}
+	default:
+		// An unknown declared type is the manifest author's problem, not the operator's;
+		// accept the value rather than block a legitimate instance.
+		return nil
 	}
 	return nil
 }

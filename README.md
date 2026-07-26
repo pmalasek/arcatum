@@ -16,6 +16,7 @@ výstup a ukládá ho **centrálně** — na zálohovaném serveru nemá zůstá
 - [Rychlý start (lokální vyzkoušení)](#rychlý-start-lokální-vyzkoušení)
 - [Konfigurace](#konfigurace)
 - [Zabezpečení (mTLS a podpis úloh)](#zabezpečení-mtls-a-podpis-úloh)
+- [Rotace klíčů](#rotace-klíčů)
 - [Zálohování souborů (restic)](#zálohování-souborů-restic)
 - [Web UI](#web-ui)
 - [Jak napsat vlastní zálohovací skript](#jak-napsat-vlastní-zálohovací-skript)
@@ -362,10 +363,76 @@ go run ./cmd/arcatum-ca admin  -dir pki -name petr           # tvůj přístup k
 go run ./cmd/arcatum-ca server -dir pki -hosts 172.24.0.60   # certifikát serveru
 ```
 
-**Co chybí:** CRL ani OCSP zavedené nejsou. Zneplatnění se vynucuje kontrolou stavu
-v databázi, což pro uzavřenou síť stačí a účinkuje okamžitě. Kdyby unikl klíč
-**serveru**, runnery to nezjistí — tam zbývá vydat novou CA a rozdat nový `ca.pem`.
-Rotace podepisovacího klíče úloh a master klíče secrets se také dělá ručně.
+### Rotace klíčů
+
+Všechny tři dlouhodobé klíče jde vyměnit bez zásahu na jednotlivých hostech. Postup je
+u všech stejný: **okno, kdy platí starý i nový**, runnery si nové převezmou samy, a okno
+zavřeš, až server potvrdí, že jsou všichni přeneseni. Stav sleduje záložka **Klíče**.
+
+| Co | Kdo to roznese | Cutover |
+|---|---|---|
+| master klíč secrets | nic — jen server | odebrat starý z `previous_keys` |
+| podepisovací klíč úloh | runnery samy (podepsaná sada) | odebrat starý z `previous_keys` |
+| certifikační autorita | runnery samy (podepsaný bundle) | zúžit bundle na novou CA |
+
+**Master klíč secrets** — žádná distribuce, celé na serveru:
+
+```sh
+arcatum-ca master-key -dir pki -name secrets-master-2      # 1. nový klíč
+# 2. server.toml: master_key = nový, previous_keys = ["…/secrets-master.key"]
+# 3. restart, pak v UI „Klíče" → přešifrovat (nebo POST /api/v1/secrets/rekey)
+# 4. až je pending 0, odeber previous_keys a restartuj
+```
+
+Přešifrování je **bezpečné spustit opakovaně** — hodnoty už na aktuálním klíči přeskočí,
+takže přerušený průběh se prostě dokončí dalším spuštěním.
+
+**Podepisovací klíč úloh** — runnery si novou sadu vezmou samy:
+
+```sh
+arcatum-ca signing -dir pki -name dispatch-signing-2
+# server.toml: [signing] key = nový, previous_keys = ["…/dispatch-signing.key"]
+# restart → runnery při dalším checkinu sadu přijmou → pak odeber previous_keys
+```
+
+> `previous_keys` u `[signing]` jsou **privátní** klíče, ne veřejné. Server totiž
+> publikovanou sadu podepisuje **všemi** klíči, které drží — jinak by runner, který zná
+> jen starý klíč, novou sadu odmítl a rotace by se nikdy nerozjela.
+
+**Certifikační autorita** — nejvíc kroků, protože jde o kotvu důvěry:
+
+```sh
+arcatum-ca init   -dir pki -name ca-new -cn "Arcatum CA 2026"   # 1. nová CA
+arcatum-ca bundle -dir pki -out pki/ca-bundle.pem ca.pem ca-new.pem
+# 2. server.toml: [tls] ca_cert = bundle; [bootstrap] ca_cert/ca_key = ca-new
+#    POZOR: certifikát serveru zatím NECHAT pod starou CA
+# 3. restart → runnery přijmou bundle a při obnově přejdou na novou CA
+# 4. až GET /api/v1/rotation hlásí safe_to_drop_old_ca:
+arcatum-ca server -dir pki -ca ca-new -hosts 172.24.0.60
+arcatum-ca admin  -dir pki -ca ca-new -name petr
+arcatum-ca bundle -dir pki -out pki/ca-bundle.pem ca-new.pem
+```
+
+> **Krok 2 je snadné pokazit.** Kdybys certifikát serveru vydal pod novou CA hned, runner,
+> který zná jen starou, se **nepřipojí** — a tím si nemůže stáhnout bundle, který by to
+> spravil. Rotace se zasekne. Server na to upozorní: pole `warning` ve stavu rotace
+> a hlášení v UI.
+
+**Co záměrně není automatické:** zavření okna. Odebrání kotvy důvěry je jediná operace,
+která tě umí zamknout z vlastního systému — neobsluhovaná úloha, která to v noci pokazí,
+nechá runnery, kteří nevěří ani staré, ani nové CA. Rutinní **obnova certifikátů**
+naopak automatická je, protože její selhání je bezpečné: starý certifikát dál platí.
+
+### Proč ne CRL/OCSP
+
+Nejsou zavedené — a zvážili jsme to. Zneplatnění se vynucuje **kontrolou stavu
+v databázi** na každém autorizačním bodu, což je pro uzavřený systém lepší než CRL:
+platí okamžitě, nemá cache ani propagační zpoždění.
+
+Zbývá jedna mezera: kdyby unikl **TLS klíč serveru**, runnery to samy nezjistí. Ale dopad
+je omezený — podpis úloh je jiný klíč, takže útočník nedokáže podstrčit kód ke spuštění,
+a pack soubory jsou šifrované heslem repozitáře. A hlavně: tuhle mezeru řeší **rotace
+CA** výše, s menším aparátem než CRL infrastruktura.
 
 ### Volání API s certifikátem
 
@@ -521,6 +588,7 @@ Tři přehledy a detail běhu:
 | **Běhy** | historie: stav, návratový kód, přenesená data, trvání |
 | **Instance** | příští běh, velikost restic repozitáře, tlačítko **spustit teď** |
 | **Obnova** | snapshoty, procházení stromu, stažení souboru nebo adresáře jako `.tar` |
+| **Klíče** | stav rotace všech tří klíčů, přešifrování secrets, postup migrace CA |
 | **Runnery** | stav (`pending`/`approved`/`rejected`), platforma, expirace certifikátu, kdy se naposledy ohlásil; u čekajících žádostí **schválit / zamítnout**, u schválených **zneplatnit** |
 
 Klikem na běh se otevře **detail s živým tailem výstupu** — u probíhající úlohy se log
@@ -677,6 +745,9 @@ Sloupec „role" platí při zapnutém mTLS — viz
 | `GET /api/v1/runs/{id}/tail?offset=N&stream=` | admin | přírůstek výstupu — základ živého tailu |
 | `GET /api/v1/runners` | admin | evidované runnery (stav, platforma, `last_seen`) |
 | `GET /api/v1/whoami` | admin | tvoje identita a expirace certifikátů |
+| `GET /api/v1/rotation` | admin | stav rotace všech tří klíčů |
+| `POST /api/v1/secrets/rekey` | admin | přešifruje secrets aktuálním master klíčem |
+| `GET /api/v1/trust` | runner / admin | podepsaná sada podepisovacích klíčů a CA bundle |
 | `POST /api/v1/runners/{id}/approve` | admin | schválí žádost a podepíše certifikát |
 | `POST /api/v1/runners/{id}/reject` | admin | zamítne žádost |
 | `POST /api/v1/runners/{id}/revoke` | admin | zneplatní certifikát, runner → `pending` |
@@ -843,6 +914,8 @@ statický binár bez runtime závislostí.
 - **Automatická obnova certifikátů** před expirací (včetně výměny klíče) a **zneplatnění
   při kompromitaci** — runner přejde do `pending` a sám požádá o nový; varování na
   blížící se expiraci ve webu
+- **Rotace všech tří dlouhodobých klíčů** (master klíč secrets, podepisovací klíč úloh, CA)
+  s oknem dvojí platnosti; runnery si nový trust materiál převezmou samy
 - Bezpečné předání secrets (dočasný soubor, ne env), maskování v API, ověření SHA-256 artefaktu
 
 - **Obnova z webu** — procházení snapshotů a stažení souboru či adresáře, běží na serveru
@@ -852,6 +925,6 @@ statický binár bez runtime závislostí.
 - **Obnova zpět na zálohovaný server** (dnes stáhneš data k sobě a nakopíruješ je sám)
 - **Notifikace** při selhání (e-mail/Slack)
 - Správa instancí přes API/web (dnes seed z JSON), auto-update runneru
-- **CRL/OCSP** a rotace CA, podepisovacího klíče úloh a master klíče secrets (dnes ručně)
+- **CRL/OCSP** — [záměrně nezavedeno](#proč-ne-crlocsp)
 
 Podrobná architektura a rozhodnutí: [docs/architecture.md](docs/architecture.md).

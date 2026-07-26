@@ -4,7 +4,7 @@ Zálohovací systém pro interní síť Xtuning. Monorepo, jazyk **Go** pro runn
 
 Stav implementace: fáze A–J hotové — scaffold, protokol, SQLite, mTLS a podpis úloh,
 šifrování secrets, restic zálohy, web UI, instalace a enrollment, životní cyklus
-certifikátů, obnova z webu. Přehled v §10, detaily v §11–13.
+certifikátů, obnova z webu, rotace klíčů. Přehled v §10, detaily v §11–14.
 
 ---
 
@@ -287,8 +287,8 @@ tiše). Runner také nemůže hlásit výsledky běhu, který nebyl přidělen j
   upozorní. Poloviční konfiguraci `[tls]` config odmítne a se zapnutým mTLS vyžaduje
   i `[signing]` a `[secrets]`, aby nedošlo k tichému propadnutí na nezabezpečený režim.
 - **Životní cyklus certifikátů** — automatická obnova a zneplatnění, viz §12.
-- **Chybí:** CRL/OCSP, rotace CA a podepisovacích klíčů, autentizace k webu jinak než
-  certifikátem.
+- **Rotace klíčů** — všechny tři dlouhodobé klíče, viz §14.
+- **Chybí:** autentizace k webu jinak než certifikátem. CRL/OCSP záměrně ne (§14).
 
 ---
 
@@ -635,3 +635,91 @@ hesla → 404 s vysvětlením.
 
 **Neověřeno:** vzhled záložky Obnova v prohlížeči — v tomto prostředí není headless
 browser. Ověřeno je, že všechny endpointy, které UI volá, fungují.
+
+---
+
+## 14. Rotace dlouhodobých klíčů
+
+Tři klíče žijí dlouho a všechny je jde vyměnit, aniž by někdo obcházel hosty: master klíč
+secrets, podepisovací klíč úloh a CA. Postup je u všech stejný — **okno, kdy platí starý
+i nový**, runnery si nové převezmou samy po ověřeném kanálu, a okno zavře operátor, až
+server potvrdí, že jsou všichni přeneseni.
+
+### Co je automatické a co ne
+
+| | Automatické? |
+|---|---|
+| **distribuce** nového materiálu | ano — runnery si ho stahují samy |
+| **provedení** (přešifrování, obnova certifikátů) | ano |
+| **zavření okna** (odebrání starého klíče) | **ne, operátor** |
+
+Kritérium: **operace, jejíž selhání je bezpečné, může běžet bez dozoru.** Obnova
+certifikátů (§12) je proto automatická — když selže, starý certifikát dál platí. Odebrání
+kotvy důvěry naopak umí operátora zamknout z vlastního systému, a neobsluhovaná úloha,
+která to v noci pokazí, nechá runnery, kteří nevěří ani staré, ani nové CA. Systém proto
+odmakává práci a hlásí, **jestli je bezpečné dokončit** (`safe_to_drop_old_ca`).
+
+### Master klíč secrets — `pkg/crypto/keyring.go`
+
+Keyring drží primární klíč a předchůdce. Uložené hodnoty nesou **ID klíče**:
+
+```
+enc:v2:<keyid>:<base64(nonce||ciphertext)>
+```
+
+ID dělá dvě věci: dešifrování sáhne přímo po správném klíči, a přešifrování pozná, co už
+je hotové — takže je **opakovatelné a přerušitelné**. Starší formát `enc:v1:` (bez ID) se
+čte zkoušením všech klíčů. `RekeySecrets` commituje po instancích, takže selhání v půlce
+nechá dřívější hotové; smíšený stav je čitelný, protože keyring má oba klíče.
+
+Distribuce žádná — celé na serveru.
+
+### Podepisovací klíč úloh — `pkg/crypto/signingset.go`
+
+Runner drží **sadu** akceptovaných klíčů, ne jeden. Sada se publikuje na
+`GET /api/v1/trust` a runner ji přijme, jen když je **podepsaná klíčem, kterému už věří**.
+Autorita k rotaci tedy leží na držení klíče, který se mění — ne na kontrole serveru.
+Kdyby stačil ověřený kanál, převzetí serveru by umožnilo přidat vlastní podepisovací klíč
+a spustit libovolný kód, tedy přesně to, čemu podpis úloh brání.
+
+**Sada se podepisuje všemi klíči, které server drží.** Tohle E2E odhalilo jako chybu
+v prvním návrhu: podepsat ji jen novým klíčem znamená, že runner na starém klíči ji nikdy
+nepřijme a rotace se **zasekne**. Proto jsou `[signing] previous_keys` **privátní** klíče.
+
+Kanonická forma (`SigningSetBytesToSign`) je seřazená a délkově prefixovaná, takže podpis
+nezávisí na pořadí, ale žádný klíč nelze přidat ani odebrat nepozorovaně.
+
+### Certifikační autorita
+
+Trust bundle je jeden PEM s víc autoritami (`LoadCAPool` to umí přes
+`AppendCertsFromPEM`). Během rotace `[tls] ca_cert` = bundle a `[bootstrap] ca_cert/ca_key`
+= nová CA: **verifikace přijímá obě, vydává se pod novou**. Runnery bundle převezmou
+(podepsaný, stejně jako sada klíčů) a při obnově přejdou na novou CA. `cert_issuer` se
+plní z živého spojení při checkinu, takže server ví, kdo už přešel.
+
+**Pořadí je tady zrádné a E2E to odhalilo:** certifikát serveru musí zůstat pod **starou**
+CA, dokud runnery bundle nemají. Kdyby ho vydala nová CA hned, runner se starou `ca.pem`
+neprojde handshakem — a tím si nemůže stáhnout bundle, který by to spravil. Server na to
+proto sám upozorní (`warning` ve stavu rotace).
+
+### Proč ne CRL/OCSP
+
+Zvažovali jsme je a **záměrně nejsou**. Zneplatnění se vynucuje kontrolou stavu v DB na
+každém autorizačním bodu (§12), což je pro uzavřený systém lepší než CRL: platí okamžitě,
+nemá cache ani propagační zpoždění. CRL by to jen nahradila něčím pomalejším.
+
+Zbývá jedna mezera — únik **TLS klíče serveru** runnery samy nezjistí. Dopad je ale
+omezený: podpis úloh je jiný klíč, takže útočník nespustí kód, a pack soubory jsou
+šifrované heslem repozitáře. A tuhle mezeru řeší **rotace CA** výše, s menším aparátem než
+CRL infrastruktura (kterou by navíc Go v TLS samo nekontrolovalo, takže by ji bylo nutné
+dopsat do runneru včetně řešení stárnutí seznamu).
+
+### Ověřeno E2E
+Všechny tři rotace provedeny proti běžícímu systému, včetně cutoveru:
+**master klíč** — okno se dvěma klíči, zálohy běží dál, přešifrování 2 hodnot, opakování
+no-op, po odebrání starého klíče vše čitelné novým.
+**podepisovací klíč** — runner na starém klíči přijal sadu se dvěma klíči, úloha podepsaná
+novým prošla, po cutoveru sada zúžena na jeden a zálohy dál běží.
+**CA** — bundle se dvěma autoritami, runner ho přijal, obnovou přešel na novou CA
+(`CN=Arcatum CA 2026`), stav ohlásil `safe_to_drop_old_ca`, po zúžení bundle záloha
+proběhla. Odhaleny a opraveny **dvě reálné chyby v pořadí**, obě popsané výše.

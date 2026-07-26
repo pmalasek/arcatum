@@ -28,12 +28,14 @@ type Agent struct {
 	log      *log.Logger
 	verifier crypto.Verifier
 	tls      TLSFiles
+	// trust is where rotated signing keys and CA bundles are stored once adopted.
+	trust TrustPaths
 }
 
 // NewAgent builds an agent for a runner identity. When verifier is non-nil every
 // dispatch must carry a valid Arcatum signature or it is refused unexecuted.
 func NewAgent(client *Client, req proto.CheckinRequest, workBase string, logger *log.Logger,
-	verifier crypto.Verifier, tlsFiles TLSFiles) *Agent {
+	verifier crypto.Verifier, tlsFiles TLSFiles, trust TrustPaths) *Agent {
 	return &Agent{
 		client:   client,
 		req:      req,
@@ -41,6 +43,7 @@ func NewAgent(client *Client, req proto.CheckinRequest, workBase string, logger 
 		log:      logger,
 		verifier: verifier,
 		tls:      tlsFiles,
+		trust:    trust,
 	}
 }
 
@@ -106,19 +109,34 @@ func (a *Agent) handleDenied(denied *DeniedError) error {
 	return ErrRestartRequired
 }
 
-// Run loops Tick every interval until the context is cancelled, or until the
-// certificate changes and the process needs restarting.
+// RunOnce performs one complete work cycle: adopt any rotated trust material, renew the
+// certificate if it is nearing expiry, then check in and run whatever is due.
+//
+// Run and the -once flag share it deliberately: a single cycle should do exactly what a
+// cycle of the loop does, or debugging with -once would exercise a different code path
+// from the one that runs in production.
+func (a *Agent) RunOnce(ctx context.Context) error {
+	// Pick up a rotated signing key or CA before anything else: a dispatch signed with a
+	// new key has to be verifiable by the time it arrives.
+	if a.RefreshTrust(ctx, a.trust) {
+		return ErrRestartRequired
+	}
+	// Replace the certificate before it expires rather than after, while the current one
+	// still authenticates the request.
+	if a.RenewIfNeeded(ctx, a.tls.Cert, a.tls.Key) {
+		return ErrRestartRequired
+	}
+	return a.Tick(ctx)
+}
+
+// Run loops RunOnce every interval until the context is cancelled, or until the trust
+// material changes and the process needs restarting.
 func (a *Agent) Run(ctx context.Context, interval time.Duration) error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
 	tick := func() error {
-		// Replace the certificate before it expires rather than after, while the current
-		// one still authenticates the request.
-		if a.RenewIfNeeded(ctx, a.tls.Cert, a.tls.Key) {
-			return ErrRestartRequired
-		}
-		if err := a.Tick(ctx); err != nil {
+		if err := a.RunOnce(ctx); err != nil {
 			if errors.Is(err, ErrRestartRequired) {
 				return err
 			}

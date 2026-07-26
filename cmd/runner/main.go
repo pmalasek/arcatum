@@ -68,6 +68,14 @@ func main() {
 		}
 	}
 
+	// Where rotated trust material is kept. The CA bundle is the file the config already
+	// points at, so an adopted bundle is picked up on the next start; the signing-key set
+	// sits next to the runner's state.
+	trustPaths := runner.TrustPaths{
+		SigningKeys: filepath.Join(cfg.Runner.DataDir, "pki", "signing-keys.pem"),
+		CACert:      cfg.TLS.CACert,
+	}
+
 	// With mTLS configured, the server identifies this runner by its certificate's
 	// common name, so the certificate must be issued for this runner_id.
 	httpClient := &http.Client{Timeout: 0} // no global timeout: runs stream for as long as they take
@@ -81,15 +89,17 @@ func main() {
 			TLSClientConfig:     tlsConfig,
 			TLSHandshakeTimeout: 10 * time.Second,
 		}
-		if verifier, err = crypto.LoadVerifier(cfg.Signing.PublicKey); err != nil {
-			logger.Fatalf("signing public key: %v", err)
+		// Prefer the set of keys adopted from the server over the single key install.sh
+		// delivered, so a signing-key rotation survives restarts.
+		if verifier, err = runner.LoadTrustedSigningKeys(trustPaths.SigningKeys, cfg.Signing.PublicKey); err != nil {
+			logger.Fatalf("signing keys: %v", err)
 		}
 	}
 
 	client := runner.NewClient(cfg.Runner.Server, httpClient)
 	workBase := filepath.Join(cfg.Runner.DataDir, "work")
 	tlsFiles := runner.TLSFiles{CACert: cfg.TLS.CACert, Cert: cfg.TLS.Cert, Key: cfg.TLS.Key}
-	agent := runner.NewAgent(client, req, workBase, logger, verifier, tlsFiles)
+	agent := runner.NewAgent(client, req, workBase, logger, verifier, tlsFiles, trustPaths)
 
 	logger.Printf("arcatum-runner (protocol %s) — server=%s runner=%q (%s/%s)",
 		proto.Version, cfg.Runner.Server, req.Hostname, req.OS, req.Arch)
@@ -101,7 +111,12 @@ func main() {
 	}
 
 	if *once {
-		if err := agent.Tick(ctx); err != nil {
+		// One full cycle, the same one the loop performs — including adopting rotated
+		// trust material, so -once behaves like production rather than a shortcut.
+		if err := agent.RunOnce(ctx); errors.Is(err, runner.ErrRestartRequired) {
+			logger.Printf("trust material changed; run again to use it")
+			return
+		} else if err != nil {
 			logger.Fatalf("checkin: %v", err)
 		}
 		return

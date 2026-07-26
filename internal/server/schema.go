@@ -71,4 +71,8 @@ var addColumns = []struct{ table, column, definition string }{
 	{"runners", "cert_not_after", "INTEGER NOT NULL DEFAULT 0"},
 	{"runners", "revoked_at", "INTEGER NOT NULL DEFAULT 0"},
 	{"runners", "renewed_at", "INTEGER NOT NULL DEFAULT 0"},
+	// Which authority issued the runner's current certificate. Recorded at check-in so a
+	// CA rotation can be tracked: an operator needs to know every runner has moved to the
+	// new authority before the old one is dropped from the trust bundle.
+	{"runners", "cert_issuer", "TEXT NOT NULL DEFAULT ''"},
 }

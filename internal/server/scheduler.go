@@ -68,6 +68,14 @@ func (s *Scheduler) MarkDispatched(instanceID string, now time.Time) {
 	}
 }
 
+// Untrack forgets an instance, so a deleted one stops being scheduled without needing a
+// restart.
+func (s *Scheduler) Untrack(instanceID string) {
+	s.mu.Lock()
+	delete(s.st, instanceID)
+	s.mu.Unlock()
+}
+
 // Trigger requests an immediate run of an instance on its next check-in. This backs
 // the web UI's "run now" button (script debugging).
 func (s *Scheduler) Trigger(instanceID string) bool {

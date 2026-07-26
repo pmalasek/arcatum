@@ -28,6 +28,12 @@ type Server struct {
 	// serverCertNotAfter is when this server's own certificate expires. Zero when mTLS
 	// is off.
 	serverCertNotAfter time.Time
+	// serverCertIssuer is the authority that issued this server's certificate, needed to
+	// spot a CA rotation performed in the wrong order.
+	serverCertIssuer string
+	// rotation holds the trust material published to runners, and what the server
+	// currently signs certificates with.
+	rotation RotationOptions
 }
 
 // Options carries the security wiring. Both fields are empty/false in development
@@ -42,6 +48,11 @@ type Options struct {
 	// ServerCertNotAfter is this server's certificate expiry, surfaced in the UI so it
 	// does not lapse unnoticed.
 	ServerCertNotAfter time.Time
+	// ServerCertIssuer is the authority that issued this server's certificate.
+	ServerCertIssuer string
+	// Rotation is the trust material runners fetch, and the authority certificates are
+	// issued under. See rotate.go.
+	Rotation RotationOptions
 }
 
 // New builds a Server over an open Store: loads the script catalog and starts
@@ -74,6 +85,8 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		requireClientCert:  opts.RequireClientCert,
 		ca:                 opts.CA,
 		serverCertNotAfter: opts.ServerCertNotAfter,
+		serverCertIssuer:   opts.ServerCertIssuer,
+		rotation:           opts.Rotation,
 	}, nil
 }
 
@@ -85,6 +98,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/runs/updates", s.handleUpdates)
 	mux.HandleFunc("POST /api/v1/instances/{id}/run", s.adminOnly(s.handleTrigger))
 	mux.HandleFunc("GET /api/v1/instances", s.adminOnly(s.handleListInstances))
+	mux.HandleFunc("POST /api/v1/instances", s.adminOnly(s.handleCreateInstance))
+	mux.HandleFunc("PUT /api/v1/instances/{id}", s.adminOnly(s.handleUpdateInstance))
+	mux.HandleFunc("DELETE /api/v1/instances/{id}", s.adminOnly(s.handleDeleteInstance))
+	mux.HandleFunc("GET /api/v1/scripts", s.adminOnly(s.handleListScripts))
 	mux.HandleFunc("GET /api/v1/runs", s.adminOnly(s.handleListRuns))
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.adminOnly(s.handleRunDetail))
 	mux.HandleFunc("GET /api/v1/runs/{id}/output", s.adminOnly(s.handleRunOutput))
@@ -97,6 +114,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/runners/revoke-all", s.adminOnly(s.handleRevokeAllRunners))
 	// Renewal is authenticated by the runner's current certificate, not by an operator.
 	mux.HandleFunc("POST /api/v1/renew", s.handleRenew)
+	// Trust material: runners fetch it every check-in so a rotation propagates by itself.
+	mux.HandleFunc("GET /api/v1/trust", s.handleTrustBundle)
+	mux.HandleFunc("GET /api/v1/rotation", s.adminOnly(s.handleRotationStatus))
+	mux.HandleFunc("POST /api/v1/secrets/rekey", s.adminOnly(s.handleRekeySecrets))
 	mux.HandleFunc("GET /api/v1/instances/{id}/repo", s.adminOnly(s.handleRepoInfo))
 	// Restore: browse the repository the server already holds and pull files back out.
 	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots", s.adminOnly(s.handleSnapshots))
@@ -135,13 +156,16 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	req.RunnerID = runnerID // the certificate is authoritative
 
 	now := time.Now()
-	// Record when this runner's certificate expires, taken from the live connection so
-	// an operator can see it coming instead of the runner just stopping one day.
+	// Record the certificate's expiry and issuer, taken from the live connection: expiry
+	// so it does not lapse unnoticed, issuer so a CA rotation can be tracked to
+	// completion. Both are then known for hand-issued certificates too.
 	var certNotAfter time.Time
+	var certIssuer string
 	if cert := peerCert(r); cert != nil {
 		certNotAfter = cert.NotAfter
+		certIssuer = cert.Issuer.CommonName
 	}
-	if err := s.store.RecordCheckin(req, certNotAfter, now); err != nil {
+	if err := s.store.RecordCheckin(req, certNotAfter, now, certIssuer); err != nil {
 		s.log.Printf("checkin: record runner %q: %v", runnerID, err)
 	}
 

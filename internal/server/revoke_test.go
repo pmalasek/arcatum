@@ -101,7 +101,7 @@ func TestRevokedRunnerLosesRepositoryAccess(t *testing.T) {
 		ID: "files-web01", Script: "files-backup", RunnerID: "web-01",
 		Schedule: ScheduleJSON{Frequency: "daily", Time: "01:30"},
 	}})
-	if _, err := srv.store.ImportInstances(path); err != nil {
+	if _, err := srv.store.ImportInstances(path, true); err != nil {
 		t.Fatalf("ImportInstances: %v", err)
 	}
 	enrolledRunner(t, srv, "web-01")

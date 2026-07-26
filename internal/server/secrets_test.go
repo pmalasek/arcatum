@@ -26,9 +26,9 @@ func openEncryptedStore(t *testing.T) (st *Store, dir, dbPath, keyPath string) {
 	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
 		t.Fatalf("write key: %v", err)
 	}
-	box, err := crypto.LoadSecretBox(keyPath)
+	box, err := crypto.LoadKeyring(keyPath, nil)
 	if err != nil {
-		t.Fatalf("LoadSecretBox: %v", err)
+		t.Fatalf("LoadKeyring: %v", err)
 	}
 	st, err = Open(dbPath, filepath.Join(dir, "backup"), box)
 	if err != nil {
@@ -48,7 +48,7 @@ func importOneSecret(t *testing.T, st *Store, dir string) {
 		Secrets:  map[string]string{"password": testSecret},
 		Schedule: ScheduleJSON{Frequency: "daily", Time: "02:30"},
 	}})
-	if _, err := st.ImportInstances(path); err != nil {
+	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("ImportInstances: %v", err)
 	}
 }
@@ -105,9 +105,9 @@ func TestSecretSurvivesReopenWithSameKey(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	box, err := crypto.LoadSecretBox(keyPath)
+	box, err := crypto.LoadKeyring(keyPath, nil)
 	if err != nil {
-		t.Fatalf("LoadSecretBox: %v", err)
+		t.Fatalf("LoadKeyring: %v", err)
 	}
 	reopened, err := Open(dbPath, filepath.Join(dir, "backup"), box)
 	if err != nil {
@@ -140,9 +140,9 @@ func TestSecretUnreadableWithWrongKey(t *testing.T) {
 	if err := os.WriteFile(otherPath, otherKey, 0o600); err != nil {
 		t.Fatalf("write key: %v", err)
 	}
-	box, err := crypto.LoadSecretBox(otherPath)
+	box, err := crypto.LoadKeyring(otherPath, nil)
 	if err != nil {
-		t.Fatalf("LoadSecretBox: %v", err)
+		t.Fatalf("LoadKeyring: %v", err)
 	}
 	reopened, err := Open(dbPath, filepath.Join(dir, "backup"), box)
 	if err != nil {
@@ -197,9 +197,9 @@ func TestLegacyPlaintextSecretStillReadable(t *testing.T) {
 	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
 		t.Fatalf("write key: %v", err)
 	}
-	box, err := crypto.LoadSecretBox(keyPath)
+	box, err := crypto.LoadKeyring(keyPath, nil)
 	if err != nil {
-		t.Fatalf("LoadSecretBox: %v", err)
+		t.Fatalf("LoadKeyring: %v", err)
 	}
 	encrypted, err := Open(dbPath, backupDir, box)
 	if err != nil {

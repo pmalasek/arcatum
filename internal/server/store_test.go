@@ -46,7 +46,7 @@ func TestImportInstancesUpserts(t *testing.T) {
 		Secrets:  map[string]string{"password": "p1"},
 		Schedule: ScheduleJSON{Frequency: "weekly", Time: "02:30", Weekdays: []string{"mon", "thu"}},
 	}})
-	if n, err := st.ImportInstances(path); err != nil || n != 1 {
+	if n, err := st.ImportInstances(path, true); err != nil || n != 1 {
 		t.Fatalf("ImportInstances = %d, %v; want 1, nil", n, err)
 	}
 
@@ -67,7 +67,7 @@ func TestImportInstancesUpserts(t *testing.T) {
 		Params:   map[string]string{"database": "orders"},
 		Schedule: ScheduleJSON{Frequency: "daily", Time: "03:00"},
 	}})
-	if _, err := st.ImportInstances(path); err != nil {
+	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
 	all, err := st.Instances()
@@ -84,7 +84,7 @@ func TestImportInstancesUpserts(t *testing.T) {
 
 func TestImportInstancesMissingFileIsOK(t *testing.T) {
 	st, dir := openTestStore(t)
-	n, err := st.ImportInstances(filepath.Join(dir, "nope.json"))
+	n, err := st.ImportInstances(filepath.Join(dir, "nope.json"), true)
 	if err != nil || n != 0 {
 		t.Fatalf("ImportInstances(missing) = %d, %v; want 0, nil", n, err)
 	}
@@ -97,7 +97,7 @@ func TestInstancesForRunner(t *testing.T) {
 		{ID: "b", Script: "hello", RunnerID: "host-2", Schedule: ScheduleJSON{Frequency: "daily", Time: "01:00"}},
 		{ID: "c", Script: "hello", RunnerID: "host-1", Schedule: ScheduleJSON{Frequency: "daily", Time: "01:00"}},
 	})
-	if _, err := st.ImportInstances(path); err != nil {
+	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("import: %v", err)
 	}
 	got, err := st.InstancesForRunner("host-1")
@@ -232,12 +232,12 @@ func TestRecordCheckinUpsertsRunner(t *testing.T) {
 	first := time.Now().Add(-time.Hour)
 	req := proto.CheckinRequest{RunnerID: "host-1", Hostname: "host-1", OS: "linux", Arch: "amd64"}
 	expiry := time.Now().Add(825 * 24 * time.Hour)
-	if err := st.RecordCheckin(req, expiry, first); err != nil {
+	if err := st.RecordCheckin(req, expiry, first, "Arcatum CA"); err != nil {
 		t.Fatalf("RecordCheckin: %v", err)
 	}
 	later := time.Now()
 	// A later check-in without a certificate expiry must not erase the known one.
-	if err := st.RecordCheckin(req, time.Time{}, later); err != nil {
+	if err := st.RecordCheckin(req, time.Time{}, later, ""); err != nil {
 		t.Fatalf("RecordCheckin again: %v", err)
 	}
 	runners, err := st.Runners()
@@ -296,7 +296,7 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 	}
 	inst := &Instance{ID: "hello-demo", Script: "hello", RunnerID: "host-1"}
 	path := writeInstances(t, dir, []*Instance{inst})
-	if _, err := st.ImportInstances(path); err != nil {
+	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("import: %v", err)
 	}
 	run, err := st.CreateRun(inst)
@@ -370,7 +370,7 @@ func TestRecordCheckinTracksCertificateExpiry(t *testing.T) {
 	req := proto.CheckinRequest{RunnerID: "host-1", Hostname: "host-1", OS: "linux", Arch: "amd64"}
 	expiry := time.Now().Add(30 * 24 * time.Hour).Truncate(time.Millisecond)
 
-	if err := st.RecordCheckin(req, expiry, time.Now()); err != nil {
+	if err := st.RecordCheckin(req, expiry, time.Now(), "Arcatum CA"); err != nil {
 		t.Fatalf("RecordCheckin: %v", err)
 	}
 	runners, err := st.Runners()
@@ -382,7 +382,7 @@ func TestRecordCheckinTracksCertificateExpiry(t *testing.T) {
 	}
 
 	// A check-in with no certificate (development mode) must keep the known expiry.
-	if err := st.RecordCheckin(req, time.Time{}, time.Now()); err != nil {
+	if err := st.RecordCheckin(req, time.Time{}, time.Now(), ""); err != nil {
 		t.Fatalf("RecordCheckin: %v", err)
 	}
 	runners, _ = st.Runners()
@@ -392,7 +392,7 @@ func TestRecordCheckinTracksCertificateExpiry(t *testing.T) {
 
 	// A renewed certificate updates it.
 	newExpiry := expiry.Add(365 * 24 * time.Hour)
-	if err := st.RecordCheckin(req, newExpiry, time.Now()); err != nil {
+	if err := st.RecordCheckin(req, newExpiry, time.Now(), "Arcatum CA"); err != nil {
 		t.Fatalf("RecordCheckin: %v", err)
 	}
 	runners, _ = st.Runners()

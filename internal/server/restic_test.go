@@ -116,7 +116,7 @@ func resticTestServer(t *testing.T, requireClientCert bool) (*Server, string) {
 		ID: "files-web01", Script: "files-backup", RunnerID: "web-01",
 		Schedule: ScheduleJSON{Frequency: "daily", Time: "01:30"},
 	}})
-	if _, err := st.ImportInstances(path); err != nil {
+	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("ImportInstances: %v", err)
 	}
 	// Mirror what New() wires up, so handlers that read the scheduler or catalog work.

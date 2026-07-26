@@ -237,3 +237,13 @@ select {
   content: "(žádný výstup)";
   color: var(--muted);
 }
+
+/* Key rotation view: one block per rotatable secret */
+.rot { border-bottom: 1px solid var(--border); }
+.rot:last-child { border-bottom: none; }
+.rot h3 {
+  margin: 0;
+  padding: .7rem .8rem .2rem;
+  font-size: .9rem;
+}
+.rot .meta { border-bottom: none; }

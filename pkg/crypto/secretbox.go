@@ -45,6 +45,13 @@ func GenerateMasterKey() ([]byte, error) {
 	return []byte(base64.StdEncoding.EncodeToString(key) + "\n"), nil
 }
 
+// randRead fills b with randomness; a helper so the keyring does not import crypto/rand
+// separately.
+func randRead(b []byte) error {
+	_, err := rand.Read(b)
+	return err
+}
+
 // LoadSecretBox reads a master key file and returns a box for it.
 func LoadSecretBox(path string) (*AESSecretBox, error) {
 	data, err := os.ReadFile(path)

@@ -33,7 +33,7 @@ func (i *Instance) Redacted() *Instance {
 	if i.Secrets != nil {
 		copyInst.Secrets = make(map[string]string, len(i.Secrets))
 		for k := range i.Secrets {
-			copyInst.Secrets[k] = "***"
+			copyInst.Secrets[k] = redactedSecret
 		}
 	}
 	return &copyInst
