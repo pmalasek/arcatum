@@ -36,6 +36,10 @@ type Server struct {
 	rotation RotationOptions
 	// dist describes the published runner builds, for auto-update.
 	dist *distCache
+	// web configures the plain-HTTP web listener's sessions (see users.go).
+	web WebOptions
+	// logins throttles failed password logins.
+	logins *loginLimiter
 }
 
 // Options carries the security wiring. Both fields are empty/false in development
@@ -58,6 +62,8 @@ type Options struct {
 	// DistDir holds the published runner binaries and their VERSION file. Empty disables
 	// auto-update entirely.
 	DistDir string
+	// Web configures password login on the plain-HTTP web listener (see users.go).
+	Web WebOptions
 }
 
 // New builds a Server over an open Store: loads the script catalog and starts
@@ -93,58 +99,115 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		serverCertIssuer:   opts.ServerCertIssuer,
 		rotation:           opts.Rotation,
 		dist:               &distCache{dir: opts.DistDir},
+		web:                opts.Web,
+		logins:             newLoginLimiter(),
 	}, nil
 }
 
-// Handler returns the HTTP router. Runner endpoints authenticate as a runner;
-// everything else needs an admin certificate (see auth.go).
+// Arcatum listens on two ports, because the two kinds of caller are not alike:
+//
+//   - Handler (server.listen, mTLS): runners. A machine is installed once, gets a
+//     certificate, and is refused during the TLS handshake if it has none — which is
+//     exactly what you want from a host that pushes backups. The operator API is served
+//     here too, for calling it with an admin certificate from a shell.
+//   - WebHandler (web.listen, plain HTTP): people. The same operator API plus the web UI,
+//     authenticated with a username and a password (users.go). No certificate to export
+//     into every browser and no certificate to silently expire.
+//
+// Both listeners reach the same handlers; only the guard in front differs. The
+// registration below is therefore shared, with the guard passed in.
+
+// guard wraps a handler with the authentication of the listener it is registered on.
+type guard func(http.HandlerFunc) http.HandlerFunc
+
+// Handler returns the router for the mTLS listener: everything runners need, plus the
+// operator API for an admin certificate (see auth.go).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// --- runners: identified by their certificate ---
 	mux.HandleFunc("POST /api/v1/checkin", s.handleCheckin)
 	mux.HandleFunc("POST /api/v1/runs/updates", s.handleUpdates)
-	mux.HandleFunc("POST /api/v1/instances/{id}/run", s.adminOnly(s.handleTrigger))
-	mux.HandleFunc("GET /api/v1/instances", s.adminOnly(s.handleListInstances))
-	mux.HandleFunc("POST /api/v1/instances", s.adminOnly(s.handleCreateInstance))
-	mux.HandleFunc("PUT /api/v1/instances/{id}", s.adminOnly(s.handleUpdateInstance))
-	mux.HandleFunc("DELETE /api/v1/instances/{id}", s.adminOnly(s.handleDeleteInstance))
-	mux.HandleFunc("GET /api/v1/scripts", s.adminOnly(s.handleListScripts))
-	mux.HandleFunc("GET /api/v1/runs", s.adminOnly(s.handleListRuns))
-	mux.HandleFunc("GET /api/v1/runs/{id}", s.adminOnly(s.handleRunDetail))
-	mux.HandleFunc("GET /api/v1/runs/{id}/output", s.adminOnly(s.handleRunOutput))
-	mux.HandleFunc("GET /api/v1/runs/{id}/tail", s.adminOnly(s.handleRunTail))
-	mux.HandleFunc("GET /api/v1/whoami", s.adminOnly(s.handleWhoAmI))
-	mux.HandleFunc("GET /api/v1/runners", s.adminOnly(s.handleListRunners))
-	mux.HandleFunc("POST /api/v1/runners/{id}/approve", s.adminOnly(s.handleApproveRunner))
-	mux.HandleFunc("POST /api/v1/runners/{id}/reject", s.adminOnly(s.handleRejectRunner))
-	mux.HandleFunc("POST /api/v1/runners/{id}/revoke", s.adminOnly(s.handleRevokeRunner))
-	mux.HandleFunc("POST /api/v1/runners/revoke-all", s.adminOnly(s.handleRevokeAllRunners))
 	// Renewal is authenticated by the runner's current certificate, not by an operator.
 	mux.HandleFunc("POST /api/v1/renew", s.handleRenew)
 	// Trust material: runners fetch it every check-in so a rotation propagates by itself.
 	mux.HandleFunc("GET /api/v1/trust", s.handleTrustBundle)
-	mux.HandleFunc("GET /api/v1/rotation", s.adminOnly(s.handleRotationStatus))
 	// Auto-update: the manifest is signed, and binaries are served only over mTLS.
 	mux.HandleFunc("GET /api/v1/update", s.handleUpdateManifest)
 	mux.HandleFunc("GET /api/v1/update/{name}", s.handleUpdateDownload)
-	mux.HandleFunc("POST /api/v1/secrets/rekey", s.adminOnly(s.handleRekeySecrets))
-	mux.HandleFunc("GET /api/v1/instances/{id}/repo", s.adminOnly(s.handleRepoInfo))
-	// Restore: browse the repository the server already holds and pull files back out.
-	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots", s.adminOnly(s.handleSnapshots))
-	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots/{snapshot}/ls", s.adminOnly(s.handleSnapshotLS))
-	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots/{snapshot}/download", s.adminOnly(s.handleRestoreDownload))
 	// restic's REST backend: runners push file backups straight into the server's
 	// repository for their own instances. Authorization is per repository (restic.go).
 	mux.HandleFunc("/restic/", s.handleRestic)
-	// Plain-text status, handy from a shell where the browser UI is not.
-	mux.HandleFunc("GET /status", s.adminOnly(s.handleIndex))
-	// The embedded web UI. A bare "GET /" would be a catch-all and conflict with
-	// "/restic/", so the root is matched exactly and assets get their own patterns.
-	uiHandler := s.adminOnly(http.FileServerFS(web.FS()).ServeHTTP)
-	mux.HandleFunc("GET /{$}", uiHandler)
+
+	// --- operators: identified by an admin certificate ---
+	s.registerOperatorRoutes(mux, s.adminOnly, s.adminOnly)
+	// The root is the text status page here: the browser UI lives on the web listener,
+	// where logging in with a password is possible. A bare "GET /" would also be a
+	// catch-all and conflict with "/restic/", so it is matched exactly.
+	mux.HandleFunc("GET /{$}", s.adminOnly(s.handleIndex))
+	return mux
+}
+
+// WebHandler returns the router for the plain-HTTP web listener: the embedded UI,
+// password login, account management and the operator API behind a session cookie.
+func (s *Server) WebHandler() http.Handler {
+	mux := http.NewServeMux()
+
+	// Login is the one endpoint that cannot require a session.
+	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
+	mux.HandleFunc("POST /api/v1/logout", s.handleLogout)
+	// Changing your own password needs only a session, whatever the role.
+	mux.HandleFunc("POST /api/v1/password", s.webRead(s.handleChangeOwnPassword))
+	// Accounts: who may reach the system at all is an administrator's business.
+	mux.HandleFunc("GET /api/v1/users", s.webAdmin(s.handleListUsers))
+	mux.HandleFunc("POST /api/v1/users", s.webAdmin(s.handleCreateUser))
+	mux.HandleFunc("PUT /api/v1/users/{name}", s.webAdmin(s.handleUpdateUser))
+	mux.HandleFunc("DELETE /api/v1/users/{name}", s.webAdmin(s.handleDeleteUser))
+
+	// The operator API, with a viewer allowed to read and an admin allowed to change.
+	s.registerOperatorRoutes(mux, s.webRead, s.webAdmin)
+
+	// The UI itself is served without a session: it is the page that *asks* for the
+	// login, and the assets carry no data of their own. Everything it then displays goes
+	// through the API above.
+	ui := http.FileServerFS(web.FS()).ServeHTTP
+	mux.HandleFunc("GET /{$}", ui)
 	for _, asset := range []string{"app.js", "style.css", "index.html"} {
-		mux.HandleFunc("GET /"+asset, uiHandler)
+		mux.HandleFunc("GET /"+asset, ui)
 	}
 	return mux
+}
+
+// registerOperatorRoutes adds the API an operator drives, with read wrapping the
+// endpoints that only look and write wrapping those that change something. Splitting
+// the two is what makes the viewer role possible on the web listener; on the mTLS
+// listener both are the same admin-certificate check.
+func (s *Server) registerOperatorRoutes(mux *http.ServeMux, read, write guard) {
+	mux.HandleFunc("GET /api/v1/whoami", read(s.handleWhoAmI))
+	mux.HandleFunc("GET /api/v1/instances", read(s.handleListInstances))
+	mux.HandleFunc("POST /api/v1/instances", write(s.handleCreateInstance))
+	mux.HandleFunc("PUT /api/v1/instances/{id}", write(s.handleUpdateInstance))
+	mux.HandleFunc("DELETE /api/v1/instances/{id}", write(s.handleDeleteInstance))
+	mux.HandleFunc("POST /api/v1/instances/{id}/run", write(s.handleTrigger))
+	mux.HandleFunc("GET /api/v1/scripts", read(s.handleListScripts))
+	mux.HandleFunc("GET /api/v1/runs", read(s.handleListRuns))
+	mux.HandleFunc("GET /api/v1/runs/{id}", read(s.handleRunDetail))
+	mux.HandleFunc("GET /api/v1/runs/{id}/output", read(s.handleRunOutput))
+	mux.HandleFunc("GET /api/v1/runs/{id}/tail", read(s.handleRunTail))
+	mux.HandleFunc("GET /api/v1/runners", read(s.handleListRunners))
+	mux.HandleFunc("POST /api/v1/runners/{id}/approve", write(s.handleApproveRunner))
+	mux.HandleFunc("POST /api/v1/runners/{id}/reject", write(s.handleRejectRunner))
+	mux.HandleFunc("POST /api/v1/runners/{id}/revoke", write(s.handleRevokeRunner))
+	mux.HandleFunc("POST /api/v1/runners/revoke-all", write(s.handleRevokeAllRunners))
+	mux.HandleFunc("GET /api/v1/rotation", read(s.handleRotationStatus))
+	mux.HandleFunc("POST /api/v1/secrets/rekey", write(s.handleRekeySecrets))
+	mux.HandleFunc("GET /api/v1/instances/{id}/repo", read(s.handleRepoInfo))
+	// Restore: browse the repository the server already holds and pull files back out.
+	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots", read(s.handleSnapshots))
+	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots/{snapshot}/ls", read(s.handleSnapshotLS))
+	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots/{snapshot}/download", read(s.handleRestoreDownload))
+	// Plain-text status, handy from a shell where the browser UI is not.
+	mux.HandleFunc("GET /status", read(s.handleIndex))
 }
 
 // handleCheckin registers the runner and returns the jobs due for it.

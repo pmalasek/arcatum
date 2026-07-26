@@ -7,10 +7,37 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<!-- Přihlášení. Zakryje celou aplikaci, dokud server nepotvrdí platné přihlášení —
+     runnery se hlásí certifikátem, lidé jménem a heslem. -->
+<div id="login" class="login hidden">
+  <form id="login-form" class="login-box" autocomplete="on">
+    <h1>Arcatum</h1>
+    <p class="sub">zálohovací systém — Xtuning</p>
+    <label class="login-field">uživatel
+      <input id="login-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+    </label>
+    <label class="login-field">heslo
+      <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button id="login-submit" class="action primary" type="submit">přihlásit</button>
+    <div id="login-error" class="login-error"></div>
+  </form>
+</div>
+
+<!-- Aplikace. Skrytá, dokud přihlášení neproběhne. -->
+<div id="app" class="hidden">
+
 <header>
   <h1>Arcatum</h1>
   <span class="sub">zálohovací systém — Xtuning</span>
   <span id="conn" class="conn"></span>
+  <span class="account">
+    <span id="me-name" class="me-name"></span>
+    <span id="me-role" class="badge"></span>
+    <button id="open-account" class="ghost">změnit heslo</button>
+    <button id="logout" class="ghost">odhlásit</button>
+  </span>
 </header>
 
 <nav>
@@ -19,6 +46,7 @@
   <button class="tab" data-view="restore">Obnova</button>
   <button class="tab" data-view="runners">Runnery</button>
   <button class="tab" data-view="rotation">Klíče</button>
+  <button class="tab admin-only" data-view="users">Uživatelé</button>
 </nav>
 
 <!-- Varování na blížící se expiraci certifikátů; skryté, dokud není co hlásit -->
@@ -43,7 +71,7 @@
       </thead>
       <tbody id="instances-body"><tr><td colspan="6" class="empty">načítám…</td></tr></tbody>
     </table>
-    <div class="section-foot">
+    <div class="section-foot admin-only">
       <button id="new-instance" class="action">nová instance</button>
       <span class="hint">formulář se sestaví z parametrů, které skript deklaruje</span>
     </div>
@@ -93,9 +121,64 @@
       </thead>
       <tbody id="runners-body"><tr><td colspan="7" class="empty">načítám…</td></tr></tbody>
     </table>
-    <div class="section-foot">
+    <div class="section-foot admin-only">
       <button id="revoke-all" class="action danger">zneplatnit certifikáty všech runnerů</button>
       <span class="hint">při podezření na kompromitaci CA — zastaví zálohování, než runnery znovu schválíš</span>
+    </div>
+  </section>
+
+  <!-- Rotace klíčů: stav všech tří klíčů a co ještě zbývá dokončit -->
+  <section id="view-rotation" class="view hidden">
+    <div id="rotation-body"><p class="empty">načítám…</p></div>
+  </section>
+
+  <!-- Uživatelé web UI. Runnery sem nepatří — ty se hlásí certifikátem. -->
+  <section id="view-users" class="view hidden">
+    <table>
+      <thead>
+        <tr><th>Uživatel</th><th>Role</th><th>Stav</th><th>Vytvořen</th><th>Poslední přihlášení</th><th></th></tr>
+      </thead>
+      <tbody id="users-body"><tr><td colspan="6" class="empty">načítám…</td></tr></tbody>
+    </table>
+    <div class="section-foot">
+      <input id="new-user-name" placeholder="jmeno" autocapitalize="none" spellcheck="false" size="14">
+      <select id="new-user-role">
+        <option value="viewer">viewer — jen čte</option>
+        <option value="admin">admin — může měnit</option>
+      </select>
+      <input id="new-user-pass" type="password" placeholder="heslo (nepovinné)" size="18">
+      <button id="new-user" class="action">přidat uživatele</button>
+      <span class="hint">bez hesla ho server vygeneruje a jednorázově zobrazí</span>
+    </div>
+    <div id="users-error" class="section-foot hidden"></div>
+  </section>
+
+  <!-- Vlastní heslo -->
+  <section id="view-account" class="view hidden">
+    <div class="detail-head">
+      <button id="account-back" class="ghost">‹ zpět</button>
+      <h2 id="account-title">Změna hesla</h2>
+      <span class="grow"></span>
+      <span id="account-error" class="hint"></span>
+    </div>
+    <div class="field">
+      <label>současné heslo</label>
+      <div><input id="pw-current" type="password" autocomplete="current-password"></div>
+    </div>
+    <div class="field">
+      <label>nové heslo</label>
+      <div>
+        <input id="pw-new" type="password" autocomplete="new-password">
+        <div class="hint">nejméně 8 znaků</div>
+      </div>
+    </div>
+    <div class="field">
+      <label>nové heslo znovu</label>
+      <div><input id="pw-again" type="password" autocomplete="new-password"></div>
+    </div>
+    <div class="section-foot">
+      <button id="pw-save" class="action">změnit heslo</button>
+      <span class="hint">po změně se přihlásíš znovu — tím se nové heslo hned potvrdí</span>
     </div>
   </section>
 
@@ -116,6 +199,8 @@
     <pre id="log" class="log"></pre>
   </section>
 </main>
+
+</div><!-- #app -->
 
 <script src="app.js"></script>
 </body>

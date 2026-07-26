@@ -14,18 +14,52 @@ let tailTimer = null;
 let currentView = 'runs';
 let currentRun = null;
 let tailOffset = 0;
+let me = null; // identita z /whoami: kdo jsem a co smím
 
 // --- helpers ----------------------------------------------------------------
 
+// ApiError nese HTTP kód, aby volající poznal 401 (nepřihlášen) od ostatních chyb.
+class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// errorText vytáhne z odpovědi text, který má smysl ukázat. Server posílá u chyb
+// {"error": "..."} — je to konkrétnější než „403 Forbidden".
+async function errorText(res) {
+  try {
+    const body = await res.json();
+    if (body && body.error) return body.error;
+  } catch (_) { /* není JSON, zbývá stavový kód */ }
+  return `${res.status} ${res.statusText}`;
+}
+
 async function api(path, opts) {
   const res = await fetch(API + path, opts);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (res.status === 401) {
+    // Sezení vypršelo (nebo ještě nezačalo) — přihlašovací obrazovka je užitečnější
+    // než tabulky se starými daty.
+    showLogin('Sezení vypršelo, přihlas se znovu.');
+    throw new ApiError(401, 'nepřihlášen');
+  }
+  if (!res.ok) throw new ApiError(res.status, await errorText(res));
   conn.textContent = '';
   return res.status === 204 ? null : res.json();
 }
 
-// A failed request is usually a missing/expired admin certificate, so say that
-// instead of leaving stale tables on screen.
+// api s tělem v JSON, pro POST/PUT.
+function apiSend(path, method, payload) {
+  return api(path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+// A failed request usually means the server is unreachable or refused the action, so
+// say that instead of leaving stale tables on screen.
 function showError(err) {
   conn.textContent = 'nedostupné: ' + err.message;
 }
@@ -208,37 +242,229 @@ function setWarning(key, warning) {
     .join('');
 }
 
-// checkIdentity warns about the operator's own certificate and the server's. The admin
-// certificate is the one that bites first: a year by default, and when it lapses the
-// browser just stops connecting with no explanation.
-async function checkIdentity() {
-  let me;
-  try {
-    me = await api('/whoami');
-  } catch (err) {
-    return; // the tables will surface the connection problem
-  }
-  if (!me.secured) {
+// applyIdentity shows who is logged in and hides what their role does not allow. The
+// server enforces the same split (webAdmin in users.go); this only keeps a viewer from
+// clicking buttons that would come back 403.
+function applyIdentity(id) {
+  me = id;
+  el('me-name').textContent = id.name || '';
+  const role = el('me-role');
+  role.textContent = id.role || '';
+  role.className = 'badge ' + (id.role || '');
+  document.body.classList.toggle('viewer', id.role !== 'admin');
+}
+
+// certWarnings reports certificates that are about to expire. The operator's own
+// certificate is only relevant when they authenticated with one — on the web listener
+// they log in with a password, and the certificate that then matters is the server's:
+// once it lapses, every runner stops trusting it.
+function certWarnings(id) {
+  if (!id.secured) {
     setWarning('dev', {
       level: 'warn',
-      text: 'Server běží bez mTLS — spojení není šifrované ani ověřené. Určeno jen pro vývoj.',
+      text: 'Server běží bez mTLS — runnery se neověřují a úlohy nejsou podepsané. '
+        + 'Určeno jen pro vývoj.',
     });
     return;
   }
-  setWarning('me', me.days_left > EXPIRY_WARN_DAYS ? null : {
-    level: me.days_left <= EXPIRY_ALERT_DAYS ? 'alert' : 'warn',
-    text: me.days_left < 0
-      ? `Tvůj certifikát (${me.name}) vypršel.`
-      : `Tvůj certifikát (${me.name}) vyprší za ${me.days_left} d. Vydej nový: `
-        + `arcatum-ca admin -name ${me.name}`,
+  setWarning('dev', null);
+  setWarning('me', (id.auth !== 'certificate' || id.days_left > EXPIRY_WARN_DAYS) ? null : {
+    level: id.days_left <= EXPIRY_ALERT_DAYS ? 'alert' : 'warn',
+    text: id.days_left < 0
+      ? `Tvůj certifikát (${id.name}) vypršel.`
+      : `Tvůj certifikát (${id.name}) vyprší za ${id.days_left} d. Vydej nový: `
+        + `arcatum-ca admin -name ${id.name}`,
   });
-  setWarning('server', me.server_days_left > EXPIRY_WARN_DAYS ? null : {
-    level: me.server_days_left <= EXPIRY_ALERT_DAYS ? 'alert' : 'warn',
-    text: me.server_days_left < 0
+  setWarning('server', id.server_days_left > EXPIRY_WARN_DAYS ? null : {
+    level: id.server_days_left <= EXPIRY_ALERT_DAYS ? 'alert' : 'warn',
+    text: id.server_days_left < 0
       ? 'Certifikát serveru vypršel — runnery mu přestanou věřit.'
-      : `Certifikát serveru vyprší za ${me.server_days_left} d. Vydej nový: `
+      : `Certifikát serveru vyprší za ${id.server_days_left} d. Vydej nový: `
         + 'arcatum-ca server -hosts <adresy>',
   });
+}
+
+// --- login ------------------------------------------------------------------
+
+// Runnery se hlásí certifikátem, lidé jménem a heslem: web tedy začíná dotazem
+// „kdo jsem" a podle odpovědi ukáže aplikaci, nebo přihlášení.
+
+function showLogin(message) {
+  stopPolling();
+  stopTail();
+  me = null;
+  el('app').classList.add('hidden');
+  el('login').classList.remove('hidden');
+  el('login-error').textContent = message || '';
+  el('login-pass').value = '';
+  el('login-user').focus();
+}
+
+function showApp() {
+  el('login').classList.add('hidden');
+  el('app').classList.remove('hidden');
+}
+
+// startSession načte identitu a rozjede aplikaci. Používá se po přihlášení i při
+// otevření stránky s platnou cookie.
+async function startSession() {
+  const id = await api('/whoami'); // 401 → showLogin, viz api()
+  applyIdentity(id);
+  showApp();
+  certWarnings(id);
+  showView('runs');
+  startPolling();
+}
+
+// Přihlášení nejde přes api(): 401 tady znamená „špatné jméno nebo heslo", ne
+// „vypršelo sezení", a nemá tedy překreslovat obrazovku.
+async function submitLogin(event) {
+  event.preventDefault();
+  const btn = el('login-submit');
+  const username = el('login-user').value.trim();
+  const password = el('login-pass').value;
+  btn.disabled = true;
+  el('login-error').textContent = '';
+  try {
+    const res = await fetch(API + '/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) throw new ApiError(res.status, await errorText(res));
+    el('login-pass').value = '';
+    await startSession();
+  } catch (err) {
+    el('login-error').textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function logout() {
+  try {
+    await api('/logout', { method: 'POST' });
+  } catch (err) {
+    if (err.status !== 401) showError(err); // 401 = už odhlášen, není co řešit
+  }
+  showLogin('Odhlášeno.');
+}
+
+// --- účet: vlastní heslo -----------------------------------------------------
+
+async function changeOwnPassword() {
+  const btn = el('pw-save');
+  const current = el('pw-current').value;
+  const next = el('pw-new').value;
+  const again = el('pw-again').value;
+  el('account-error').textContent = '';
+  if (next !== again) {
+    el('account-error').textContent = 'nová hesla se neshodují';
+    return;
+  }
+  btn.disabled = true;
+  try {
+    await apiSend('/password', 'POST', { current, new: next });
+    for (const id of ['pw-current', 'pw-new', 'pw-again']) el(id).value = '';
+    // Server ukončil všechna sezení včetně tohoto — přihlášením se nové heslo potvrdí.
+    showLogin('Heslo změněno. Přihlas se novým heslem.');
+  } catch (err) {
+    if (err.status !== 401) el('account-error').textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// --- uživatelé ---------------------------------------------------------------
+
+// userNote ukazuje výsledek akce pod tabulkou: chybu, nebo vygenerované heslo, které
+// server pošle jen jednou a nikde ho nedrží v čitelné podobě.
+function userNote(html, isError) {
+  const box = el('users-error');
+  box.classList.toggle('hidden', !html);
+  box.classList.toggle('err', !!isError);
+  box.innerHTML = html || '';
+}
+
+async function loadUsers() {
+  const list = await api('/users');
+  const body = el('users-body');
+  if (!list || list.length === 0) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">žádní uživatelé</td></tr>';
+    return;
+  }
+  body.innerHTML = list.map((u) => {
+    const self = me && u.username === me.name;
+    const toRole = u.role === 'admin' ? 'viewer' : 'admin';
+    return `
+    <tr>
+      <td class="mono">${esc(u.username)}${self ? ' <span class="muted">(to jsi ty)</span>' : ''}</td>
+      <td>${badge(u.role)}</td>
+      <td>${u.disabled ? '<span class="expiry alert">vypnutý</span>' : '<span class="expiry">aktivní</span>'}</td>
+      <td>${fmtTime(u.created_at)}</td>
+      <td>${fmtTime(u.last_login)}</td>
+      <td>
+        <button class="action" data-reset="${esc(u.username)}">nové heslo</button>
+        <button class="action" data-role="${esc(u.username)}" data-to="${toRole}">na ${toRole}</button>
+        ${u.disabled
+          ? `<button class="action" data-enable="${esc(u.username)}">zapnout</button>`
+          : `<button class="action" data-disable="${esc(u.username)}">vypnout</button>`}
+        ${self ? '' : `<button class="action danger" data-deluser="${esc(u.username)}">smazat</button>`}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// createUser přidá účet. Bez zadaného hesla ho vygeneruje server a vrátí ho — je to
+// jediný okamžik, kdy heslo z Arcatum vyleze.
+async function createUser() {
+  const name = el('new-user-name').value.trim();
+  const role = el('new-user-role').value;
+  const password = el('new-user-pass').value;
+  if (!name) {
+    userNote('zadej jméno uživatele', true);
+    return;
+  }
+  const btn = el('new-user');
+  btn.disabled = true;
+  try {
+    const res = await apiSend('/users', 'POST', { username: name, role, password });
+    el('new-user-name').value = '';
+    el('new-user-pass').value = '';
+    userNote(res.password
+      ? `Uživatel <b>${esc(res.username)}</b> vytvořen. Heslo (zobrazí se jen teď): `
+        + `<span class="generated">${esc(res.password)}</span>`
+      : `Uživatel <b>${esc(res.username)}</b> vytvořen.`);
+    await loadUsers();
+  } catch (err) {
+    if (err.status !== 401) userNote(esc(err.message), true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// updateUser pošle jednu změnu (role, vypnutí, nové heslo) a překreslí tabulku.
+async function updateUser(name, payload, note) {
+  try {
+    const res = await apiSend(`/users/${encodeURIComponent(name)}`, 'PUT', payload);
+    userNote(res.password
+      ? `Nové heslo uživatele <b>${esc(name)}</b> (zobrazí se jen teď): `
+        + `<span class="generated">${esc(res.password)}</span>`
+      : note || '');
+    await loadUsers();
+  } catch (err) {
+    if (err.status !== 401) userNote(esc(err.message), true);
+  }
+}
+
+async function deleteUser(name) {
+  try {
+    await api(`/users/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    userNote(`Uživatel <b>${esc(name)}</b> smazán.`);
+    await loadUsers();
+  } catch (err) {
+    if (err.status !== 401) userNote(esc(err.message), true);
+  }
 }
 
 // --- restore ----------------------------------------------------------------
@@ -553,25 +779,41 @@ const loaders = {
   restore: loadRestore,
   runners: loadRunners,
   rotation: loadRotation,
+  users: loadUsers,
 };
 
+const VIEWS = ['runs', 'instances', 'instance-form', 'restore', 'runners', 'rotation',
+  'users', 'account', 'detail'];
+
 async function refresh() {
-  if (currentView === 'detail') return;
+  if (!me) return; // odhlášeno: není za co tahat
+  const load = loaders[currentView];
+  if (!load) return; // detail, formulář a účet se neobnovují periodicky
   try {
-    await loaders[currentView]();
+    await load();
   } catch (err) {
-    showError(err);
+    if (err.status !== 401) showError(err);
   }
+}
+
+function startPolling() {
+  if (listTimer) return;
+  listTimer = setInterval(refresh, LIST_REFRESH_MS);
+}
+
+function stopPolling() {
+  if (listTimer) { clearInterval(listTimer); listTimer = null; }
 }
 
 function showView(name) {
   currentView = name;
-  for (const v of ['runs', 'instances', 'instance-form', 'restore', 'runners', 'rotation', 'detail']) {
+  for (const v of VIEWS) {
     el('view-' + v).classList.toggle('hidden', v !== name);
   }
   for (const tab of document.querySelectorAll('.tab')) {
     tab.classList.toggle('active', tab.dataset.view === name);
   }
+  if (name === 'users') userNote('');
   if (name !== 'detail') {
     stopTail();
     refresh();
@@ -658,6 +900,16 @@ document.querySelector('nav').addEventListener('click', (e) => {
   if (tab) showView(tab.dataset.view);
 });
 
+el('login-form').addEventListener('submit', submitLogin);
+el('logout').addEventListener('click', logout);
+el('open-account').addEventListener('click', () => {
+  el('account-error').textContent = '';
+  showView('account');
+});
+el('account-back').addEventListener('click', () => showView('runs'));
+el('pw-save').addEventListener('click', changeOwnPassword);
+el('new-user').addEventListener('click', createUser);
+
 el('back').addEventListener('click', () => showView('runs'));
 
 el('stream').addEventListener('change', () => {
@@ -716,6 +968,40 @@ document.addEventListener('click', async (e) => {
       showError(err);
       btn.disabled = false;
     }
+    return;
+  }
+  // Správa uživatelů: nové heslo, změna role, vypnutí/zapnutí, smazání.
+  const reset = e.target.closest('[data-reset]');
+  if (reset) {
+    const name = reset.dataset.reset;
+    if (!confirm(`Vygenerovat nové heslo pro "${name}"?\n\n`
+      + 'Staré heslo přestane platit a jeho přihlášení se ukončí.')) return;
+    await updateUser(name, { generate_password: true });
+    return;
+  }
+  const roleBtn = e.target.closest('[data-role]');
+  if (roleBtn) {
+    const name = roleBtn.dataset.role;
+    const to = roleBtn.dataset.to;
+    if (!confirm(`Změnit roli uživatele "${name}" na "${to}"?`)) return;
+    await updateUser(name, { role: to }, `Role uživatele <b>${esc(name)}</b> je teď ${esc(to)}.`);
+    return;
+  }
+  const disable = e.target.closest('[data-disable]');
+  const enable = e.target.closest('[data-enable]');
+  if (disable || enable) {
+    const name = (disable || enable).dataset.disable || enable.dataset.enable;
+    if (disable && !confirm(`Vypnout uživatele "${name}"?\n\n`
+      + 'Nepřihlásí se a jeho současné přihlášení se ukončí. Účet zůstane.')) return;
+    await updateUser(name, { disabled: !!disable },
+      `Uživatel <b>${esc(name)}</b> je ${disable ? 'vypnutý' : 'aktivní'}.`);
+    return;
+  }
+  const delUser = e.target.closest('[data-deluser]');
+  if (delUser) {
+    const name = delUser.dataset.deluser;
+    if (!confirm(`Smazat uživatele "${name}"?`)) return;
+    await deleteUser(name);
     return;
   }
   if (e.target.closest('#new-instance')) {
@@ -806,6 +1092,8 @@ document.addEventListener('click', async (e) => {
 
 // --- start ------------------------------------------------------------------
 
-checkIdentity();
-refresh();
-listTimer = setInterval(refresh, LIST_REFRESH_MS);
+// Otevření stránky začíná dotazem na identitu: s platnou cookie se rovnou pokračuje,
+// jinak api() ukáže přihlášení.
+startSession().catch((err) => {
+  if (err.status !== 401) showLogin(err.message);
+});

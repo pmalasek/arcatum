@@ -52,12 +52,100 @@ func signingKeysFor(cfg *config.Config) (*crypto.SigningSet, []crypto.Signer, er
 	return set, signers, nil
 }
 
+// initialAdmin is the account created on a first start, so there is a way in before
+// anything has been configured.
+const initialAdmin = "admin"
+
+// ensureAdminAccount creates the first administrator when the database has no accounts
+// at all, and prints its generated password once. A server whose web UI nobody can log
+// in to would be useless, and asking an operator to run a separate command before the
+// first start is the kind of step that gets missed.
+func ensureAdminAccount(store *server.Store, logger *log.Logger) error {
+	n, err := store.UserCount()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	password, err := crypto.GeneratePassword()
+	if err != nil {
+		return err
+	}
+	if _, err := store.CreateUser(initialAdmin, password, server.UserRoleAdmin); err != nil {
+		return err
+	}
+	// Printed once and never stored in the clear: the log is the only place it appears,
+	// which is why it says to change it.
+	logger.Printf("  ")
+	logger.Printf("  ┌─ first start: created the web account ─────────────────────")
+	logger.Printf("  │   user:     %s", initialAdmin)
+	logger.Printf("  │   password: %s", password)
+	logger.Printf("  │ Log in and change it (Účet → změnit heslo). A forgotten")
+	logger.Printf("  │ password is reset with: arcatum-server -passwd %s", initialAdmin)
+	logger.Printf("  └───────────────────────────────────────────────────────────")
+	logger.Printf("  ")
+	return nil
+}
+
+// setPassword backs the -passwd flag: it sets (or creates) an account's password and
+// prints it when it had to be generated. This is the way back in when the last password
+// is lost — everything else about accounts is done in the web UI.
+func setPassword(store *server.Store, logger *log.Logger, username, role string) error {
+	username = server.NormalizeUsername(username)
+	password := os.Getenv("ARCATUM_PASSWORD")
+	generated := password == ""
+	if generated {
+		var err error
+		// Generated rather than prompted: a password typed on a command line ends up in
+		// the shell history and in ps output.
+		if password, err = crypto.GeneratePassword(); err != nil {
+			return err
+		}
+	}
+	existing, err := store.User(username)
+	if err != nil {
+		return err
+	}
+	switch {
+	case existing == nil:
+		if _, err := store.CreateUser(username, password, role); err != nil {
+			return err
+		}
+		logger.Printf("created account %q with role %s", username, role)
+	default:
+		if err := store.SetUserPassword(username, password); err != nil {
+			return err
+		}
+		// A disabled account would still not let anyone in, which is not what someone
+		// resetting a password expects.
+		if existing.Disabled {
+			if err := store.SetUserDisabled(username, false); err != nil {
+				return err
+			}
+			logger.Printf("account %q re-enabled", username)
+		}
+		logger.Printf("password of %q changed; its sessions were ended", username)
+	}
+	if generated {
+		logger.Printf("password: %s", password)
+	} else {
+		logger.Printf("password taken from $ARCATUM_PASSWORD")
+	}
+	return nil
+}
+
 func main() {
 	configPath := flag.String("config", "config/server.toml", "path to server config")
 	instancesPath := flag.String("instances", "data/instances.json", "instances JSON to seed from on start")
 	importForce := flag.Bool("import-force", false,
 		"let the seed file overwrite instances that already exist (they are normally left alone, "+
 			"so edits made through the web UI survive a restart)")
+	passwd := flag.String("passwd", "",
+		"set this web account's password (creating the account if needed) and exit — the way back "+
+			"in when nobody can log in. Uses $ARCATUM_PASSWORD, or generates and prints one")
+	passwdRole := flag.String("passwd-role", server.UserRoleAdmin,
+		"role for an account created by -passwd: admin or viewer")
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
@@ -87,6 +175,15 @@ func main() {
 	}
 	defer store.Close()
 
+	// -passwd is a maintenance mode, not a server start: it exists for the case where
+	// nobody can log in to the web UI any more and the only access left is a shell.
+	if *passwd != "" {
+		if err := setPassword(store, logger, *passwd, *passwdRole); err != nil {
+			logger.Fatalf("-passwd: %v", err)
+		}
+		return
+	}
+
 	// The JSON file seeds instances that do not exist yet. Instances are managed through
 	// the API, so re-importing over them on every start would undo those edits.
 	n, err := store.ImportInstances(*instancesPath, *importForce)
@@ -97,11 +194,19 @@ func main() {
 		logger.Printf("seeded %d new instance(s) from %s", n, *instancesPath)
 	}
 
+	sessionTTL, err := cfg.Web.TTL()
+	if err != nil {
+		logger.Fatalf("config: %v", err)
+	}
 	opts := server.Options{
 		RequireClientCert: cfg.TLS.Enabled(),
 		// The same directory the bootstrap listener installs from is what auto-update
 		// publishes; a VERSION file next to the binaries is what makes them an update.
 		DistDir: cfg.Bootstrap.DistDir,
+		Web: server.WebOptions{
+			SessionTTL:   sessionTTL,
+			SecureCookie: cfg.Web.SecureCookie,
+		},
 	}
 	var tlsConfig *tls.Config
 	var signingPubPEM []byte
@@ -180,6 +285,32 @@ func main() {
 				logger.Printf("bootstrap listener stopped: %v", err)
 			}
 		}()
+	}
+
+	// The web UI listener is plain HTTP and authenticates people with a password, so
+	// looking at the backups needs nothing but a browser. Runners are unaffected: they
+	// keep talking mTLS to the listener below.
+	if cfg.Web.Enabled() {
+		if err := ensureAdminAccount(store, logger); err != nil {
+			logger.Fatalf("web accounts: %v", err)
+		}
+		if n, err := store.PurgeExpiredSessions(time.Now()); err != nil {
+			logger.Printf("purge sessions: %v", err)
+		} else if n > 0 {
+			logger.Printf("  purged %d expired web session(s)", n)
+		}
+		webSrv := &http.Server{
+			Addr:    cfg.Web.Listen,
+			Handler: srv.WebHandler(),
+		}
+		go func() {
+			logger.Printf("  web UI (plain HTTP, password login) on %s", cfg.Web.Listen)
+			if err := webSrv.ListenAndServe(); err != nil {
+				logger.Printf("web listener stopped: %v", err)
+			}
+		}()
+	} else {
+		logger.Printf("  web UI disabled ([web] listen is empty) — the API is reachable with an admin certificate")
 	}
 
 	httpSrv := &http.Server{

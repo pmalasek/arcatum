@@ -194,10 +194,11 @@ func TestIsTerminal(t *testing.T) {
 	}
 }
 
-// The UI is embedded in the binary; these routes must actually serve it.
+// The UI is embedded in the binary and served by the web listener; these routes must
+// actually serve it.
 func TestWebUIIsServed(t *testing.T) {
 	srv, _ := resticTestServer(t, false)
-	h := srv.Handler()
+	h := srv.WebHandler()
 
 	tests := []struct {
 		path      string
@@ -232,19 +233,28 @@ func TestWebUIIsServed(t *testing.T) {
 		t.Errorf("GET /index.html = %d, want a 301 redirect to /", rec.Code)
 	}
 
-	// The text status page stays available for shell use.
+	// The text status page stays available for shell use on the API listener.
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "arcatum-server") {
 		t.Errorf("GET /status = %d, body %q", rec.Code, rec.Body.String())
 	}
+	// On the web listener it is data like any other, so it needs a login — unlike the
+	// assets above, which are only the page that asks for one.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("web GET /status without a login = %d, want 401", rec.Code)
+	}
 }
 
-// The UI must be behind the same admin check as the API it drives.
-func TestWebUIRequiresAdmin(t *testing.T) {
+// On the mTLS listener everything an operator can reach still needs an admin
+// certificate. The browser UI is not served there at all — it lives on the web listener,
+// where a password login is possible (see TestWebAPIRequiresLogin).
+func TestOperatorAPIRequiresAdminCertificate(t *testing.T) {
 	srv, _ := resticTestServer(t, true)
 	h := srv.Handler()
-	for _, path := range []string{"/", "/app.js", "/style.css", "/status"} {
+	for _, path := range []string{"/", "/status", "/api/v1/runs", "/api/v1/instances", "/api/v1/whoami"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusUnauthorized {

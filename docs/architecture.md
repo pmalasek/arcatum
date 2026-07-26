@@ -4,8 +4,8 @@ Zálohovací systém pro interní síť Xtuning. Monorepo, jazyk **Go** pro runn
 
 Stav implementace: fáze A–J hotové — scaffold, protokol, SQLite, mTLS a podpis úloh,
 šifrování secrets, restic zálohy, web UI, instalace a enrollment, životní cyklus
-certifikátů, obnova z webu, rotace klíčů, správa instancí z webu, auto-update runnerů.
-Přehled v §10, detaily v §11–15.
+certifikátů, obnova z webu, rotace klíčů, správa instancí z webu, auto-update runnerů,
+přihlášení do webu jménem a heslem. Přehled v §10, detaily v §11–16.
 
 ---
 
@@ -225,6 +225,10 @@ Implementované tabulky:
   schedule (JSON)
 - `runs` — id (rowid → `run-<n>`), instance_id, runner_id, script, status, exit_code,
   bytes, started_at, ended_at, err, created_at
+- `users` — účty web UI: username, PBKDF2 verifikátor hesla, role (`admin`/`viewer`),
+  disabled, created_at, updated_at, last_login
+- `sessions` — přihlášení do webu: **SHA‑256 tokenu** z cookie (ne token sám), username,
+  created_at, expires_at, last_seen, ip
 
 **Skripty nejsou v DB** — definice zůstávají soubory ve `scripts/` (verzované v gitu),
 server je čte do katalogu při startu.
@@ -267,7 +271,25 @@ svázán s konkrétním kódem.
 | Role | Kdo | Oprávnění |
 |---|---|---|
 | `runner` | zálohovaný server | `checkin` a hlášení **vlastních** běhů |
-| `admin` | operátor / web UI | ostatní API (trigger, výpisy, čtení výstupů) |
+| `admin` | operátor volající API ze shellu | ostatní API (trigger, výpisy, čtení výstupů) |
+
+**Lidé se hlásí heslem, stroje certifikátem** (`internal/server/users.go`). Web UI má
+vlastní plain-HTTP listener (`[web] listen`) a účty v tabulce `users`; port API zůstává
+mTLS pro runnery a pro volání s admin certifikátem. Důvod je provozní: certifikát se
+musí vyexportovat, naimportovat v každém prohlížeči a po roce vyměnit, což u člověka,
+který se jen dívá na výsledky záloh, nic nechrání — *úlohy* stejně chrání podpis a
+*secrets* šifrování, a web na žádný z těch klíčů nesahá. Naproti tomu u runneru je
+certifikát to, čím ho server pustí (nebo nepustí) už na TLS handshaku, a stroj se
+instaluje jednou.
+
+Ukládá se PBKDF2‑HMAC‑SHA256 verifikátor (600 000 iterací, sůl na účet) ze standardní
+knihovny — žádná nová závislost, ze stejného důvodu jako `modernc.org/sqlite`. Z tokenu
+sezení je v DB jen SHA‑256, takže ani kopie `sessions` nedovolí vydávat se za
+přihlášeného. Role webu jsou `admin` (mění) a `viewer` (jen čte); stejné operátorské
+endpointy tak mají na mTLS listeneru guard `adminOnly` a na webovém `webRead`/`webAdmin`
+(`registerOperatorRoutes` v `http.go`). Změna hesla, vypnutí i smazání účtu okamžitě
+ruší jeho sezení; posledního funkčního admina web odmítne odstranit, protože zpět by
+cesta vedla jen přes shell (`arcatum-server -passwd`).
 
 **Identitu určuje certifikát, ne požadavek** — runner je identifikován `CN`, které musí
 odpovídat `runner_id` instance. Pokus vydávat se za jiný host končí 403 (neselhává
@@ -290,7 +312,8 @@ tiše). Runner také nemůže hlásit výsledky běhu, který nebyl přidělen j
   i `[signing]` a `[secrets]`, aby nedošlo k tichému propadnutí na nezabezpečený režim.
 - **Životní cyklus certifikátů** — automatická obnova a zneplatnění, viz §12.
 - **Rotace klíčů** — všechny tři dlouhodobé klíče, viz §14.
-- **Chybí:** autentizace k webu jinak než certifikátem. CRL/OCSP záměrně ne (§14).
+- **Přihlášení do webu** — jméno a heslo, role `admin`/`viewer`, správa účtů z webu; viz
+  výše a §16. CRL/OCSP záměrně ne (§14).
 
 ---
 
@@ -406,7 +429,8 @@ přímo minuly a odhalil ji až E2E běh).
 
 ### Fáze G — web UI ✓
 UI je v `web/` a zabalené do binárky přes `embed.FS` (balíček `arcatum/web`), servírované
-z `/` pod stejnou admin autorizací jako API. Textový přehled se přesunul na `/status`.
+z `/` — původně na portu API pod admin certifikátem, dnes na vlastním portu za přihlášením
+jménem a heslem (§16). Textový přehled se přesunul na `/status`.
 Vanilla JS bez build stepu — cílem je, aby server zůstal jeden samostatný soubor.
 Nové endpointy: `GET /api/v1/runs/{id}` a `GET /api/v1/runs/{id}/tail?offset=`.
 
@@ -787,3 +811,71 @@ nesouhlasil, binárka zůstala nedotčená) a **manifest podepsaný cizím klí�
 Cestou to odhalilo provozní past, která je teď v README: po rotaci podepisovacího klíče je
 `dispatch-signing.pub` na hostu zastaralý a autoritou je stažená sada. Ztráta té sady
 runnera zablokuje (fail closed, správně) — náprava je stáhnout aktuální klíč z bootstrapu.
+
+---
+
+## 16. Přihlášení do webu a účty operátorů
+
+Web UI původně stálo na portu API a chránil ho **admin certifikát** (§7, fáze G). Provozně
+to nesedělo: certifikát se musí vyexportovat do PKCS#12, naimportovat v každém prohlížeči
+každého operátora, přidat CA mezi důvěryhodné, a po roce to celé zopakovat. Runnerům
+certifikát smysl dává — stroj se instaluje jednou a server ho bez certifikátu nepustí ani
+na TLS handshaku. U člověka, který se dívá na výsledky záloh, dává smysl heslo.
+
+**Dva listenery, dva druhy volajících:**
+
+| Listener | Konfig | Kdo | Ověření | Router |
+|---|---|---|---|---|
+| API | `[server] listen` | runnery, volání ze shellu | mTLS certifikát (`OU`) | `Server.Handler()` |
+| Web | `[web] listen` | lidé v prohlížeči | cookie sezení po přihlášení | `Server.WebHandler()` |
+| Bootstrap | `[bootstrap] listen` | hosti bez certifikátu | nic (§11) | `Server.BootstrapHandler()` |
+
+Operátorské endpointy jsou **na obou** — registruje je `registerOperatorRoutes`, které
+dostane guard podle listeneru (`adminOnly`, nebo `webRead`/`webAdmin`). Jeden soupis rout
+tedy platí pro oba světy a nový endpoint nemůže dostat ochranu jen na jednom z nich.
+Runnerové endpointy (`checkin`, `runs/updates`, `renew`, `trust`, `update`, `/restic/`)
+zůstávají výhradně na mTLS listeneru; UI a `login`/`users` výhradně na webovém.
+
+### Co se ukládá
+
+- **Heslo nikdy** — jen PBKDF2‑HMAC‑SHA256 verifikátor (600 000 iterací dle OWASP, náhodná
+  sůl na účet, formát `pbkdf2-sha256$<iter>$<salt>$<hash>`). Iterace jsou uvnitř hodnoty,
+  takže se dají později zvednout bez odhlášení všech. KDF je ze standardní knihovny
+  (`crypto/pbkdf2`), takže nepřidává závislost — stejná úvaha jako u `modernc.org/sqlite`.
+- **Token sezení nikdy** — v tabulce `sessions` je jeho SHA‑256. Kopie DB tedy nedovolí
+  vydávat se za přihlášeného operátora, jen ho (nejvýš) odhlásit.
+- Cookie `arcatum_session` je `HttpOnly`, `SameSite=Strict` a bez `Expires` (zavření
+  prohlížeče ji zahodí); `[web] secure_cookie` ji přepne na HTTPS‑only pro nasazení za
+  reverse proxy.
+
+### Role a hranice
+
+`admin` mění, `viewer` jen čte. Rozdělení je v routách (`read`/`write`), ne v UI — web sice
+viewerovi tlačítka skryje, ale rozhodující je server (403). Ochrany, které stojí za zmínku:
+
+| Situace | Chování | Proč |
+|---|---|---|
+| Změna hesla, vypnutí, smazání účtu | okamžitě mizí i jeho sezení | jinak by odebrání přístupu platilo až za 12 h |
+| Poslední funkční admin | nelze smazat, vypnout ani degradovat (409) | zpět by cesta vedla jen přes shell |
+| 5+ neúspěšných přihlášení | prodleva 1 min, dál dvojnásobek do 15 min, per účet | kontrola hesla je záměrně drahá; nesmí jít volat ve smyčce |
+| Neexistující jméno | ověří se proti *decoy* hashi, pak stejná chyba | z doby odpovědi nejde zjistit, které účty existují |
+| Požadavek mimo Arcatum (`Origin`) | 403 u všeho, co mění stav | cizí stránka nesmí jednat cookie operátora |
+| Vlastní účet a mazání | 409 | odhlásit se uprostřed akce je matoucí, ne užitečné |
+| První start bez účtů | vznikne `admin`, heslo **jednou** do logu | server, ke kterému se nikdo nepřihlásí, je k ničemu |
+| Ztracené heslo posledního admina | `arcatum-server -passwd <user>` | jediná cesta zpět, záměrně mimo web |
+
+Vygenerované heslo (nový účet bez zadaného hesla, nebo reset) se vrací v odpovědi API
+**jednou** a nikde se v čitelné podobě neukládá — UI ho zobrazí k opsání.
+
+### Ověřeno E2E
+
+Přihlášení heslem → cookie → `whoami` hlásí `auth: password` a roli; API bez cookie 401,
+s vymyšlenou cookie 401, po odhlášení 401. Viewer: čtení 200, každý zápis 403, `users` 403,
+vlastní heslo si změnit smí. Cizí `Origin` i `Sec-Fetch-Site: cross-site` na zápisu 403,
+stejný origin projde. Throttling: po šesti chybných pokusech 429 i pro správné heslo,
+druhý účet nedotčen. Účty: vytvoření s vygenerovaným heslem (funguje k přihlášení), výpis
+neobsahuje hash ani heslo, promotion, reset, smazání; degradace posledního admina 409.
+Runnery přes mTLS listener nedotčené (`checkin` funguje dál), UI se na portu API neservíruje.
+
+**Nevykresleno v prohlížeči** — v tomhle prostředí není headless browser, takže přihlašovací
+obrazovka a záložka Uživatelé jsou ověřené jen na úrovni API a servírování assetů.

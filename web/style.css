@@ -51,6 +51,49 @@ header h1 { margin: 0; font-size: 1.15rem; letter-spacing: .01em; }
 .sub { color: var(--muted); font-size: .85rem; }
 .conn { margin-left: auto; font-size: .8rem; color: var(--fail); }
 
+/* Kdo je přihlášený, vpravo v hlavičce. */
+.account { margin-left: auto; display: flex; align-items: center; gap: .5rem; }
+.conn:not(:empty) + .account { margin-left: .75rem; }
+.me-name { font-size: .85rem; }
+.badge.viewer { color: var(--muted); }
+.badge.admin { color: var(--accent); }
+
+/* Viewer vidí všechno, ale nic nemění — akce se mu proto vůbec nezobrazují.
+   Server to hlídá taky (webAdmin v users.go); tohle je jen aby na ně neklikal. */
+body.viewer .admin-only { display: none !important; }
+
+/* Přihlašovací obrazovka */
+.login {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: var(--bg);
+}
+.login-box {
+  width: min(22rem, 100%);
+  display: grid;
+  gap: .75rem;
+  padding: 1.5rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.login-box h1 { margin: 0; font-size: 1.2rem; }
+.login-box .sub { margin: -.5rem 0 .25rem; }
+.login-field { display: grid; gap: .25rem; font-size: .85rem; color: var(--muted); }
+.login-field input {
+  font: inherit;
+  padding: .45rem .55rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.login-error { color: var(--fail); font-size: .82rem; min-height: 1.2em; }
+button.action.primary { border-color: var(--accent); color: var(--accent); }
+
 nav {
   display: flex;
   gap: .25rem;
@@ -270,4 +313,27 @@ select {
   max-width: 100%;
 }
 .field input[disabled] { opacity: .6; }
-#form-error { color: var(--fail); }
+#form-error, #account-error { color: var(--fail); }
+
+/* Správa uživatelů: formulář pro nový účet žije v patičce sekce */
+.section-foot input, .section-foot select {
+  font: inherit;
+  font-size: .85rem;
+  padding: .3rem .45rem;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-width: 100%;
+}
+#users-error { font-size: .82rem; color: var(--muted); }
+#users-error.err { color: var(--fail); }
+/* Vygenerované heslo se ukáže jednou — musí být čitelné a snadné označit. */
+.generated {
+  font-family: var(--mono);
+  font-size: .9em;
+  padding: .15rem .4rem;
+  border: 1px dashed var(--accent);
+  border-radius: 5px;
+  user-select: all;
+}

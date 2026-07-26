@@ -8,6 +8,15 @@ data_dir  = "/central_backup/arcatum/data"  # DB and runtime state
 timezone  = "Europe/Prague"                 # default TZ for schedules without one
 log_level = "info"                          # debug | info | warn | error
 
+# The web UI: a separate, plain-HTTP listener with username/password login. Runners keep
+# using certificates on [server] listen above. On the first start the server creates the
+# "admin" account and prints its generated password into the log once; reset it later with
+# "arcatum-server -passwd admin". Leave listen empty to switch the web UI off.
+[web]
+listen      = "0.0.0.0:8080"
+session_ttl = "12h"                         # inactivity window; slides while the UI is in use
+# secure_cookie = true                      # only behind an HTTPS reverse proxy
+
 [storage]
 backup_dir = "./local/arcatum"      # where backup data is stored
 

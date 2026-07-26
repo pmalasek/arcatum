@@ -19,11 +19,48 @@ import (
 // Config is the full server configuration.
 type Config struct {
 	Server    Server    `toml:"server"`
+	Web       Web       `toml:"web"`
 	Storage   Storage   `toml:"storage"`
 	TLS       TLS       `toml:"tls"`
 	Signing   Signing   `toml:"signing"`
 	Secrets   Secrets   `toml:"secrets"`
 	Bootstrap Bootstrap `toml:"bootstrap"`
+}
+
+// Web configures the plain-HTTP listener serving the web UI. It is a separate port from
+// [server] on purpose: runners authenticate with a certificate, while people log in with
+// a username and a password, and mTLS would otherwise force a client certificate into
+// every browser that is ever used to look at the backups.
+//
+// Leave listen empty to switch the web UI off entirely; the operator API on the mTLS port
+// keeps working with an admin certificate.
+type Web struct {
+	Listen string `toml:"listen"` // e.g. "0.0.0.0:8080"
+	// SessionTTL is how long a login lasts without activity, e.g. "12h". It slides
+	// forward while the UI is in use. Empty means the built-in default.
+	SessionTTL string `toml:"session_ttl"`
+	// SecureCookie marks the session cookie Secure, so a browser only sends it over
+	// HTTPS. Set it when a reverse proxy terminates TLS in front of this listener;
+	// leaving it on for a plain-HTTP listener would stop logins from working at all.
+	SecureCookie bool `toml:"secure_cookie"`
+}
+
+// Enabled reports whether the web UI listener should run.
+func (w Web) Enabled() bool { return w.Listen != "" }
+
+// TTL resolves session_ttl. A zero duration means "use the server's default".
+func (w Web) TTL() (time.Duration, error) {
+	if w.SessionTTL == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(w.SessionTTL)
+	if err != nil {
+		return 0, fmt.Errorf("config: [web] session_ttl %q: %w", w.SessionTTL, err)
+	}
+	if d <= 0 {
+		return 0, errors.New("config: [web] session_ttl must be positive")
+	}
+	return d, nil
 }
 
 // Bootstrap configures the plain-HTTP listener used to install and enrol runners. A
@@ -126,6 +163,9 @@ func Default() *Config {
 			Timezone: "UTC",
 			LogLevel: "info",
 		},
+		Web: Web{
+			Listen: "0.0.0.0:8080",
+		},
 		Storage: Storage{
 			BackupDir: "/central_backup/arcatum",
 		},
@@ -165,6 +205,20 @@ func (c *Config) Validate() error {
 	}
 	if c.TLS.Enabled() && c.Secrets.MasterKey == "" {
 		return errors.New("config: [secrets] master_key is required when mTLS is enabled (otherwise credentials sit in the database in plaintext)")
+	}
+	if _, err := c.Web.TTL(); err != nil {
+		return err
+	}
+	// Two listeners on one address would mean whichever starts first wins and the other
+	// dies with a confusing "address already in use" — say which pair collided instead.
+	for _, pair := range []struct{ what, a, b string }{
+		{"[web] listen and [server] listen", c.Web.Listen, c.Server.Listen},
+		{"[web] listen and [bootstrap] listen", c.Web.Listen, c.Bootstrap.Listen},
+		{"[server] listen and [bootstrap] listen", c.Server.Listen, c.Bootstrap.Listen},
+	} {
+		if pair.a != "" && pair.a == pair.b {
+			return fmt.Errorf("config: %s must differ (both %q)", pair.what, pair.a)
+		}
 	}
 	if c.Bootstrap.Enabled() {
 		if c.Bootstrap.APIURL == "" {

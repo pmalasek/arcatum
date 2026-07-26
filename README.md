@@ -146,6 +146,9 @@ Pro lokální test uprav v `config/server.toml` cesty, ať se nesahá do `/centr
 listen   = "127.0.0.1:8443"
 data_dir = "./local/data"
 
+[web]
+listen = "127.0.0.1:8080"
+
 [storage]
 backup_dir = "./local/backup"
 ```
@@ -155,6 +158,9 @@ backup_dir = "./local/backup"
 ```sh
 go run ./cmd/server -config config/server.toml -instances data/instances.json
 ```
+
+V logu se při prvním startu objeví vygenerované heslo účtu `admin` — s ním se přihlásíš do
+webu na `http://127.0.0.1:8080/`.
 
 **3) Spustit úlohu ručně a nechat runner doběhnout**
 
@@ -174,6 +180,8 @@ curl http://127.0.0.1:8443/api/v1/runs                   # seznam běhů
 curl http://127.0.0.1:8443/api/v1/runs/run-1/output      # zachycený výstup
 ```
 
+Nebo ve webu na `http://127.0.0.1:8080/` — záložka **Běhy** a klik na běh.
+
 Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
 
 > **Se `just`** je celý tenhle postup na čtyři příkazy — `just dev-init` (připraví `local/`
@@ -192,11 +200,16 @@ Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
 
 ```toml
 [server]
-listen    = "0.0.0.0:8443"                 # kde API/web naslouchá
+listen    = "0.0.0.0:8443"                 # API pro runnery (mTLS)
 scripts   = "scripts"                       # adresář s definicemi skriptů
 data_dir  = "/central_backup/arcatum/data"  # zde vzniká arcatum.db
 timezone  = "Europe/Prague"                 # default TZ pro rozvrhy bez vlastní
 log_level = "info"
+
+[web]
+listen      = "0.0.0.0:8080"                # web UI (plain HTTP, jméno a heslo)
+session_ttl = "12h"                         # jak dlouho vydrží přihlášení bez aktivity
+# secure_cookie = true                      # jen když před webem stojí HTTPS proxy
 
 [storage]
 backup_dir = "/central_backup/arcatum"      # kam se ukládají zálohovaná data
@@ -206,6 +219,11 @@ backup_dir = "/central_backup/arcatum"      # kam se ukládají zálohovaná dat
 ```
 
 Chybějící pole padají na defaulty (`pkg/config.Default`), chybějící soubor taky.
+
+**Dva porty, dva druhy volajících.** `[server] listen` je pro runnery a ověřuje je
+certifikátem; `[web] listen` je pro lidi a ověřuje je heslem. Prázdné `[web] listen` web
+vypne. Kolizi adres (dva listenery na jednom portu) config odmítne při startu, i s bootstrap
+portem — jinak by jeden z nich spadl na „address already in use" a nebylo by zřejmé který.
 
 ### Runner — `runner.toml`
 
@@ -244,6 +262,64 @@ Proč to není jedna vrstva: mTLS chrání spojení, podpis chrání *úlohu*, �
 *uložená data*. Kdyby unikl TLS klíč serveru, podepisovací klíč je jiný soubor a útočník
 runneru kód nepodstrčí; kdyby unikla záloha databáze, master klíč je také jiný soubor.
 
+**Lidé se ale hlásí jménem a heslem**, ne certifikátem — na to je [web UI](#web-ui)
+a samostatný plain-HTTP port `[web] listen`. Certifikát do prohlížeče se musí vyexportovat,
+naimportovat v každém počítači a po roce vyměnit; heslo je pohodlnější a u operátora, který
+jen kouká na výsledky záloh, ničemu neubírá: web nesahá na klíče a *úlohy* chrání podpis,
+který si server dělá sám. Runnery na certifikátech zůstávají — stroj se instaluje jednou
+a certifikát je to, čím ho server pustí (nebo nepustí) už na TLS handshaku.
+
+### Přihlášení do webu (jméno a heslo)
+
+Účty žijí v `arcatum.db` v tabulce `users` a mají dvě role:
+
+| Role | Co smí |
+|---|---|
+| `admin` | všechno — spouštět úlohy, editovat instance, schvalovat runnery, rotovat klíče, spravovat účty |
+| `viewer` | jen čtení — běhy, výstupy, instance, runnery, obnova. Žádná tlačítka, která něco mění |
+
+Ukládá se jen **PBKDF2-HMAC-SHA256 verifikátor** (600 000 iterací, samostatná sůl na
+každý účet), nikdy heslo. Kopie databáze tedy nikoho nepřihlásí ani neprozradí, co si kdo
+zvolil — a hádat hashe je pomalé záměrně. Přihlášení drží cookie `arcatum_session`
+(`HttpOnly`, `SameSite=Strict`), v databázi je z ní jen SHA‑256, takže se ani z tabulky
+sezení nedá vydávat za přihlášeného operátora.
+
+**První účet vytvoří server sám.** Když v databázi není žádný, při startu vznikne `admin`
+a jeho vygenerované heslo se **jednou** vypíše do logu:
+
+```
+  ┌─ first start: created the web account ─────────────────────
+  │   user:     admin
+  │   password: k4m2ftq7hn3bwzla
+  │ Log in and change it (Účet → změnit heslo). A forgotten
+  │ password is reset with: arcatum-server -passwd admin
+  └───────────────────────────────────────────────────────────
+```
+
+Další účty se přidávají z webu (záložka **Uživatelé**). Když se heslo ztratí i tomu
+poslednímu adminovi, cesta zpět je ze shellu na serveru:
+
+```sh
+arcatum-server -config /etc/arcatum/server.toml -passwd petr
+#   → vypíše nové vygenerované heslo; účet vytvoří, pokud neexistuje
+ARCATUM_PASSWORD='vlastní heslo' arcatum-server -config … -passwd petr
+#   → nastaví konkrétní heslo (proměnná prostředí, ať nekončí v historii shellu)
+arcatum-server -config … -passwd kolega -passwd-role viewer
+```
+
+Co web hlídá sám:
+
+- **Změna hesla, vypnutí nebo smazání účtu okamžitě ukončí jeho sezení** — nestačí čekat,
+  než vyprší cookie.
+- **Posledního funkčního admina nelze smazat, vypnout ani degradovat na viewera.** Odemknout
+  systém zpátky by šlo jen ze shellu, tak k tomu web nedá dojít.
+- **Neúspěšná přihlášení se po pěti pokusech zdržují** (1 min, dál se zdvojnásobuje po
+  15 minut) — kontrola hesla je záměrně drahá a nesmí se dát volat ve smyčce.
+- **Neexistující jméno se odmítá stejně dlouho jako špatné heslo**, takže z rychlosti
+  odpovědi nejde vyčíst, které účty existují.
+- **Požadavky, které něco mění, musí přijít z Arcatum** (kontrola `Origin`), aby cizí
+  stránka nemohla jednat cookie přihlášeného operátora.
+
 ### Šifrování secrets at-rest
 
 Každá hodnota se šifruje samostatně, takže **názvy** secrets zůstávají čitelné (web UI
@@ -271,7 +347,11 @@ Role je v `OU` certifikátu a server podle ní dělí přístup:
 | Role | Kdo | Co smí |
 |---|---|---|
 | `runner` | zálohovaný server | jen `checkin` a hlášení **vlastních** běhů |
-| `admin` | operátor / web UI | ostatní API — spouštění úloh, výpisy, čtení výstupů |
+| `admin` | operátor volající API ze shellu | ostatní API — spouštění úloh, výpisy, čtení výstupů |
+
+Admin certifikát je dnes potřeba jen pro volání API na portu `[server] listen` (typicky
+z `curl` nebo skriptu). Do prohlížeče ho nikdo naimportovat nemusí — web má
+[vlastní přihlášení](#přihlášení-do-webu-jméno-a-heslo).
 
 **Identitu určuje certifikát, ne požadavek.** Runner se identifikuje `CN` svého
 certifikátu, které musí odpovídat `runner_id` v instancích. Když se runner s platným
@@ -597,11 +677,12 @@ curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
 
 ## Web UI
 
-Web běží na stejné adrese jako API — otevři `https://172.24.0.60:8443/`. Je **zabalený
-v binárce** (`embed.FS`), takže se nic zvlášť neinstaluje a nemůže se rozejít s verzí
-serveru.
+Web má **vlastní port** — otevři `http://172.24.0.60:8080/` a přihlas se jménem a heslem
+(`[web] listen` v configu, viz [Přihlášení do webu](#přihlášení-do-webu-jméno-a-heslo)).
+Je **zabalený v binárce** (`embed.FS`), takže se nic zvlášť neinstaluje a nemůže se rozejít
+s verzí serveru.
 
-Tři přehledy a detail běhu:
+Přehledy a detail běhu:
 
 | Záložka | Co ukazuje |
 |---|---|
@@ -610,6 +691,11 @@ Tři přehledy a detail běhu:
 | **Obnova** | snapshoty, procházení stromu, stažení souboru nebo adresáře jako `.tar` |
 | **Klíče** | stav rotace všech tří klíčů, přešifrování secrets, postup migrace CA |
 | **Runnery** | stav, platforma, **verze buildu**, expirace certifikátu, kdy se naposledy ohlásil; **schválit / zamítnout / zneplatnit** |
+| **Uživatelé** | účty webu: role, stav, poslední přihlášení; **přidat / nové heslo / změnit roli / vypnout / smazat** (jen pro roli `admin`) |
+
+Vpravo v hlavičce je přihlášený uživatel, jeho role, **změnit heslo** a **odhlásit**.
+Viewerovi se tlačítka, která něco mění, vůbec nezobrazí — a server je stejně odmítne (403),
+takže shoda UI se skutečnými právy není otázka důvěry v prohlížeč.
 
 Klikem na běh se otevře **detail s živým tailem výstupu** — u probíhající úlohy se log
 dosypává, jak přichází. Přepínač `stdout`/`stderr` a zaškrtávátko „sledovat"
@@ -620,24 +706,18 @@ skriptů: spustit ručně a hned vidět, co skript píše.
 a server pošle jen to, co od posledního dotazu přibylo. Jednodušší, přežije to odpadnutí
 spojení a nepotřebuje to nic navíc na serveru.
 
-### Přístup z prohlížeče (klientský certifikát)
+### Přístup z prohlížeče
 
-Web má **stejnou ochranu jako API** — vyžaduje admin certifikát. Aby ho prohlížeč
-poslal, naimportuj ho jako PKCS#12:
+Nic instalovat netřeba — otevřít `http://<server>:8080/` a přihlásit se. Web je plain HTTP
+a patří proto do vnitřní sítě; kdo ho chce vystavit dál, ať před něj postaví HTTPS reverse
+proxy a v configu zapne `[web] secure_cookie = true`, aby cookie sezení chodila jen po HTTPS.
 
-```sh
-openssl pkcs12 -export \
-  -inkey pki/admin-petr.key -in pki/admin-petr.pem -certfile pki/ca.pem \
-  -out admin-petr.p12
-```
+Port webu je záměrně jiný než port API: mTLS by prohlížeč nutil poslat klientský certifikát,
+a to je přesně ta nepohodlnost, kterou přihlášení heslem odstraňuje. Runnery na port API
+chodí dál s certifikátem.
 
-Vzniklý `.p12` naimportuj do prohlížeče (Firefox: *Nastavení → Certifikáty → Vaše
-certifikáty*; Chrome/Windows: dvojklik na soubor). Aby prohlížeč nehlásil neznámou
-autoritu, přidej `pki/ca.pem` mezi důvěryhodné CA.
-
-> Bez certifikátu vrátí server 401 a spojení neprojde — to je záměr, ne chyba.
-
-Textový přehled pro shell zůstává na `/status`:
+Textový přehled pro shell zůstává na `/status` — na webovém portu za přihlášením, na portu
+API s admin certifikátem:
 
 ```sh
 curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
@@ -768,26 +848,35 @@ spravuješ z webu, můžeš ho po naplnění klidně smazat.
 
 ## HTTP API
 
-Sloupec „role" platí při zapnutém mTLS — viz
-[Zabezpečení](#zabezpečení-mtls-a-podpis-úloh).
+API je na dvou portech a **stejné operátorské endpointy jsou na obou** — liší se jen tím,
+čím se volající prokáže:
+
+| Port | Kdo tam chodí | Čím se ověří |
+|---|---|---|
+| `[server] listen` (mTLS) | runnery a volání ze shellu | certifikát (`OU` = `runner`/`admin`) |
+| `[web] listen` (plain HTTP) | web UI a lidé | cookie sezení po přihlášení jménem a heslem |
+
+Sloupec „role" tedy znamená: **runner** = certifikát runneru; **admin** = admin certifikát,
+nebo přihlášený uživatel s rolí `admin`; **čtení** = totéž plus role `viewer`. Bez `[tls]`
+se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém portu platí vždy.
 
 | Metoda a cesta | Role | Účel |
 |---|---|---|
 | `POST /api/v1/checkin` | runner | runner se hlásí, dostane úlohy k spuštění |
 | `POST /api/v1/runs/updates` | runner | příjem ndjson streamu průběhu a výstupu |
 | `POST /api/v1/instances/{id}/run` | admin | **manuální spuštění** („spusť teď") |
-| `GET /api/v1/instances` | admin | instance včetně `next_run` (secrets maskované) |
+| `GET /api/v1/instances` | čtení | instance včetně `next_run` (secrets maskované) |
 | `POST /api/v1/instances` | admin | vytvoří instanci (validuje se proti manifestu) |
 | `PUT /api/v1/instances/{id}` | admin | upraví instanci |
 | `DELETE /api/v1/instances/{id}` | admin | smaže instanci (zálohy zůstanou) |
-| `GET /api/v1/scripts` | admin | skripty a jejich deklarované parametry |
-| `GET /api/v1/runs?limit=N` | admin | historie běhů, nejnovější první |
-| `GET /api/v1/runs/{id}` | admin | detail jednoho běhu |
-| `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | admin | zachycený výstup běhu |
-| `GET /api/v1/runs/{id}/tail?offset=N&stream=` | admin | přírůstek výstupu — základ živého tailu |
-| `GET /api/v1/runners` | admin | evidované runnery (stav, platforma, `last_seen`) |
-| `GET /api/v1/whoami` | admin | tvoje identita a expirace certifikátů |
-| `GET /api/v1/rotation` | admin | stav rotace všech tří klíčů |
+| `GET /api/v1/scripts` | čtení | skripty a jejich deklarované parametry |
+| `GET /api/v1/runs?limit=N` | čtení | historie běhů, nejnovější první |
+| `GET /api/v1/runs/{id}` | čtení | detail jednoho běhu |
+| `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | čtení | zachycený výstup běhu |
+| `GET /api/v1/runs/{id}/tail?offset=N&stream=` | čtení | přírůstek výstupu — základ živého tailu |
+| `GET /api/v1/runners` | čtení | evidované runnery (stav, platforma, `last_seen`) |
+| `GET /api/v1/whoami` | čtení | kdo jsi, jak jsi se přihlásil, expirace certifikátů |
+| `GET /api/v1/rotation` | čtení | stav rotace všech tří klíčů |
 | `POST /api/v1/secrets/rekey` | admin | přešifruje secrets aktuálním master klíčem |
 | `GET /api/v1/trust` | runner / admin | podepsaná sada podepisovacích klíčů a CA bundle |
 | `GET /api/v1/update` | runner / admin | podepsaný manifest publikovaných buildů runneru |
@@ -797,13 +886,25 @@ Sloupec „role" platí při zapnutém mTLS — viz
 | `POST /api/v1/runners/{id}/revoke` | admin | zneplatní certifikát, runner → `pending` |
 | `POST /api/v1/runners/revoke-all` | admin | zneplatní certifikáty všech runnerů |
 | `POST /api/v1/renew` | runner | obnova certifikátu (bez schvalování) |
-| `GET /api/v1/instances/{id}/repo` | admin | velikost restic repozitáře a počet snapshotů |
-| `GET /api/v1/instances/{id}/snapshots` | admin | seznam snapshotů, nejnovější první |
-| `GET /api/v1/instances/{id}/snapshots/{snap}/ls?path=` | admin | obsah adresáře ve snapshotu |
-| `GET /api/v1/instances/{id}/snapshots/{snap}/download?path=&archive=tar` | admin | **obnova** — soubor nebo adresář jako tar |
+| `GET /api/v1/instances/{id}/repo` | čtení | velikost restic repozitáře a počet snapshotů |
+| `GET /api/v1/instances/{id}/snapshots` | čtení | seznam snapshotů, nejnovější první |
+| `GET /api/v1/instances/{id}/snapshots/{snap}/ls?path=` | čtení | obsah adresáře ve snapshotu |
+| `GET /api/v1/instances/{id}/snapshots/{snap}/download?path=&archive=tar` | čtení | **obnova** — soubor nebo adresář jako tar |
 | `/restic/{instance}/…` | runner (vlastní) / admin | restic REST backend pro souborové zálohy |
-| `GET /` | admin | [web UI](#web-ui) (zabalené v binárce) |
-| `GET /status` | admin | textová status stránka pro shell |
+| `GET /status` | čtení | textová status stránka pro shell |
+
+Jen na **webovém portu** (`[web] listen`) — přihlášení a účty:
+
+| Metoda a cesta | Role | Účel |
+|---|---|---|
+| `POST /api/v1/login` | — | přihlášení `{username, password}`, nastaví cookie sezení |
+| `POST /api/v1/logout` | — | ukončí sezení a cookie zneplatní |
+| `POST /api/v1/password` | čtení | změna **vlastního** hesla `{current, new}`; ukončí všechna sezení |
+| `GET /api/v1/users` | admin | seznam účtů (nikdy hesla ani hashe) |
+| `POST /api/v1/users` | admin | nový účet; bez hesla ho server vygeneruje a jednou vrátí |
+| `PUT /api/v1/users/{name}` | admin | role, vypnutí/zapnutí, nové heslo (`generate_password`) |
+| `DELETE /api/v1/users/{name}` | admin | smaže účet |
+| `GET /` | — | [web UI](#web-ui) (zabalené v binárce; přihlášení řeší až API výše) |
 
 Na **bootstrap portu** (plain HTTP, viz [instalace runneru](#instalace-runneru-na-zálohovaný-server))
 běží jen tohle — dostupné i bez certifikátu, protože nový host žádný nemá:
@@ -1039,6 +1140,7 @@ just                   # vypíše všechny recepty i s popisem
 | `just dev-init` | vytvoří `local/{data,backup}`, `local/server.toml` a `local/instances.json`, pokud chybí (a doplní do seedu hostname) |
 | `just server` | spustí server nad `local/` configem |
 | `just runner-once` / `just runner` | jeden cyklus runneru, nebo běh jako služba |
+| `just passwd [user] [role]` | nastaví heslo účtu webu a vypíše ho (default `admin`/`admin`) |
 | `just trigger [instance]` | vynutí spuštění instance (default `hello-demo`) |
 | `just runs`, `just instances`, `just runners`, `just status` | přehledy z API |
 | `just run-output <id> [stream]` | zachycený výstup běhu (přijme `run-1` i `1`) |
@@ -1060,6 +1162,8 @@ V=2026.07.26 just release                   # verze do binárky (default: dnešn
 SERVER_URL=https://127.0.0.1:8443 just runs # jiný cíl API
 SERVER_CONFIG=local/server-mtls.toml just server
 LISTEN=0.0.0.0:8443 just dev-init           # dostupné i z jiného stroje (viz níže)
+WEB_LISTEN=0.0.0.0:8080 just dev-init       # totéž pro web UI
+ARCATUM_PASSWORD=tajneheslo just passwd petr # konkrétní heslo místo vygenerovaného
 ```
 
 > Vývojový config naslouchá jen na `127.0.0.1`, takže z jiného stroje se na server
@@ -1089,6 +1193,8 @@ typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-develop
   dedup a inkrementální snapshoty, izolace repozitářů mezi runnery
 - **Retence (GFS)** — `forget --prune` po úspěšné záloze, omezené na vlastní snapshoty
 - **Web UI** zabalené v binárce — běhy, instance, runnery, **živý tail výstupu**, „spustit teď"
+- **Přihlášení do webu jménem a heslem** na vlastním portu, role `admin`/`viewer`, správa
+  účtů z webu (PBKDF2 hashe, sezení v cookie); runnery zůstávají na certifikátech
 - **Instalace jedním příkazem** (`install.sh`) a **enrollment** — runner si vygeneruje vlastní
   klíč, pošle jen CSR a čeká na schválení ve webu
 - **Automatická obnova certifikátů** před expirací (včetně výměny klíče) a **zneplatnění

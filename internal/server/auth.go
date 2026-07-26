@@ -142,13 +142,16 @@ func (s *Server) denyRunner(w http.ResponseWriter, err error) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "reason": reason})
 }
 
-// Identity describes the caller and the state of the certificate they used. The web UI
-// reads it to warn before that certificate expires — an admin certificate is valid for a
-// year by default, and the failure mode without a warning is a browser that suddenly
-// cannot connect.
+// Identity describes the caller and, when they authenticated with a certificate, the
+// state of that certificate. The web UI reads it to know who is logged in, what they may
+// do, and whether a certificate is about to expire — including the server's own, whose
+// lapse would stop every runner.
 type Identity struct {
-	Name         string    `json:"name"`
-	Role         string    `json:"role"`
+	Name string `json:"name"`
+	Role string `json:"role"`
+	// Auth is how the caller proved who they are: "password" on the web listener,
+	// "certificate" on the mTLS one, empty in development mode where nothing is checked.
+	Auth         string    `json:"auth,omitempty"`
 	CertNotAfter time.Time `json:"cert_not_after,omitempty"`
 	DaysLeft     int       `json:"days_left,omitempty"`
 	// ServerCertNotAfter is when the server's own certificate expires. Runners stop
@@ -159,12 +162,19 @@ type Identity struct {
 	Secured bool `json:"secured"`
 }
 
-// handleWhoAmI reports the caller's identity and certificate expiry.
+// handleWhoAmI reports the caller's identity and certificate expiry. It is served on
+// both listeners, so it answers for whichever identity the caller actually used: a
+// logged-in operator on the web listener, a certificate on the mTLS one.
 func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	id := Identity{Secured: s.requireClientCert}
-	if cert := peerCert(r); cert != nil {
+	if u := userFrom(r); u != nil {
+		id.Name = u.Username
+		id.Role = u.Role
+		id.Auth = "password"
+	} else if cert := peerCert(r); cert != nil {
 		id.Name = cert.Subject.CommonName
 		id.Role = crypto.CertRole(cert)
+		id.Auth = "certificate"
 		id.CertNotAfter = cert.NotAfter
 		id.DaysLeft = daysUntil(cert.NotAfter)
 	}

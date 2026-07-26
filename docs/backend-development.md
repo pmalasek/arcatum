@@ -84,6 +84,9 @@ scripts  = "scripts"
 data_dir = "./local/data"
 timezone = "Europe/Prague"
 
+[web]
+listen = "127.0.0.1:8080"
+
 [storage]
 backup_dir = "./local/backup"
 EOF
@@ -94,9 +97,12 @@ hostname
 ```
 
 Totéž udělá `just dev-init` — vytvoří adresáře, zkopíruje oba vzorové soubory a přepíše
-v configu `listen`, `data_dir` a `backup_dir` na lokální cesty a v seedu zástupný
+v configu oba `listen`, `data_dir` a `backup_dir` na lokální cesty a v seedu zástupný
 `REPLACE-WITH-RUNNER-HOSTNAME` na `hostname -s`. Existující soubory **nepřepisuje**,
 takže se dá pustit kdykoli.
+
+Web je pak na `http://127.0.0.1:8080/`. Při prvním startu server vypíše do logu heslo
+vygenerované pro účet `admin`; kdykoli později ho přenastaví `just passwd admin`.
 
 `local/` je v `.gitignore`.
 
@@ -227,11 +233,20 @@ Vrstvy zabezpečení, které do toho zasahují:
 ### Nový endpoint
 
 1. Handler do vhodného souboru v `internal/server/` (`instances.go`, `restore.go`, `update.go`, …).
-2. Registrace v `Server.Handler()` v [internal/server/http.go](../internal/server/http.go#L101).
-   Routy používají Go 1.22 vzory (`"GET /api/v1/runs/{id}"`).
-3. **Admin endpointy obal `s.adminOnly(...)`.** Bez toho je endpoint dostupný i runnerům.
-   Runnerové endpointy si identitu vytáhnou přes `s.activeRunnerIdentity(r, "")` a musí
-   kontrolovat, že runner sahá jen na své vlastní věci (vzor: `ownsRun`).
+2. Registrace v [internal/server/http.go](../internal/server/http.go). Server má **dva
+   routery**, protože má dva druhy volajících:
+   - `Server.Handler()` — port `[server] listen` (mTLS): runnery a volání s admin certifikátem.
+   - `Server.WebHandler()` — port `[web] listen` (plain HTTP): web UI a přihlášení heslem.
+
+   Operátorské endpointy patří do `registerOperatorRoutes`, které se registruje **do obou**
+   — dostane guard podle listeneru (`adminOnly` u mTLS, `webRead`/`webAdmin` u webu), takže
+   nový endpoint funguje z curl i z webu a nikde se nezapomene ohlídat. Runnerové endpointy
+   registruj jen v `Handler()`. Routy používají Go 1.22 vzory (`"GET /api/v1/runs/{id}"`).
+3. **Rozhodni, jestli endpoint jen čte, nebo mění.** Do `registerOperatorRoutes` ho zabal
+   `read(...)` (čte — pustí i roli `viewer`) nebo `write(...)` (mění — jen admin). Runnerové
+   endpointy si identitu vytáhnou přes `s.activeRunnerIdentity(r, "")` a musí kontrolovat, že
+   runner sahá jen na své vlastní věci (vzor: `ownsRun`). Přihlášeného člověka vrací
+   `userFrom(r)` (nil na mTLS listeneru), jméno pro log dá `actor(r)` pro oba případy.
 4. Odpověď přes `writeJSON`. Hodnoty secrets **nikdy** do odpovědi.
 5. Řádek do tabulky API v [README](../README.md#http-api) — je to jediný soupis endpointů.
 
@@ -392,7 +407,17 @@ rozejít s verzí serveru.
 
 Důsledek pro vývoj: **po změně v `web/` je nutný restart serveru** (u `go run` stačí
 zabít a spustit znovu, `//go:embed` čte soubory při kompilaci). Nový soubor v `web/`
-přidej i do direktivy `//go:embed` a do seznamu obsluhovaných assetů v `Handler()`.
+přidej i do direktivy `//go:embed` a do seznamu obsluhovaných assetů ve `WebHandler()`.
+
+Web běží na vlastním portu (`[web] listen`) a přihlašuje se jménem a heslem — assety samy
+jsou dostupné bez přihlášení (je to ta stránka, která o přihlášení *žádá*), všechna data
+jdou přes API za cookie sezení. Na 401 z API `app.js` ukáže přihlašovací obrazovku, takže
+vypršené sezení nekončí prázdnými tabulkami. Účty, sezení a middleware jsou
+v [internal/server/users.go](../internal/server/users.go) a `users_store.go`; heslo se
+ukládá jako PBKDF2 verifikátor z [pkg/crypto/password.go](../pkg/crypto/password.go).
+
+> Testy v `internal/server` snižují počet iterací PBKDF2 (`TestMain` v `users_test.go`).
+> Bez toho by každé vytvoření účtu stálo skoro půl sekundy.
 
 Živý tail je polling — `GET /api/v1/runs/{id}/tail?offset=N` vrací jen přírůstek. Žádné
 websockety: přežije to odpadnutí spojení a nepotřebuje nic navíc na serveru.
@@ -428,7 +453,8 @@ gofmt -l . && go vet ./... && go test ./... && go build ./...
 
 - [ ] test na nové chování — u autorizace, podpisů a migrací povinně
 - [ ] `Validate()` doplněný, když nové pole umí něco tiše vypnout
-- [ ] nový endpoint obalený `adminOnly` (nebo má vlastní kontrolu vlastnictví) a je v tabulce API v README
+- [ ] nový endpoint má guard — `read`/`write` v `registerOperatorRoutes`, nebo `adminOnly`,
+      nebo vlastní kontrolu vlastnictví u runnerů — a je v tabulce API v README
 - [ ] žádné secrets v logu ani v odpovědích
 - [ ] změny v protokolu zvládne starý runner, nebo je popsané pořadí nasazení
 - [ ] dokumentace: [README](../README.md) pro postup, [architecture.md](architecture.md) pro rozhodnutí a *proč*

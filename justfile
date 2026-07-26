@@ -9,6 +9,7 @@ server_cfg := env_var_or_default("SERVER_CONFIG", "local/server.toml")
 instances := env_var_or_default("INSTANCES", "local/instances.json")
 server_url := env_var_or_default("SERVER_URL", "http://127.0.0.1:8443")
 listen := env_var_or_default("LISTEN", "127.0.0.1:8443")
+web_listen := env_var_or_default("WEB_LISTEN", "127.0.0.1:8080")
 
 # Show available recipes.
 default:
@@ -69,12 +70,17 @@ clean:
 # Initialize local development files if missing.
 dev-init:
 	mkdir -p local/data local/backup
-	if [[ ! -f local/server.toml ]]; then cp config/server.example.toml local/server.toml; sed -i 's|^listen[[:space:]]*=.*|listen   = "{{listen}}"|' local/server.toml; sed -i 's|^data_dir[[:space:]]*=.*|data_dir = "./local/data"|' local/server.toml; sed -i 's|^backup_dir[[:space:]]*=.*|backup_dir = "./local/backup"|' local/server.toml; fi
+	if [[ ! -f local/server.toml ]]; then cp config/server.example.toml local/server.toml; sed -i '0,/^listen/s|^listen[[:space:]]*=.*|listen   = "{{listen}}"|' local/server.toml; sed -i 's|^listen[[:space:]]*=[[:space:]]*"0.0.0.0:8080"|listen      = "{{web_listen}}"|' local/server.toml; sed -i 's|^data_dir[[:space:]]*=.*|data_dir = "./local/data"|' local/server.toml; sed -i 's|^backup_dir[[:space:]]*=.*|backup_dir = "./local/backup"|' local/server.toml; fi
 	if [[ ! -f local/instances.json ]]; then cp data/instances.example.json local/instances.json; sed -i "s|REPLACE-WITH-RUNNER-HOSTNAME|$(hostname -s)|g" local/instances.json; fi
 
 # Run server in local dev mode.
 server config=server_cfg instances_file=instances:
 	{{go}} run ./cmd/server -config "{{config}}" -instances "{{instances_file}}"
+
+# Set (or create) a web account's password; prints a generated one. Use ARCATUM_PASSWORD
+# to choose it yourself, e.g. `ARCATUM_PASSWORD=tajneheslo just passwd petr`.
+passwd user="admin" role="admin" config=server_cfg:
+	{{go}} run ./cmd/server -config "{{config}}" -passwd "{{user}}" -passwd-role "{{role}}"
 
 # Run runner once against local server.
 runner-once url=server_url config="":

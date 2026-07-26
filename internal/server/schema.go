@@ -48,6 +48,33 @@ CREATE TABLE IF NOT EXISTS runs (
 
 CREATE INDEX IF NOT EXISTS idx_runs_instance ON runs(instance_id);
 CREATE INDEX IF NOT EXISTS idx_runs_created  ON runs(created_at DESC);
+
+-- Web operators. Runners authenticate with certificates; people log in with a
+-- username and a password, which is what the web UI asks for. Only a PBKDF2
+-- verifier is stored, never the password (pkg/crypto/password.go).
+CREATE TABLE IF NOT EXISTS users (
+  username   TEXT PRIMARY KEY,
+  pass_hash  TEXT NOT NULL,
+  role       TEXT NOT NULL DEFAULT 'admin',   -- admin | viewer
+  disabled   INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT 0,      -- unix millis
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  last_login INTEGER NOT NULL DEFAULT 0
+);
+
+-- Login sessions behind the web UI's cookie. Only a SHA-256 of the token is stored,
+-- so the database cannot be used to impersonate a logged-in operator. Rows are
+-- deleted on logout, when the account changes, and once expired.
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  username   TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER NOT NULL DEFAULT 0,
+  last_seen  INTEGER NOT NULL DEFAULT 0,
+  ip         TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(username);
 `
 
 // addColumns lists columns added after the initial schema. They are applied only when

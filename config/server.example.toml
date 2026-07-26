@@ -8,6 +8,23 @@ data_dir  = "/central_backup/arcatum/data"  # DB and runtime state
 timezone  = "Europe/Prague"                 # default TZ for schedules without one
 log_level = "info"                          # debug | info | warn | error
 
+# The web UI: a separate, plain-HTTP listener where people log in with a username and a
+# password. Runners keep authenticating with certificates on [server] listen above — a
+# machine is installed once, while a browser certificate would have to be exported and
+# imported for every person and every computer they use.
+#
+# On the first start the server creates the "admin" account and prints its generated
+# password into the log once. Reset a forgotten one with:
+#   arcatum-server -passwd admin
+# Leave listen empty to switch the web UI off entirely.
+[web]
+listen      = "0.0.0.0:8080"
+session_ttl = "12h"                         # inactivity window; slides while the UI is in use
+# Only set this when a reverse proxy terminates HTTPS in front of this listener: it tells
+# the browser to send the session cookie over HTTPS only, which on a plain-HTTP listener
+# means nobody can log in at all.
+# secure_cookie = true
+
 [storage]
 backup_dir = "/central_backup/arcatum"      # where backup data is stored
 
