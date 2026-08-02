@@ -14,9 +14,15 @@ set -euo pipefail
 : "${ARCATUM_USER:?missing user}"
 PORT="${ARCATUM_PORT:-3306}"
 
-# Secrets file is expected to define MYSQL_PWD (consumed by mysqldump via env).
+# The secrets file defines ARCATUM_<PARAM>, so the password arrives as
+# ARCATUM_PASSWORD (see docs/script-development.md).
 # shellcheck disable=SC1090
 [ -n "${ARCATUM_SECRETS_FILE:-}" ] && source "$ARCATUM_SECRETS_FILE"
+: "${ARCATUM_PASSWORD:?missing password}"
+
+# mysqldump takes the password from MYSQL_PWD; --password= would expose it in the
+# process list on the backed-up host.
+export MYSQL_PWD="$ARCATUM_PASSWORD"
 
 exec mysqldump \
   --host="$ARCATUM_HOST" \
