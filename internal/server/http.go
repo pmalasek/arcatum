@@ -555,6 +555,15 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeError answers with JSON. A rejected instance is rejected for a reason — a missing
+// password, an unknown script — and the UI can only show that reason if it arrives in the
+// shape fetch() knows how to read.
+func writeError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
 // timeoutSeconds resolves an instance/manifest timeout string to seconds, default 1h.
 func timeoutSeconds(instTimeout, manifestTimeout string) int {
 	for _, s := range []string{instTimeout, manifestTimeout} {

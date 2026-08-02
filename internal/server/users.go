@@ -149,9 +149,7 @@ func (s *Server) webGuard(next http.HandlerFunc, needAdmin bool) http.HandlerFun
 // writeAuthError answers with JSON, since every caller of the web API is the UI's
 // fetch() and a JSON body is what it can act on.
 func writeAuthError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	writeError(w, code, msg)
 }
 
 // isStateChanging reports whether a request would alter state, and therefore needs the

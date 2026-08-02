@@ -39,5 +39,11 @@ name = "restic_password"
 type = "string"
 required = true
 secret = true
+default = "password"
 # Password of this instance's restic repository. Losing it makes the backups
-# unreadable — restic cannot recover it.
+# unreadable — restic cannot recover it, so keep a copy outside Arcatum.
+#
+# The default is a placeholder so an instance can be created without inventing one.
+# It is not a secret in any real sense: anyone who reads the repository directory on
+# the server can decrypt every snapshot in it. Set a real password per instance for
+# anything you would mind having read.

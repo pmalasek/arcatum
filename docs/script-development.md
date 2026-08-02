@@ -85,9 +85,13 @@ instanci **při uložení**, ne až při noční záloze. Kontroluje se:
 - secret poslaný jako obyčejný parametr (a naopak) → chyba
 - `type = "int"` / `"bool"` s nečíselnou / nepravdivostní hodnotou → chyba
 
-Prázdná hodnota se počítá jako nezadaná. `default` z manifestu pokrývá chybějící nepovinnou
-hodnotu — ale **do env se nepropisuje**, takže default si v kódu stejně napiš
-(`PORT="${ARCATUM_PORT:-3306}"`).
+Prázdná hodnota se počítá jako nezadaná. `default` z manifestu se doplní do uložené
+hodnoty, takže ho skript dostane v env jako každý jiný parametr. Ve webu je předvyplněný
+v políčku — co se uloží, je tedy vidět na obrazovce. Zadaná hodnota má vždy přednost;
+default nikdy nepřepíše to, co jsi vyplnil.
+
+> Platí pro instance ukládané přes API a web. Seed soubor `instances.json` se importuje
+> mimo tuhle cestu a bere hodnoty tak, jak jsou — tam si default napiš do JSONu sám.
 
 ---
 
@@ -317,7 +321,7 @@ Parametry, které runner čte:
 | `excludes` | restic exclude vzory, oddělené čárkou |
 | `tags` | další tagy snapshotu (vždy se přidá `arcatum` a `instance:<id>`) |
 | `keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` | retence; je-li kterýkoli nastavený, po **úspěšné** záloze se pustí `forget --prune` omezené na snapshoty téhle instance |
-| `restic_password` | **povinný secret** — heslo repozitáře |
+| `restic_password` | secret — heslo repozitáře; nevyplněné se uloží jako `password` (viz default v manifestu) |
 
 Vlastní zálohovací skript pro soubory tedy nepiš. Kde se `restic` typ vyplatí obejít
 vlastním `bash` skriptem: když potřebuješ data předzpracovat (dump databáze, konzistentní

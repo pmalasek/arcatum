@@ -26,13 +26,21 @@ class ApiError extends Error {
   }
 }
 
-// errorText vytáhne z odpovědi text, který má smysl ukázat. Server posílá u chyb
-// {"error": "..."} — je to konkrétnější než „403 Forbidden".
+// errorText vytáhne z odpovědi text, který má smysl ukázat: „parameter "password" is
+// required" je použitelnější než „400 Bad Request". Část API odpovídá {"error": "..."},
+// část prostým textem z http.Error — čte se tedy tělo a JSON se zkusí až z něj, aby se
+// důvod neztratil ani u jednoho z nich.
 async function errorText(res) {
+  const raw = (await res.text().catch(() => '')).trim();
+  // Prázdné tělo nic neřekne, a stránka s chybou od reverzní proxy je na tomhle místě
+  // spíš šum než vysvětlení; v obou případech zbývá stavový kód.
+  if (!raw || raw.length > 500) return `${res.status} ${res.statusText}`;
   try {
-    const body = await res.json();
+    const body = JSON.parse(raw);
     if (body && body.error) return body.error;
-  } catch (_) { /* není JSON, zbývá stavový kód */ }
+  } catch (_) {
+    return raw;
+  }
   return `${res.status} ${res.statusText}`;
 }
 
@@ -612,6 +620,47 @@ function fieldRow(label, inner, hint) {
     + (hint ? `<div class="hint">${esc(hint)}</div>` : '') + '</div></div>';
 }
 
+// runnerField nabídne runnery, které server zná. Opsat id ručně znamená trefit CN
+// certifikátu na první pokus — a překlep nedá chybu, dá instanci, která jen nikdy
+// nepoběží, protože se o ni žádný runner nepřihlásí.
+async function runnerField(current) {
+  let list;
+  try {
+    list = await api('/runners');
+  } catch (_) {
+    // Nedostupný seznam nesmí zablokovat založení instance.
+    return textRunnerField(current, 'seznam runnerů se nepodařilo načíst — vyplň id ručně, '
+      + 'musí odpovídat CN certifikátu runneru');
+  }
+  // Zamítnuté runnery nabízet nemá smysl; čekající ano — instanci lze připravit dřív,
+  // než se stihne schválit.
+  const rank = { approved: 0, pending: 1 };
+  const opts = (list || [])
+    .filter((r) => r.status === 'approved' || r.status === 'pending')
+    .sort((a, b) => (rank[a.status] - rank[b.status]) || a.id.localeCompare(b.id))
+    .map((r) => ({ id: r.id, label: r.status === 'approved' ? r.id : `${r.id} (čeká na schválení)` }));
+
+  if (!opts.length && !current) {
+    return textRunnerField(current, 'zatím se nezapsal žádný runner — id musí odpovídat '
+      + 'CN certifikátu runneru');
+  }
+  // Instance může ukazovat na runner, který byl mezitím zamítnut nebo smazán. Přepsat jí
+  // ho jen proto, že zmizel ze seznamu, by bylo horší než ho nabídnout dál.
+  if (current && !opts.some((o) => o.id === current)) {
+    opts.unshift({ id: current, label: `${current} (není v seznamu)` });
+  }
+  const html = '<select id="f-runner">'
+    + (current ? '' : '<option value="">— vyber runner —</option>')
+    + opts.map((o) =>
+        `<option value="${esc(o.id)}"${o.id === current ? ' selected' : ''}>${esc(o.label)}</option>`).join('')
+    + '</select>';
+  return { html, hint: 'runner, který bude instanci spouštět' };
+}
+
+function textRunnerField(current, hint) {
+  return { html: `<input id="f-runner" value="${esc(current)}" placeholder="web-01">`, hint };
+}
+
 async function openInstanceForm(id) {
   editing = id || null;
   el('form-error').textContent = '';
@@ -626,6 +675,7 @@ async function openInstanceForm(id) {
     inst = all.find((i) => i.id === id) || null;
   }
   const chosen = inst ? inst.script : (list[0] && list[0].name) || '';
+  const runner = await runnerField(inst ? inst.runner_id : '');
 
   el('form-body').innerHTML =
     fieldRow('id', id
@@ -634,8 +684,7 @@ async function openInstanceForm(id) {
       id ? 'id nelze změnit' : 'krátký identifikátor, používá se i jako název repozitáře')
     + fieldRow('skript', `<select id="f-script">${list.map((sc) =>
         `<option value="${esc(sc.name)}"${sc.name === chosen ? ' selected' : ''}>${esc(sc.name)} (${esc(sc.type)})</option>`).join('')}</select>`)
-    + fieldRow('runner', `<input id="f-runner" value="${esc(inst ? inst.runner_id : '')}" placeholder="web-01">`,
-        'musí odpovídat CN certifikátu runneru')
+    + fieldRow('runner', runner.html, runner.hint)
     + fieldRow('rozvrh', `
         <select id="f-freq">
           ${['daily', 'weekly', 'monthly'].map((f) =>
@@ -665,10 +714,12 @@ async function renderParams(inst) {
   }
   const same = inst && inst.script === name;
   box.innerHTML = sc.params.map((p) => {
-    // A stored secret comes back masked; leaving the field untouched keeps it.
+    // A stored secret comes back masked; leaving the field untouched keeps it. A field
+    // that has nothing stored yet starts on the manifest's default, so what will be saved
+    // is on screen rather than implied — including the placeholder repository password.
     const value = same
       ? (p.secret ? (inst.secrets[p.name] || '') : (inst.params[p.name] || ''))
-      : '';
+      : (p.default || '');
     const hint = [
       p.type || 'string',
       p.required ? 'povinné' : 'nepovinné',

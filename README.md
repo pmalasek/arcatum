@@ -617,7 +617,7 @@ Instance pak určuje, co se zálohuje a jak dlouho se to drží:
 | `excludes` | restic exclude vzory, oddělené čárkou |
 | `tags` | další tagy snapshotu |
 | `keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` | retence (GFS) |
-| `restic_password` | **povinný secret** — heslo repozitáře |
+| `restic_password` | secret — heslo repozitáře; nevyplněné se uloží jako `password` |
 
 Runner repozitář při prvním použití sám inicializuje. Snapshoty dostanou tagy `arcatum`
 a `instance:<id>`.
@@ -632,6 +632,10 @@ jiné. Prázdná hodnota znamená „nenastaveno", ne „nedrž nic".
 > **Heslo repozitáře je nenahraditelné.** Restic ho neumí obnovit — bez něj jsou zálohy
 > nečitelné. V DB je šifrované (viz [Zabezpečení](#zabezpečení-mtls-a-podpis-úloh)),
 > ale kopii si ulož i mimo Arcatum.
+>
+> Výchozí `password` je jen výplň, aby šlo instanci založit bez vymýšlení hesla —
+> repozitář jím sice zašifrovaný je, ale kdokoli se dostane k `backup_dir` na serveru,
+> si ho rozšifruje. U dat, na kterých záleží, nastav vlastní.
 
 ### Obnova dat
 

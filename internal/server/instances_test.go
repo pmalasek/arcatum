@@ -46,7 +46,7 @@ func instanceAPIServer(t *testing.T) *Server {
 			Name: "files-backup", Type: proto.TypeRestic,
 			Params: []jobspec.Param{
 				{Name: "paths", Type: "string", Required: true},
-				{Name: "restic_password", Type: "string", Required: true, Secret: true},
+				{Name: "restic_password", Type: "string", Required: true, Secret: true, Default: "password"},
 			},
 		}},
 	}}
@@ -114,6 +114,76 @@ func TestCreateInstance(t *testing.T) {
 	}
 }
 
+// A declared default has to end up in the stored instance, not just satisfy validation:
+// the dispatch carries what is stored, so a value left only in the manifest would have the
+// job fail on the runner for a parameter the API accepted.
+func TestCreateInstanceAppliesDefaults(t *testing.T) {
+	srv := instanceAPIServer(t)
+
+	payload := map[string]any{
+		"id":        "files-web01",
+		"script":    "files-backup",
+		"runner_id": "web-01",
+		"params":    map[string]string{"paths": "/etc"},
+		"secrets":   map[string]string{}, // restic_password left out entirely
+		"schedule":  map[string]any{"frequency": "daily", "time": "01:30"},
+	}
+	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	stored, err := srv.store.Instance("files-web01")
+	if err != nil || stored == nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	if stored.Secrets["restic_password"] != "password" {
+		t.Errorf("restic_password = %q, want the default %q", stored.Secrets["restic_password"], "password")
+	}
+
+	// A blank field means "not supplied" too, and a default for a plain parameter works
+	// the same way as one for a secret.
+	payload["id"] = "files-web02"
+	payload["secrets"] = map[string]string{"restic_password": ""}
+	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	if stored, _ = srv.store.Instance("files-web02"); stored.Secrets["restic_password"] != "password" {
+		t.Errorf("blank restic_password = %q, want the default", stored.Secrets["restic_password"])
+	}
+
+	mysql := validInstance()
+	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", mysql); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if stored, _ = srv.store.Instance("mysql-web01"); stored.Params["port"] != "3306" {
+		t.Errorf("port = %q, want the default 3306", stored.Params["port"])
+	}
+}
+
+// A supplied value always wins over the default — otherwise a real repository password
+// could be quietly replaced by the placeholder.
+func TestCreateInstanceKeepsSuppliedValueOverDefault(t *testing.T) {
+	srv := instanceAPIServer(t)
+
+	payload := map[string]any{
+		"id":        "files-web01",
+		"script":    "files-backup",
+		"runner_id": "web-01",
+		"params":    map[string]string{"paths": "/etc"},
+		"secrets":   map[string]string{"restic_password": "a-real-one"},
+		"schedule":  map[string]any{"frequency": "daily", "time": "01:30"},
+	}
+	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	stored, err := srv.store.Instance("files-web01")
+	if err != nil || stored == nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	if stored.Secrets["restic_password"] != "a-real-one" {
+		t.Errorf("restic_password = %q, want the supplied value", stored.Secrets["restic_password"])
+	}
+}
+
 func TestCreateInstanceRejectsDuplicate(t *testing.T) {
 	srv := instanceAPIServer(t)
 	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance()); rec.Code != http.StatusCreated {
@@ -169,8 +239,16 @@ func TestCreateInstanceValidation(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("create = %d, want 400 (%s)", rec.Code, rec.Body.String())
 			}
-			if !strings.Contains(rec.Body.String(), tc.wantMsg) {
-				t.Errorf("error %q should mention %q", strings.TrimSpace(rec.Body.String()), tc.wantMsg)
+			// The reason has to arrive as {"error": ...}: that is the only shape the web
+			// UI reads, and a plain-text body leaves the operator staring at "400".
+			var body struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("error body is not JSON (%s): %v", rec.Body.String(), err)
+			}
+			if !strings.Contains(body.Error, tc.wantMsg) {
+				t.Errorf("error %q should mention %q", body.Error, tc.wantMsg)
 			}
 		})
 	}

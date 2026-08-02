@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+
+	"arcatum/pkg/jobspec"
 )
 
 // Managing instances through the API is what takes the plaintext seed file out of the
@@ -162,12 +165,12 @@ type instancePayload struct {
 func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	var p instancePayload
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
 		return
 	}
 	in, err := s.instanceFromPayload(p, nil)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := s.store.SaveInstance(in, true); err != nil {
@@ -186,22 +189,22 @@ func (s *Server) handleUpdateInstance(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	existing, err := s.store.Instance(id)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if existing == nil {
-		http.Error(w, "unknown instance", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "unknown instance")
 		return
 	}
 	var p instancePayload
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
 		return
 	}
 	p.ID = id // the path decides which instance this is
 	in, err := s.instanceFromPayload(p, existing)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := s.store.SaveInstance(in, false); err != nil {
@@ -291,6 +294,10 @@ func (s *Server) instanceFromPayload(p instancePayload, existing *Instance) (*In
 		Timeout:  p.Timeout,
 		Schedule: p.Schedule,
 	}
+	// A dispatch carries the stored params and secrets verbatim, so a declared default has
+	// to be materialised here or it would never reach the runner: validation would pass on
+	// the strength of the manifest and the job would then fail for a missing value.
+	applyDefaults(entry.Manifest, in.Params, in.Secrets)
 	// The manifest is the contract: check the values against it before storing.
 	if err := entry.Manifest.ValidateParams(in.Params, in.Secrets); err != nil {
 		return nil, err
@@ -302,17 +309,36 @@ func (s *Server) instanceFromPayload(p instancePayload, existing *Instance) (*In
 	return in, nil
 }
 
+// applyDefaults fills in the values the manifest declares a default for, leaving anything
+// the operator actually supplied alone. A blank field counts as not supplied: the form
+// sends empty strings for fields left untouched, and treating those as a deliberate empty
+// value would defeat the point of having a default.
+func applyDefaults(m *jobspec.Manifest, params, secrets map[string]string) {
+	for _, p := range m.Params {
+		if p.Default == "" {
+			continue
+		}
+		target := params
+		if p.Secret {
+			target = secrets
+		}
+		if strings.TrimSpace(target[p.Name]) == "" {
+			target[p.Name] = p.Default
+		}
+	}
+}
+
 // redactedSecret is the placeholder the API returns instead of a secret value.
 const redactedSecret = "***"
 
 func (s *Server) instanceStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrInstanceExists):
-		http.Error(w, err.Error(), http.StatusConflict)
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrInstanceNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeError(w, http.StatusNotFound, err.Error())
 	default:
 		s.log.Printf("instance store: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal error")
 	}
 }
