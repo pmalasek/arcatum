@@ -36,6 +36,9 @@ type Server struct {
 	rotation RotationOptions
 	// dist describes the published runner builds, for auto-update.
 	dist *distCache
+	// bootstrapListen is the plain-HTTP listener install.sh is served from. Empty when
+	// there is none.
+	bootstrapListen string
 	// web configures the plain-HTTP web listener's sessions (see users.go).
 	web WebOptions
 	// logins throttles failed password logins.
@@ -62,6 +65,10 @@ type Options struct {
 	// DistDir holds the published runner binaries and their VERSION file. Empty disables
 	// auto-update entirely.
 	DistDir string
+	// BootstrapListen is the address of the plain-HTTP bootstrap listener, e.g.
+	// "0.0.0.0:80". Only its port is used, to tell the web UI where install.sh lives.
+	// Empty means no bootstrap listener, and no installable runner.
+	BootstrapListen string
 	// Web configures password login on the plain-HTTP web listener (see users.go).
 	Web WebOptions
 }
@@ -99,6 +106,7 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		serverCertIssuer:   opts.ServerCertIssuer,
 		rotation:           opts.Rotation,
 		dist:               &distCache{dir: opts.DistDir},
+		bootstrapListen:    opts.BootstrapListen,
 		web:                opts.Web,
 		logins:             newLoginLimiter(),
 	}, nil
@@ -195,6 +203,7 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux, read, write guard) {
 	mux.HandleFunc("GET /api/v1/runs/{id}/output", read(s.handleRunOutput))
 	mux.HandleFunc("GET /api/v1/runs/{id}/tail", read(s.handleRunTail))
 	mux.HandleFunc("GET /api/v1/runners", read(s.handleListRunners))
+	mux.HandleFunc("GET /api/v1/install", read(s.handleInstallInfo))
 	mux.HandleFunc("POST /api/v1/runners/{id}/approve", write(s.handleApproveRunner))
 	mux.HandleFunc("POST /api/v1/runners/{id}/reject", write(s.handleRejectRunner))
 	mux.HandleFunc("POST /api/v1/runners/{id}/revoke", write(s.handleRevokeRunner))

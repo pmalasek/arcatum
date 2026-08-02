@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,6 +48,71 @@ func TestInstallScriptUsesRequestAddress(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "shellscript") {
 		t.Errorf("Content-Type = %q, want a shell script type", ct)
+	}
+}
+
+// The web UI shows the install command, so it has to be one an operator can paste: the
+// host they reached the UI on, and the port install.sh is actually served from.
+func TestInstallURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		requestHost string
+		listen      string
+		want        string
+	}{
+		{"default port is left out", "10.0.0.5:8080", "0.0.0.0:80",
+			"http://10.0.0.5/arcatum_runner/install.sh"},
+		{"non-default port is carried over", "10.0.0.5:8080", "0.0.0.0:8081",
+			"http://10.0.0.5:8081/arcatum_runner/install.sh"},
+		{"hostname without a port", "backup.xtuning.local", ":80",
+			"http://backup.xtuning.local/arcatum_runner/install.sh"},
+		{"ipv6 literal stays bracketed", "[::1]:8080", "0.0.0.0:8081",
+			"http://[::1]:8081/arcatum_runner/install.sh"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := installURL(tc.requestHost, tc.listen); got != tc.want {
+				t.Errorf("installURL(%q, %q) = %q, want %q", tc.requestHost, tc.listen, got, tc.want)
+			}
+		})
+	}
+}
+
+// Without a bootstrap listener there is no installer to point at, and the UI has to be
+// told that rather than shown a command that cannot work.
+func TestInstallInfoReportsDisabled(t *testing.T) {
+	srv, _ := enrollTestServer(t, false)
+	srv.bootstrapListen = ""
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/install", nil)
+	rec := httptest.NewRecorder()
+	srv.handleInstallInfo(rec, r)
+
+	var info InstallInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if info.Enabled || info.Command != "" {
+		t.Errorf("install info = %+v, want disabled and empty", info)
+	}
+}
+
+func TestInstallInfoBuildsCommand(t *testing.T) {
+	srv, _ := enrollTestServer(t, false)
+	srv.bootstrapListen = "0.0.0.0:80"
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/install", nil)
+	r.Host = "backup.xtuning.local:8080"
+	rec := httptest.NewRecorder()
+	srv.handleInstallInfo(rec, r)
+
+	var info InstallInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := "curl -LsSf http://backup.xtuning.local/arcatum_runner/install.sh | sudo sh"
+	if !info.Enabled || info.Command != want {
+		t.Errorf("command = %q, want %q", info.Command, want)
 	}
 }
 

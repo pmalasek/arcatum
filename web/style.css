@@ -337,3 +337,32 @@ select {
   border-radius: 5px;
   user-select: all;
 }
+
+/* Návod na instalaci runneru: rozbalovací, aby nepřekážel tomu, kdo jen kouká na stav. */
+.guide {
+  border-top: 1px solid var(--border);
+  font-size: .85rem;
+}
+.guide > summary {
+  padding: .5rem .8rem;
+  color: var(--accent);
+  cursor: pointer;
+  user-select: none;
+}
+.guide-body { padding: 0 .8rem .8rem; }
+.guide-body ol { margin: 0; padding-left: 1.2rem; }
+.guide-body li { margin-bottom: .6rem; }
+.guide-body .hint { color: var(--muted); font-size: .78rem; margin-top: .2rem; }
+/* Příkaz se kopíruje do terminálu, takže jedno kliknutí musí označit celý. */
+.cmd {
+  font-family: var(--mono);
+  font-size: .85em;
+  margin: .3rem 0;
+  padding: .4rem .6rem;
+  background: var(--log-bg);
+  color: var(--log-text);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre;
+  user-select: all;
+}

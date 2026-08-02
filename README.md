@@ -891,6 +891,7 @@ se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém
 | `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | čtení | zachycený výstup běhu |
 | `GET /api/v1/runs/{id}/tail?offset=N&stream=` | čtení | přírůstek výstupu — základ živého tailu |
 | `GET /api/v1/runners` | čtení | evidované runnery (stav, platforma, `last_seen`) |
+| `GET /api/v1/install` | čtení | příkaz, kterým se instaluje nový runner (adresa se skládá z hostu dotazu a bootstrap portu) |
 | `GET /api/v1/whoami` | čtení | kdo jsi, jak jsi se přihlásil, expirace certifikátů |
 | `GET /api/v1/rotation` | čtení | stav rotace všech tří klíčů |
 | `POST /api/v1/secrets/rekey` | admin | přešifruje secrets aktuálním master klíčem |
@@ -977,6 +978,9 @@ Na zálohovaném serveru stačí jeden příkaz:
 ```sh
 curl -LsSf http://172.24.0.60/arcatum_runner/install.sh | sudo sh
 ```
+
+> Přesné znění včetně adresy tohohle serveru najdeš i ve web UI: záložka **Runnery** →
+> **Přidat runner**. Je to tatáž stránka, na které runner pak schvaluješ.
 
 Skript stáhne binárku pro danou platformu, `ca.pem` a podepisovací veřejný klíč, vypíše
 `runner.toml`, nainstaluje systemd službu a spustí ji. **Adresu serveru si odvodí z URL,

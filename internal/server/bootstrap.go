@@ -3,6 +3,7 @@ package server
 import (
 	"embed"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -95,6 +96,55 @@ func (s *Server) serveInstallScript(w http.ResponseWriter, r *http.Request, cfg 
 	if err := installTemplate.Execute(w, data); err != nil {
 		s.log.Printf("install.sh: %v", err)
 	}
+}
+
+// InstallInfo tells the web UI how a runner is installed against this server, so the
+// command can be read off the Runners tab instead of the documentation.
+type InstallInfo struct {
+	// Enabled is false when no bootstrap listener is configured, in which case there is
+	// no installer to point at.
+	Enabled bool   `json:"enabled"`
+	URL     string `json:"url,omitempty"`
+	Command string `json:"command,omitempty"`
+}
+
+// handleInstallInfo builds the one-liner that installs a runner.
+//
+// The host is taken from the request rather than from the configuration on purpose: the
+// operator reached the web UI at an address that works from where they are, and the
+// bootstrap listener is the same host on a different port. A configured "0.0.0.0:80"
+// pasted into a shell would not resolve anywhere.
+func (s *Server) handleInstallInfo(w http.ResponseWriter, r *http.Request) {
+	if s.bootstrapListen == "" {
+		writeJSON(w, InstallInfo{})
+		return
+	}
+	url := installURL(r.Host, s.bootstrapListen)
+	writeJSON(w, InstallInfo{
+		Enabled: true,
+		URL:     url,
+		Command: "curl -LsSf " + url + " | sudo sh",
+	})
+}
+
+// installURL points at install.sh on the bootstrap listener: the host the browser is
+// talking to, on the bootstrap port. Plain HTTP, because that listener is plain HTTP by
+// design — a host with no certificate yet cannot do anything else.
+func installURL(requestHost, bootstrapListen string) string {
+	host := requestHost
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "" {
+		host = "localhost"
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]" // IPv6 literal
+	}
+	if _, port, err := net.SplitHostPort(bootstrapListen); err == nil && port != "" && port != "80" {
+		host += ":" + port
+	}
+	return "http://" + host + "/arcatum_runner/install.sh"
 }
 
 // bootstrapURL reconstructs the URL the client used, which is how install.sh learns the

@@ -189,7 +189,47 @@ function fmtExpiry(iso) {
   return `<span class="expiry ${cls}">${esc(date)}<span class="days"> (${days} d)</span></span>`;
 }
 
+// Instalace runneru je ta jedna věc, kvůli které se jinak leze do dokumentace: příkaz
+// obsahuje adresu serveru a tu zná server líp než člověk, co ji opisuje. Návod tedy patří
+// na stránku, kde se runner stejně schvaluje.
+let installInfo = null;
+
+async function renderInstallGuide() {
+  if (installInfo) return; // tabulka se obnovuje každých 5 s, tohle je statické
+  const box = el('install-body');
+  try {
+    installInfo = await api('/install');
+  } catch (err) {
+    box.innerHTML = `<p class="empty">${esc(err.message)}</p>`;
+    return;
+  }
+  if (!installInfo.enabled) {
+    box.innerHTML = '<p class="empty">Bootstrap listener neběží — v <span class="mono">server.toml</span> '
+      + 'chybí <span class="mono">[bootstrap] listen</span>. Nový stroj si bez něj nemá odkud '
+      + 'stáhnout instalátor: na mTLS port se bez certifikátu nedostane.</p>';
+    return;
+  }
+  box.innerHTML = `
+    <ol>
+      <li>Na cílovém stroji spusť jako root:
+        <div class="cmd">${esc(installInfo.command)}</div>
+        <div class="hint">Stáhne binárku, vygeneruje na místě privátní klíč, nainstaluje
+          systemd službu <span class="mono">arcatum-runner</span> a odešle žádost o certifikát.
+          Klíč stroj neopustí, posílá se jen žádost.</div>
+      </li>
+      <li>Runner se objeví v tabulce nahoře jako ${badge('pending')}. Jeho id je
+        <span class="mono">hostname -s</span> toho stroje.</li>
+      <li>Než ho schválíš, ověř, že sedí: otisk certifikátu ukáže najetí myší na id, IP adresa
+        žádosti je ve sloupci vedle stavu. Obojí porovnej se strojem, který jsi právě
+        instaloval — schválením mu vydáváš certifikát.</li>
+      <li>Pak mu v záložce <b>Instance</b> přiřaď, co má zálohovat.</li>
+    </ol>
+    <p class="hint">Do té doby služba jen opakuje pokusy, což je v pořádku. Průběh na stroji:
+      <span class="mono">journalctl -u arcatum-runner -f</span></p>`;
+}
+
 async function loadRunners() {
+  renderInstallGuide(); // bez await: tabulka na návod nečeká
   const list = await api('/runners');
   const body = el('runners-body');
   if (!list || list.length === 0) {

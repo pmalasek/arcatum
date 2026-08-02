@@ -215,6 +215,9 @@ func main() {
 		// The same directory the bootstrap listener installs from is what auto-update
 		// publishes; a VERSION file next to the binaries is what makes them an update.
 		DistDir: cfg.Bootstrap.DistDir,
+		// Lets the web UI show the install command for a new runner, pointed at the port
+		// install.sh is actually served from.
+		BootstrapListen: cfg.Bootstrap.Listen,
 		Web: server.WebOptions{
 			SessionTTL:   sessionTTL,
 			SecureCookie: cfg.Web.SecureCookie,
