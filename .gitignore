@@ -20,3 +20,7 @@
 
 # Editor / OS
 .DS_Store
+
+# Local server config (the tracked example is config/server.example.toml)
+/config/server.toml
+/server.toml

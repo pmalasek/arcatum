@@ -136,7 +136,8 @@ func setPassword(store *server.Store, logger *log.Logger, username, role string)
 }
 
 func main() {
-	configPath := flag.String("config", "config/server.toml", "path to server config")
+	configPath := flag.String("config", "",
+		"path to server config; without it ./server.toml is used, then /etc/arcatum/server.toml")
 	instancesPath := flag.String("instances", "data/instances.json", "instances JSON to seed from on start")
 	importForce := flag.Bool("import-force", false,
 		"let the seed file overwrite instances that already exist (they are normally left alone, "+
@@ -150,7 +151,18 @@ func main() {
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 
-	cfg, err := config.Load(*configPath)
+	// Say which file this is before anything can fail on its contents: a start that dies
+	// on a certificate path is usually a start that read the wrong configuration.
+	resolvedConfig, err := config.Resolve(*configPath)
+	if err != nil {
+		logger.Fatalf("%v", err)
+	}
+	if abs, absErr := filepath.Abs(resolvedConfig); absErr == nil {
+		resolvedConfig = abs
+	}
+	logger.Printf("configuration from %s", resolvedConfig)
+
+	cfg, err := config.Load(resolvedConfig)
 	if err != nil {
 		logger.Fatalf("loading config: %v", err)
 	}

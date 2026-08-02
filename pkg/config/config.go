@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -152,8 +154,54 @@ func (t TLS) Validate() error {
 	return nil
 }
 
-// Default returns the built-in configuration used when server.toml is absent or
-// omits fields.
+// Filename is what a server configuration file is called when it is looked up
+// instead of being named explicitly.
+const Filename = "server.toml"
+
+// SystemDir is where a production install keeps its configuration.
+const SystemDir = "/etc/arcatum"
+
+// systemDir is SystemDir, indirected so tests can point the fallback at a temporary
+// directory instead of whatever the machine running them happens to have in /etc.
+var systemDir = SystemDir
+
+// SearchPaths lists, in order, where Resolve looks when no path is given: the working
+// directory first, so a checkout can be run against a file of its own, then the system
+// location. Anything started from a directory without a server.toml — the service, a
+// binary run by hand for debugging — therefore lands on the same production
+// configuration, and with it on the same PKI.
+//
+// Only a bare server.toml counts, not config/server.toml: the repository has one of
+// those, and picking it up would mean a debug run silently switching to development
+// certificates, which is what this search path exists to prevent.
+func SearchPaths() []string {
+	return []string{Filename, filepath.Join(systemDir, Filename)}
+}
+
+// Resolve picks the configuration file to load. An explicit path (-config) wins and
+// must exist; otherwise the first existing entry of SearchPaths is used.
+//
+// Finding nothing is an error rather than a fallback to Default: a server without a
+// configuration would come up on plain HTTP with unencrypted secrets, so a mistyped
+// path or a wrong working directory has to stop the start, not quietly downgrade it.
+func Resolve(explicit string) (string, error) {
+	if explicit != "" {
+		if _, err := os.Stat(explicit); err != nil {
+			return "", fmt.Errorf("config %s: %w", explicit, err)
+		}
+		return explicit, nil
+	}
+	paths := SearchPaths()
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("config: no configuration found (looked for %s) — "+
+		"install one in %s or pass -config", strings.Join(paths, ", "), systemDir)
+}
+
+// Default returns the built-in configuration for fields a server.toml omits.
 func Default() *Config {
 	return &Config{
 		Server: Server{
@@ -172,12 +220,12 @@ func Default() *Config {
 	}
 }
 
-// Load reads config from path, applying defaults for any missing fields. A missing
-// file is not an error: the defaults are returned.
+// Load reads config from path, applying defaults for any missing fields. The file has
+// to be there — see Resolve for why a missing one is not treated as "no configuration".
 func Load(path string) (*Config, error) {
 	cfg := Default()
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return cfg, nil
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	// DecodeFile overwrites only the keys present in the file, so defaults survive.
 	if _, err := toml.DecodeFile(path, cfg); err != nil {

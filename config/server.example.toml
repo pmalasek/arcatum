@@ -1,9 +1,20 @@
-# arcatum-server configuration. Copy to server.toml and adjust.
-# Missing fields fall back to built-in defaults (see pkg/config.Default).
+# arcatum-server configuration. Copy to /etc/arcatum/server.toml and adjust.
+# Missing fields fall back to built-in defaults (see pkg/config.Default), but the file
+# itself is mandatory: without one the server refuses to start rather than come up on
+# plain HTTP with unencrypted secrets.
+#
+# Where it is looked for, in order: ./server.toml, then /etc/arcatum/server.toml.
+# (-config overrides both.) A binary started from a directory without a server.toml of
+# its own therefore uses the installed configuration — debugging a production build on
+# the server works with production PKI, not with something half-configured.
+#
+# The install lives in /opt/arcatum: binaries, PKI, script definitions, runner builds.
+# /central_backup/arcatum holds nothing but what the server itself writes — private keys
+# have no business sitting on the same volume as the repositories they unlock.
 
 [server]
-listen    = "0.0.0.0:8443"                 # API / web listen address
-scripts   = "scripts"                       # dir with script definitions
+listen    = "0.0.0.0:8443"                  # API / web listen address
+scripts   = "/opt/arcatum/scripts"          # dir with script definitions
 data_dir  = "/central_backup/arcatum/data"  # DB and runtime state
 timezone  = "Europe/Prague"                 # default TZ for schedules without one
 log_level = "info"                          # debug | info | warn | error
@@ -32,27 +43,27 @@ backup_dir = "/central_backup/arcatum"      # where backup data is stored
 # All three paths must be set together. Without them the server speaks plain HTTP and
 # does NOT authenticate callers — development only.
 [tls]
-# ca_cert = "/central_backup/arcatum/pki/ca.pem"
-# cert    = "/central_backup/arcatum/pki/server.pem"
-# key     = "/central_backup/arcatum/pki/server.key"
+# ca_cert = "/opt/arcatum/pki/ca.pem"
+# cert    = "/opt/arcatum/pki/server.pem"
+# key     = "/opt/arcatum/pki/server.key"
 
 # Key used to sign job dispatches; runners verify it with the matching .pub file.
 # Required whenever [tls] is set.
 [signing]
-# key = "/central_backup/arcatum/pki/dispatch-signing.key"
+# key = "/opt/arcatum/pki/dispatch-signing.key"
 # During a rotation, list the *private* key being replaced here: the server co-signs the
 # published key set with every key it holds, which is what lets a runner still on the old
 # key accept the set that introduces the new one.
-# previous_keys = ["/central_backup/arcatum/pki/dispatch-signing-old.key"]
+# previous_keys = ["/opt/arcatum/pki/dispatch-signing-old.key"]
 
 # Encrypts instance secrets in the database. Required whenever [tls] is set — without
 # it credentials sit in arcatum.db in plaintext. Back this key up: losing it makes
 # every stored secret unreadable.
 [secrets]
-# master_key = "/central_backup/arcatum/pki/secrets-master.key"
+# master_key = "/opt/arcatum/pki/secrets-master.key"
 # During a rotation, keep the previous key here until everything has been re-encrypted
 # (web UI → "Klíče" → přešifrovat, or POST /api/v1/secrets/rekey).
-# previous_keys = ["/central_backup/arcatum/pki/secrets-master-old.key"]
+# previous_keys = ["/opt/arcatum/pki/secrets-master-old.key"]
 
 # Plain-HTTP listener for installing and enrolling runners. A host with no certificate
 # yet cannot reach the mTLS port at all, so "curl … | sh" talks to this one. It serves
@@ -60,10 +71,10 @@ backup_dir = "/central_backup/arcatum"      # where backup data is stored
 # enrollment endpoints — none of which is secret. Leave listen empty to disable.
 [bootstrap]
 # listen   = "0.0.0.0:80"
-# dist_dir = "/central_backup/arcatum/dist"          # arcatum-runner-linux-amd64, …
-# api_url  = "https://172.24.0.60:8443"              # written into the generated runner.toml
-# ca_key   = "/central_backup/arcatum/pki/ca.key"    # signs approved enrollment requests
+# dist_dir = "/opt/arcatum/dist"           # arcatum-runner-linux-amd64, …
+# api_url  = "https://172.24.0.60:8443"    # written into the generated runner.toml
+# ca_key   = "/opt/arcatum/pki/ca.key"     # signs approved enrollment requests
 # During a CA rotation this is the *incoming* authority, while [tls] ca_cert is a bundle of
 # every authority still trusted. Keep the server's own certificate under the outgoing
 # authority until every runner has adopted the bundle (see README: Rotace klíčů).
-# ca_cert  = "/central_backup/arcatum/pki/ca.pem"
+# ca_cert  = "/opt/arcatum/pki/ca.pem"

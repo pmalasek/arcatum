@@ -40,6 +40,18 @@ dist-runner dist_dir="local/dist":
 	GOOS=linux GOARCH=arm64 {{go}} build -ldflags "-X arcatum/pkg/version.Version={{version}}" -o "{{dist_dir}}/arcatum-runner-linux-arm64" ./cmd/runner
 	printf '%s\n' "{{version}}" > "{{dist_dir}}/VERSION"
 
+# Build everything a production server needs into one tarball: binaries, runner builds,
+# script definitions and deploy/install-server.sh. Copy it over, unpack, run the installer.
+bundle:
+	just release
+	just dist-runner bin
+	rm -rf local/bundle && mkdir -p "local/bundle/arcatum-{{version}}/config"
+	cp -a bin scripts deploy "local/bundle/arcatum-{{version}}/"
+	cp config/server.example.toml "local/bundle/arcatum-{{version}}/config/"
+	rm -f "local/bundle/arcatum-{{version}}/bin/arcatum-runner"
+	tar czf "bin/arcatum-{{version}}.tar.gz" -C local/bundle "arcatum-{{version}}"
+	printf 'bundle: bin/arcatum-%s.tar.gz\n' "{{version}}"
+
 # Run all tests.
 test:
 	{{go}} test ./...
@@ -63,14 +75,15 @@ check:
 	{{go}} test ./...
 	{{go}} build ./...
 
-# Remove build outputs (bin/ and the local dist dir). Leaves local/data and local/backup alone.
+# Remove build outputs (bin/, the local dist dir and the bundle staging area).
+# Leaves local/data and local/backup alone.
 clean:
-	rm -rf bin local/dist
+	rm -rf bin local/dist local/bundle
 
 # Initialize local development files if missing.
 dev-init:
 	mkdir -p local/data local/backup
-	if [[ ! -f local/server.toml ]]; then cp config/server.example.toml local/server.toml; sed -i '0,/^listen/s|^listen[[:space:]]*=.*|listen   = "{{listen}}"|' local/server.toml; sed -i 's|^listen[[:space:]]*=[[:space:]]*"0.0.0.0:8080"|listen      = "{{web_listen}}"|' local/server.toml; sed -i 's|^data_dir[[:space:]]*=.*|data_dir = "./local/data"|' local/server.toml; sed -i 's|^backup_dir[[:space:]]*=.*|backup_dir = "./local/backup"|' local/server.toml; fi
+	if [[ ! -f local/server.toml ]]; then cp config/server.example.toml local/server.toml; sed -i '0,/^listen/s|^listen[[:space:]]*=.*|listen   = "{{listen}}"|' local/server.toml; sed -i 's|^listen[[:space:]]*=[[:space:]]*"0.0.0.0:8080"|listen      = "{{web_listen}}"|' local/server.toml; sed -i 's|^scripts[[:space:]]*=.*|scripts  = "scripts"|' local/server.toml; sed -i 's|^data_dir[[:space:]]*=.*|data_dir = "./local/data"|' local/server.toml; sed -i 's|^backup_dir[[:space:]]*=.*|backup_dir = "./local/backup"|' local/server.toml; fi
 	if [[ ! -f local/instances.json ]]; then cp data/instances.example.json local/instances.json; sed -i "s|REPLACE-WITH-RUNNER-HOSTNAME|$(hostname -s)|g" local/instances.json; fi
 
 # Run server in local dev mode.

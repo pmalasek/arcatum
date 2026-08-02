@@ -169,7 +169,7 @@ Užitečné přepínače:
 
 | Přepínač | Komponenta | K čemu |
 |---|---|---|
-| `-config` | server, runner | cesta ke konfiguraci |
+| `-config` | server, runner | cesta ke konfiguraci; u serveru nepovinná — bez ní se bere `./server.toml`, pak `/etc/arcatum/server.toml` |
 | `-instances` | server | seed soubor; `/dev/null` když nechceš seedovat |
 | `-import-force` | server | přepíše i existující instance ze seedu |
 | `-server` | runner | přebije `runner.server` z configu — hodí se pro rychlý test |

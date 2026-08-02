@@ -133,17 +133,23 @@ export PATH=/usr/local/go/bin:$PATH
 **1) Připravit config a instanci**
 
 ```sh
-cp config/server.example.toml config/server.toml
+cp config/server.example.toml server.toml
 cp data/instances.example.json data/instances.json
 # v instances.json nastav "runner_id" na hostname stroje, kde poběží runner:
 hostname
 ```
 
-Pro lokální test uprav v `config/server.toml` cesty, ať se nesahá do `/central_backup`:
+Config patří do kořene checkoutu: server hledá `./server.toml` a až pak
+`/etc/arcatum/server.toml`, takže spuštění z repozitáře vezme tenhle. Do gitu nepatří
+(je v `.gitignore`) — verzovaný je jen `config/server.example.toml`.
+
+Pro lokální test uprav v `server.toml` cesty, ať se nesahá do `/opt/arcatum`
+a `/central_backup`:
 
 ```toml
 [server]
 listen   = "127.0.0.1:8443"
+scripts  = "scripts"
 data_dir = "./local/data"
 
 [web]
@@ -156,7 +162,7 @@ backup_dir = "./local/backup"
 **2) Spustit server**
 
 ```sh
-go run ./cmd/server -config config/server.toml -instances data/instances.json
+go run ./cmd/server -instances data/instances.json
 ```
 
 V logu se při prvním startu objeví vygenerované heslo účtu `admin` — s ním se přihlásíš do
@@ -196,12 +202,16 @@ Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
 
 ## Konfigurace
 
-### Server — `config/server.toml`
+### Server — `server.toml`
+
+Hledá se `./server.toml`, pak `/etc/arcatum/server.toml`; `-config` obojí přebije. Na
+produkci tedy leží v `/etc/arcatum`, ve vývoji v kořeni checkoutu — a binárka spuštěná
+mimo checkout sáhne po produkční konfiguraci, tedy i po produkční PKI.
 
 ```toml
 [server]
-listen    = "0.0.0.0:8443"                 # API pro runnery (mTLS)
-scripts   = "scripts"                       # adresář s definicemi skriptů
+listen    = "0.0.0.0:8443"                  # API pro runnery (mTLS)
+scripts   = "/opt/arcatum/scripts"          # adresář s definicemi skriptů
 data_dir  = "/central_backup/arcatum/data"  # zde vzniká arcatum.db
 timezone  = "Europe/Prague"                 # default TZ pro rozvrhy bez vlastní
 log_level = "info"
@@ -218,7 +228,9 @@ backup_dir = "/central_backup/arcatum"      # kam se ukládají zálohovaná dat
 # ca_cert / cert / key — mTLS, zapojíme později
 ```
 
-Chybějící pole padají na defaulty (`pkg/config.Default`), chybějící soubor taky.
+Chybějící pole padají na defaulty (`pkg/config.Default`). Chybějící **soubor** ale ne:
+server bez konfigurace skončí chybou, protože vestavěné defaulty znamenají plain HTTP
+a hesla instancí v plaintextu — to není stav, do kterého se má spadnout překlepem v cestě.
 
 **Dva porty, dva druhy volajících.** `[server] listen` je pro runnery a ověřuje je
 certifikátem; `[web] listen` je pro lidi a ověřuje je heslem. Prázdné `[web] listen` web
@@ -300,11 +312,11 @@ Další účty se přidávají z webu (záložka **Uživatelé**). Když se hesl
 poslednímu adminovi, cesta zpět je ze shellu na serveru:
 
 ```sh
-arcatum-server -config /etc/arcatum/server.toml -passwd petr
+arcatum-server -passwd petr
 #   → vypíše nové vygenerované heslo; účet vytvoří, pokud neexistuje
-ARCATUM_PASSWORD='vlastní heslo' arcatum-server -config … -passwd petr
+ARCATUM_PASSWORD='vlastní heslo' arcatum-server -passwd petr
 #   → nastaví konkrétní heslo (proměnná prostředí, ať nekončí v historii shellu)
-arcatum-server -config … -passwd kolega -passwd-role viewer
+arcatum-server -passwd kolega -passwd-role viewer
 ```
 
 Co web hlídá sám:
@@ -400,15 +412,15 @@ místo toho skončí chybou.
 ```toml
 # server.toml
 [tls]
-ca_cert = "/central_backup/arcatum/pki/ca.pem"
-cert    = "/central_backup/arcatum/pki/server.pem"
-key     = "/central_backup/arcatum/pki/server.key"
+ca_cert = "/opt/arcatum/pki/ca.pem"
+cert    = "/opt/arcatum/pki/server.pem"
+key     = "/opt/arcatum/pki/server.key"
 
 [signing]
-key = "/central_backup/arcatum/pki/dispatch-signing.key"
+key = "/opt/arcatum/pki/dispatch-signing.key"
 
 [secrets]
-master_key = "/central_backup/arcatum/pki/secrets-master.key"
+master_key = "/opt/arcatum/pki/secrets-master.key"
 ```
 
 ```toml
@@ -1001,16 +1013,16 @@ při handshaku.
 # server.toml
 [bootstrap]
 listen   = "0.0.0.0:80"
-dist_dir = "/central_backup/arcatum/dist"       # arcatum-runner-linux-amd64, …
+dist_dir = "/opt/arcatum/dist"       # arcatum-runner-linux-amd64, …
 api_url  = "https://172.24.0.60:8443"           # kam se runner bude hlásit
-ca_key   = "/central_backup/arcatum/pki/ca.key" # podepisuje schválené žádosti
+ca_key   = "/opt/arcatum/pki/ca.key" # podepisuje schválené žádosti
 ```
 
 Binárky pro publikování se sestaví takto:
 
 ```sh
-GOOS=linux GOARCH=amd64 go build -o /central_backup/arcatum/dist/arcatum-runner-linux-amd64 ./cmd/runner
-GOOS=linux GOARCH=arm64 go build -o /central_backup/arcatum/dist/arcatum-runner-linux-arm64 ./cmd/runner
+GOOS=linux GOARCH=amd64 go build -o /opt/arcatum/dist/arcatum-runner-linux-amd64 ./cmd/runner
+GOOS=linux GOARCH=arm64 go build -o /opt/arcatum/dist/arcatum-runner-linux-arm64 ./cmd/runner
 ```
 
 Bootstrap port vydává **jen** `install.sh`, binárky, `ca.pem`, podepisovací veřejný klíč
@@ -1041,16 +1053,16 @@ vedle nich verzi:
 V=2026.07.26
 for A in amd64 arm64; do
   GOOS=linux GOARCH=$A go build -ldflags "-X arcatum/pkg/version.Version=$V" \
-    -o /central_backup/arcatum/dist/arcatum-runner-linux-$A ./cmd/runner
+    -o /opt/arcatum/dist/arcatum-runner-linux-$A ./cmd/runner
 done
-echo "$V" > /central_backup/arcatum/dist/VERSION
+echo "$V" > /opt/arcatum/dist/VERSION
 ```
 
 Se [`just`](#zkratky-přes-just) totéž jedním příkazem — postaví obě architektury i soubor
 `VERSION`:
 
 ```sh
-V=2026.07.26 just dist-runner /central_backup/arcatum/dist
+V=2026.07.26 just dist-runner /opt/arcatum/dist
 ```
 
 Runner při dalším checkinu zjistí, že běží na starší verzi, novou stáhne, nahradí sám
@@ -1128,6 +1140,7 @@ just                   # vypíše všechny recepty i s popisem
 | `just build-all` | binárky serveru, runneru a `arcatum-ca` do `./bin` |
 | `just release` | totéž, ale s verzí vypálenou přes `-ldflags` |
 | `just dist-runner [dir]` | runner pro `linux/amd64` i `arm64` + soubor `VERSION` (default `local/dist`) |
+| `just bundle` | balík pro produkci: binárky, runnery, `scripts/` a instalátor v jednom `bin/arcatum-<verze>.tar.gz` |
 | `just test` / `just test-race` / `just vet` | testy, testy s race detektorem, `go vet` |
 | `just fmt` | `gofmt -w` nad celým stromem |
 | `just check` | gofmt + vet + test + build — co má projít před odesláním změny |
@@ -1172,7 +1185,7 @@ ARCATUM_PASSWORD=tajneheslo just passwd petr # konkrétní heslo místo vygenero
 > [zabezpečení](#zabezpečení-mtls-a-podpis-úloh).
 
 Recepty, které berou argument, ho přijímají pozičně: `just trigger mysql-web01`,
-`just run-output 42`, `just dist-runner /central_backup/arcatum/dist`.
+`just run-output 42`, `just dist-runner /opt/arcatum/dist`.
 
 Podrobněji — lokální prostředí, tok dat jedním během, kam přidat endpoint / sloupec /
 typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-development.md).
