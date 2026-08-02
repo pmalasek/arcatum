@@ -50,7 +50,14 @@ cd /root && arcatum-server -instances /dev/null
 ```
 
 `-H` musí obsahovat **každou** adresu, na kterou se runnery připojují (IP i DNS) — jde do
-certifikátu serveru a do `api_url`. `-a petr` je tvůj admin certifikát pro API.
+certifikátu serveru a do `api_url`. Je to jediný údaj, který o téhle instalaci musíš vědět;
+klíče a certifikáty si instalátor vyrobí sám a cesty k nim vypíše na konci.
+
+`-a petr` je jen **jméno v klientském certifikátu pro volání API ze shellu** — soubory pak
+budou `pki/admin-petr.pem` a `.key`. Nikde ho nesháníš, vydá ho instalátor a cestu k němu
+vypíše na konci. Do prohlížeče ho nepotřebuješ: web má jméno a heslo. Hodí se, až budeš
+volat `curl`em na port 8443 ([krok 7](#7-první-start-a-ověření)) — tam mTLS platí i pro
+lidi. Bez `-a` vznikne `admin-admin.*` a nic dalšího se nemění.
 
 Co instalátor udělá: založí `/opt/arcatum/{bin,pki,dist,scripts}`, `/etc/arcatum`
 a `/central_backup/arcatum`; nainstaluje `arcatum-server` a `arcatum-ca` do
@@ -330,7 +337,10 @@ chybí. `arcatum-ca server` a `admin` naopak certifikát vydají znovu — přes
 dělá obnova po expiraci.
 
 Runnerům certifikáty **předem negeneruj** — vydají se samy při enrollmentu (krok 9).
-`-a petr` je tvůj admin certifikát pro web a API.
+`-a petr` vydá klientský certifikát `admin-petr.pem`/`.key`, kterým se ze shellu voláš na
+API (port 8443). Do prohlížeče nepatří — tam se chodí přes jméno a heslo
+([krok 11](#11-přístup-z-prohlížeče)). Platí rok a obnovuje se `arcatum-ca admin` se
+stejným `-name`.
 
 Práva a záloha:
 

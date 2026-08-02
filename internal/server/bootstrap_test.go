@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -56,7 +57,7 @@ func TestInstallScriptContents(t *testing.T) {
 		"/arcatum_runner/install.sh", "arcatum").Body.String()
 
 	for _, want := range []string{
-		"set -euo pipefail",        // fail loudly rather than half-install
+		"set -eu",                  // fail loudly rather than half-install
 		"arcatum-runner-$OS-$ARCH", // platform-specific binary
 		"ca.pem",                   // trust material
 		"dispatch-signing.pub",     // job signature verification
@@ -68,6 +69,39 @@ func TestInstallScriptContents(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("install.sh is missing %q", want)
 		}
+	}
+}
+
+// The documented install is "curl … | sudo sh", and /bin/sh on Debian and Ubuntu is dash.
+// A bashism therefore kills the install on the first line, on precisely the hosts this is
+// aimed at — and the message ("Illegal option -o pipefail") points at the shell rather
+// than at the script, so it is easy to misread as a broken server.
+func TestInstallScriptIsPOSIXShell(t *testing.T) {
+	srv, _ := enrollTestServer(t, false)
+	body := bootstrapGet(t, srv, BootstrapConfig{APIURL: "https://arcatum:8443"},
+		"/arcatum_runner/install.sh", "arcatum").Body.String()
+
+	// Comments are dropped first: they are free to name the very constructs being banned,
+	// which is what the header of the template does.
+	var code strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		code.WriteString(line)
+		code.WriteByte('\n')
+	}
+	// Syntax alone would not catch it: "set -o pipefail" parses everywhere and only fails
+	// when it runs, so the constructs are named outright.
+	for _, bashism := range []string{"pipefail", "[[", "declare ", "function ", "${!", "=("} {
+		if strings.Contains(code.String(), bashism) {
+			t.Errorf("install.sh uses %q, which dash does not support", bashism)
+		}
+	}
+	cmd := exec.Command("/bin/sh", "-n")
+	cmd.Stdin = strings.NewReader(body)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("/bin/sh -n rejected install.sh: %v\n%s", err, out)
 	}
 }
 

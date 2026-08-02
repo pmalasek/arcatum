@@ -4,11 +4,14 @@
 # place is left alone, so the first install and every later update are the same command.
 #
 # Usage:
-#   sudo deploy/install-server.sh -H 172.24.0.60[,arcatum.example.local] [-a petr]
+#   sudo deploy/install-server.sh -H 172.24.0.60[,arcatum.example.local]
 #
 #   -H  hosts runners connect to (comma-separated DNS names and/or IPs). Needed the
 #       first time, for the server certificate and for api_url in server.toml.
-#   -a  admin certificate name (default: admin)
+#   -a  your name in the client certificate this issues for calling the API from a
+#       shell (default: admin). Nothing to obtain — it is generated here, and the path
+#       is printed at the end. The web UI does not use it: people log in there with a
+#       username and a password.
 #   -b  backup_dir — where backup data lands (default: /central_backup/arcatum)
 #   -p  install prefix (default: /opt/arcatum)
 #   -n  dry run: print what would happen, change nothing
@@ -23,6 +26,10 @@
 # Not touched once they exist: server.toml, the PKI, the systemd unit. Config and unit
 # are yours to edit afterwards; re-running never reverts those edits.
 set -euo pipefail
+
+# The comment block above is the help text: printed for -h, and for every usage error, so
+# a bare run never leaves you guessing at the flags.
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 
 PREFIX="/opt/arcatum"
 BACKUP_DIR="/central_backup/arcatum"
@@ -46,11 +53,18 @@ while getopts ":H:a:b:p:nh" opt; do
     b) BACKUP_DIR="$OPTARG" ;;
     p) PREFIX="$OPTARG" ;;
     n) DRY=1 ;;
-    h) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    :) echo "error: -$OPTARG needs a value" >&2; exit 2 ;;
-    \?) echo "error: unknown option -$OPTARG" >&2; exit 2 ;;
+    h) usage; exit 0 ;;
+    :) echo "error: -$OPTARG needs a value" >&2; echo >&2; usage >&2; exit 2 ;;
+    \?) echo "error: unknown option -$OPTARG" >&2; echo >&2; usage >&2; exit 2 ;;
   esac
 done
+shift $((OPTIND - 1))
+if [ $# -gt 0 ]; then
+  echo "error: unexpected argument: $1 (everything is a flag here)" >&2
+  echo >&2
+  usage >&2
+  exit 2
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="$CONFIG_DIR/server.toml"
@@ -68,6 +82,7 @@ run() {
 }
 
 fail() { echo "error: $*" >&2; exit 1; }
+fail_usage() { echo "error: $*" >&2; echo >&2; usage >&2; exit 2; }
 
 # --- what we install from -------------------------------------------------------------
 
@@ -88,7 +103,8 @@ command -v restic >/dev/null 2>&1 || NOTES+=("restic is not installed — restor
 # A first install needs -H: the server certificate has to list every address runners
 # use, and api_url is written into every generated runner.toml.
 if [ ! -f "$PKI/ca.pem" ] || [ ! -f "$CONFIG" ]; then
-  [ -n "$HOSTS" ] || fail "-H is required on a first install (e.g. -H 172.24.0.60)"
+  [ -n "$HOSTS" ] || fail_usage "-H is required on a first install (e.g. -H 172.24.0.60);" \
+    "$PKI/ca.pem or $CONFIG does not exist yet"
 fi
 PRIMARY_HOST="${HOSTS%%,*}"
 
@@ -269,6 +285,28 @@ fi
 
 echo
 echo "Done."
+
+# Where the client certificate ended up. It is generated here and used nowhere else, so
+# without this line the only way to find it is to know it exists.
+if [ "$DRY" -eq 0 ] && [ -f "$PKI/admin-$ADMIN_NAME.pem" ]; then
+  # On an update there is no -H to take the address from; the configuration knows it.
+  api_host="$PRIMARY_HOST"
+  if [ -z "$api_host" ] && [ -f "$CONFIG" ]; then
+    api_host="$(sed -n 's|^api_url[[:space:]]*=[[:space:]]*"https\{0,1\}://\([^:"]*\).*|\1|p' "$CONFIG" | head -1)"
+  fi
+  api_host="${api_host:-<server>}"
+  cat <<EOF
+
+Your client certificate for calling the API from a shell (the web UI does not need it —
+that one logs in with a username and a password):
+
+  curl --cacert $PKI/ca.pem \\
+       --cert $PKI/admin-$ADMIN_NAME.pem \\
+       --key $PKI/admin-$ADMIN_NAME.key \\
+       https://$api_host:8443/api/v1/whoami
+EOF
+fi
+
 if [ ${#NOTES[@]} -gt 0 ]; then
   echo
   echo "Check:"
