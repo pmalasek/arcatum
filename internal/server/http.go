@@ -144,6 +144,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/runs/updates", s.handleUpdates)
 	// The backup payload of a streaming job, raw and in one request (rundata.go).
 	mux.HandleFunc("POST /api/v1/runs/{id}/data", s.handleUploadRunData)
+	// Polled by the runner while a job runs: has an operator asked it to stop? (cancel.go)
+	mux.HandleFunc("GET /api/v1/runs/{id}/cancel", s.handleRunCancelState)
 	// Renewal is authenticated by the runner's current certificate, not by an operator.
 	mux.HandleFunc("POST /api/v1/renew", s.handleRenew)
 	// Trust material: runners fetch it every check-in so a rotation propagates by itself.
@@ -211,6 +213,7 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux, read, write guard) {
 	mux.HandleFunc("GET /api/v1/runs/{id}/output", read(s.handleRunOutput))
 	mux.HandleFunc("GET /api/v1/runs/{id}/tail", read(s.handleRunTail))
 	mux.HandleFunc("GET /api/v1/runs/{id}/data", read(s.handleDownloadRunData))
+	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", write(s.handleCancelRun))
 	mux.HandleFunc("GET /api/v1/runners", read(s.handleListRunners))
 	mux.HandleFunc("GET /api/v1/install", read(s.handleInstallInfo))
 	mux.HandleFunc("POST /api/v1/runners/{id}/approve", write(s.handleApproveRunner))
@@ -294,7 +297,10 @@ func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 	if err != nil {
 		return proto.JobDispatch{}, err
 	}
-	run, err := s.store.CreateRun(in)
+	timeoutSec := timeoutSeconds(in.Timeout, entry.Manifest.Timeout)
+	// The run carries the timeout it was dispatched with, so the server can later decide
+	// a silent run is never coming back rather than leaving it "running" forever.
+	run, err := s.store.CreateRun(in, timeoutSec)
 	if err != nil {
 		return proto.JobDispatch{}, fmt.Errorf("create run: %w", err)
 	}
@@ -310,7 +316,7 @@ func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 		},
 		Params:     in.Params,
 		Secrets:    in.Secrets,
-		TimeoutSec: timeoutSeconds(in.Timeout, entry.Manifest.Timeout),
+		TimeoutSec: timeoutSec,
 		Capture:    effectiveCapture(entry.Manifest, in),
 	}
 	if s.signer != nil {
@@ -491,7 +497,7 @@ func (s *Server) handleRunTail(w http.ResponseWriter, r *http.Request) {
 // isTerminal reports whether a run has reached a final state.
 func isTerminal(st RunStatus) bool {
 	switch st {
-	case StatusSuccess, StatusFailed, StatusError:
+	case StatusSuccess, StatusFailed, StatusError, StatusCancelled:
 		return true
 	}
 	return false

@@ -23,11 +23,17 @@ func certWithCNAndRole(cn, role string) *x509.Certificate {
 	return &x509.Certificate{Subject: subject}
 }
 
+// tlsStateWith is the connection state a request carries once a peer certificate has
+// been verified, for tests that build their own request.
+func tlsStateWith(cert *x509.Certificate) *tls.ConnectionState {
+	return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+}
+
 // requestWithCert returns a request carrying a verified peer certificate.
 func requestWithCert(cert *x509.Certificate) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil)
 	if cert != nil {
-		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+		r.TLS = tlsStateWith(cert)
 	}
 	return r
 }

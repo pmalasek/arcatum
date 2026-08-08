@@ -181,11 +181,14 @@ func (a *Agent) runDispatch(ctx context.Context, d proto.JobDispatch) {
 		a.log.Printf("run=%s: workdir: %v", d.RunID, err)
 		return
 	}
-	runCtx := ctx
-	var cancel context.CancelFunc
+	// Always cancellable, timeout or not: an operator has to be able to stop a run that
+	// was given a generous timeout, which is exactly the kind that needs stopping.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if d.TimeoutSec > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, time.Duration(d.TimeoutSec)*time.Second)
-		defer cancel()
+		var expired context.CancelFunc
+		runCtx, expired = context.WithTimeout(runCtx, time.Duration(d.TimeoutSec)*time.Second)
+		defer expired()
 	}
 
 	updates := make(chan proto.RunUpdate, 64)
@@ -193,6 +196,10 @@ func (a *Agent) runDispatch(ctx context.Context, d proto.JobDispatch) {
 	go func() { done <- a.client.StreamUpdates(ctx, updates) }()
 
 	emit := func(u proto.RunUpdate) { updates <- u }
+	// The check-in loop is blocked for as long as this job runs, so the request to stop
+	// has to be collected by something that is not the check-in loop.
+	stopWatching := a.watchForCancel(runCtx, d.RunID, cancel)
+
 	if d.Type == proto.TypeRestic {
 		// File backups are driven by restic, not by a shipped script.
 		a.log.Printf("run=%s: restic backup for instance %q", d.RunID, d.InstanceID)
@@ -201,10 +208,59 @@ func (a *Agent) runDispatch(ctx context.Context, d proto.JobDispatch) {
 		a.log.Printf("run=%s: executing script %q (%s)", d.RunID, d.Script, d.Type)
 		Execute(runCtx, d, a.workBase, emit, a.client.UploadData)
 	}
+	stopWatching()
 	close(updates)
 
 	if err := <-done; err != nil {
 		a.log.Printf("run=%s: streaming updates: %v", d.RunID, err)
+	}
+}
+
+// cancelPollEvery is how often a running job asks whether it should stop. Frequent
+// enough that "stop" in the web UI feels like it did something, rare enough that a job
+// running for hours costs a negligible number of requests.
+const cancelPollEvery = 5 * time.Second
+
+// watchForCancel polls the server for a cancellation of runID and calls stop when one
+// arrives. The returned function ends the watch and must be called once the job is done.
+//
+// It exists because the runner executes jobs inline in the check-in loop: while a backup
+// runs, nothing else on this host talks to the server, so a request to stop has nowhere
+// to arrive. Polling errors are logged and ignored — a server that is briefly
+// unreachable is not a reason to kill a backup halfway through.
+func (a *Agent) watchForCancel(ctx context.Context, runID string, stop context.CancelFunc) (done func()) {
+	watchDone := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(cancelPollEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-watchDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				cancelled, err := a.client.CancelRequested(ctx, runID)
+				if err != nil {
+					// Only worth a line when it is not simply the job ending under us.
+					if ctx.Err() == nil {
+						a.log.Printf("run=%s: cancel check: %v", runID, err)
+					}
+					continue
+				}
+				if cancelled {
+					a.log.Printf("run=%s: an operator asked for this run to stop", runID)
+					stop()
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(watchDone)
+		<-finished
 	}
 }
 

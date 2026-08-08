@@ -292,9 +292,11 @@ func main() {
 		logger.Fatalf("init server: %v", err)
 	}
 
-	// Old run logs are removed in the background. The process runs until it is killed,
-	// so the sweep's context lives as long as the server does.
+	// Background maintenance. The process runs until it is killed, so these live as long
+	// as the server does.
 	srv.StartLogRetention(context.Background())
+	// Runs whose runner died mid-job would otherwise stay "running" forever.
+	srv.StartRunReaper(context.Background())
 
 	// The bootstrap listener is plain HTTP on purpose: a host that has no certificate
 	// yet cannot get through the mTLS handshake, so this is what install.sh talks to.

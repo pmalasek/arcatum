@@ -5,7 +5,7 @@ Zálohovací systém pro interní síť Xtuning. Monorepo, jazyk **Go** pro runn
 Stav implementace: fáze A–J hotové — scaffold, protokol, SQLite, mTLS a podpis úloh,
 šifrování secrets, restic zálohy, web UI, instalace a enrollment, životní cyklus
 certifikátů, obnova z webu, rotace klíčů, správa instancí z webu, auto-update runnerů,
-přihlášení do webu jménem a heslem. Přehled v §10, detaily v §11–17.
+přihlášení do webu jménem a heslem. Přehled v §10, detaily v §11–18.
 
 ---
 
@@ -954,3 +954,60 @@ commit.
 **Nejdřív server, pak runnery.** Starý runner proti novému serveru posílá stdout postaru
 přes ndjson — funguje to, jen bez zrychlení. Nový runner proti starému serveru by dostal
 na `/runs/{id}/data` 404 a běh by selhal. Auto-update pořadí drží sám.
+
+---
+
+## 18. Zastavení běhu a osiřelé běhy
+
+Běh opustí stav `running` jenom tím, že to runner ohlásí. Když runner přestane
+existovat uprostřed úlohy — zabitý, restartovaný systemd, reboot hosta — neohlásí to
+nikdo a řádek zůstane, jako by se pořád pracovalo. Tak vypadá záloha, která „běží od
+rána": ne pomalý dump, ale řádek, který nemá kdo dokončit.
+
+### Zastavení (`cancel.go`)
+
+Server nemůže běh zastavit sám. Komunikace je jen pull — runner volá ven, server nikdy
+dovnitř — takže není co přerušit a není vidět žádný proces. Zrušení je proto příznak,
+který operátor nastaví a runner si ho vyzvedne:
+
+```
+operátor → POST /api/v1/runs/{id}/cancel     nastaví cancel_requested
+runner   → GET  /api/v1/runs/{id}/cancel     ptá se po dobu běhu (co 5 s)
+```
+
+Runner se během úlohy jinak neozve vůbec (úlohy spouští synchronně v checkin smyčce),
+takže se ptá samostatná goroutina — `watchForCancel` v `internal/runner/loop.go`. Když
+příznak uvidí, zruší kontext běhu a proces zemře.
+
+**Zabíjí se celá procesní skupina.** Artefakt je shell skript, ale zálohu dělá jeho
+potomek — `mysqldump`, nebo celá roura. Zabít jen interpret nestačí: potomci běží dál,
+drží zapisovací konec rour, ze kterých runner čte, čtení tedy nikdy neskončí, `cmd.Wait`
+se nevrátí a běh visí „zastavený" — a dump mezitím dál tluče do databáze, na kterou se
+už nikdo nedívá. Proto `Setpgid` a signál celé skupině (`setupProcessGroup`), s
+`WaitDelay` jako pojistkou proti tomu, kdo signál ignoruje.
+
+Stav se hlásí jako `cancelled`, ne `failed`: zabitý proces je odsud k nerozeznání od
+pádu a „failed" by posílalo někoho hledat závadu, která byla záměrem. Přeznačuje se jen
+neúspěšný konec — úloha, která mezi požadavkem a všimnutím doběhla, vyrobila platnou
+zálohu a zahodit ji by bylo pro nic.
+
+**Nedokončený payload se zahazuje**, stejně jako u každého jiného neúspěšného běhu (§17).
+
+### Osiřelé běhy (`reaper.go`)
+
+Rozhodnutelné to dělá timeout. Runner ho vynucuje přes `exec.CommandContext`, takže živý
+běh ho nemůže přežít; běh, který ho přežil, je tedy běh bez runnera. `CreateRun` proto
+ukládá `timeout_sec` na řádek — server si ho po odeslání dispatche nesmí zapomenout.
+
+Sweeper běží co minutu (a jednou při startu, protože běh přerušený restartem *serveru*
+je nejčastější sirotek) a běh, kterému uplynulo `started_at + timeout + 5 min`, označí
+jako `error` s vysvětlením. U běhu, který se nikdy nerozeběhl, se počítá od dispatche.
+Řádky bez `timeout_sec` (zapsané dřív, než sloupec existoval) dostanou výchozí hodinu.
+
+Reaper jen zapisuje, co se už stalo: nic nezabíjí (není co) a běhu, který je jen pomalý,
+se nedotkne.
+
+### Když upload nemá kam
+
+Selhaný upload payloadu běh ukončí hned. Nechat skript doběhnout by znamenalo držet dump
+na databázi kvůli bajtům, které se stejně zahazují.

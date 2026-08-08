@@ -122,6 +122,33 @@ func (c *Client) UploadData(ctx context.Context, runID string, r io.Reader) (int
 	return counted.n, nil
 }
 
+// CancelRequested asks whether an operator has asked for this run to stop. It is polled
+// during execution, so it answers only true/false: a transport error is not an answer,
+// and is reported separately rather than being taken for "keep going".
+func (c *Client) CancelRequested(ctx context.Context, runID string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.base+"/api/v1/runs/"+url.PathEscape(runID)+"/cancel", nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		io.Copy(io.Discard, resp.Body)
+		return false, fmt.Errorf("cancel check: server returned %s", resp.Status)
+	}
+	var out struct {
+		Cancel bool `json:"cancel"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, err
+	}
+	return out.Cancel, nil
+}
+
 // countingReader records how much was read, so a failed upload can say how far it got.
 type countingReader struct {
 	r io.Reader

@@ -246,6 +246,9 @@ func (a *Agent) resticTLSArgs(workDir string) (args []string, cleanup func(), er
 // streamCommand runs a command, forwarding both streams to the server, and returns its
 // exit code.
 func streamCommand(cmd *exec.Cmd, runID string, emit func(proto.RunUpdate)) (int, error) {
+	// Same reason as for scripts: a cancelled run has to take the whole job with it, not
+	// just the process we started (see setupProcessGroup).
+	setupProcessGroup(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return -1, err

@@ -85,11 +85,12 @@ func (s ScheduleJSON) Spec(defLoc *time.Location) (schedule.Spec, error) {
 type RunStatus string
 
 const (
-	StatusPending RunStatus = "pending"
-	StatusRunning RunStatus = "running"
-	StatusSuccess RunStatus = "success"
-	StatusFailed  RunStatus = "failed" // non-zero exit
-	StatusError   RunStatus = "error"  // runner-side error before/after exec
+	StatusPending   RunStatus = "pending"
+	StatusRunning   RunStatus = "running"
+	StatusSuccess   RunStatus = "success"
+	StatusFailed    RunStatus = "failed"    // non-zero exit
+	StatusError     RunStatus = "error"     // runner-side error before/after exec
+	StatusCancelled RunStatus = "cancelled" // stopped on an operator's request
 )
 
 // Run records one execution of an instance.
@@ -102,7 +103,15 @@ type Run struct {
 	ExitCode   int       `json:"exit_code"`
 	Bytes      int64     `json:"bytes"`      // log bytes received (stdout+stderr)
 	DataBytes  int64     `json:"data_bytes"` // backup payload received (capture = "stream")
-	StartedAt  time.Time `json:"started_at"`
-	EndedAt    time.Time `json:"ended_at"`
-	Err        string    `json:"err,omitempty"`
+	// CreatedAt is when the run was dispatched, which is the only clock a run that never
+	// started has (reaper.go).
+	CreatedAt time.Time `json:"created_at"`
+	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at"`
+	Err       string    `json:"err,omitempty"`
+	// TimeoutSec is what the run was dispatched with; 0 means the default applied.
+	TimeoutSec int `json:"timeout_sec"`
+	// CancelRequested is set once an operator has asked for the run to stop. The UI uses
+	// it to show that a stop is on its way but the runner has not acted on it yet.
+	CancelRequested bool `json:"cancel_requested"`
 }

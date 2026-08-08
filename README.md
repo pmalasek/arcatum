@@ -882,6 +882,8 @@ se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém
 | `POST /api/v1/runs/updates` | runner | příjem ndjson streamu průběhu a **logu** |
 | `POST /api/v1/runs/{id}/data` | runner | příjem **payloadu zálohy** (surové tělo, jeden request) |
 | `POST /api/v1/instances/{id}/run` | admin | **manuální spuštění** („spusť teď") |
+| `POST /api/v1/runs/{id}/cancel` | admin | **zastavení běhu** — runner ho vyzvedne do pár sekund |
+| `GET /api/v1/runs/{id}/cancel` | runner | dotaz běžící úlohy, jestli má skončit |
 | `GET /api/v1/instances` | čtení | instance včetně `next_run` (secrets maskované) |
 | `POST /api/v1/instances` | admin | vytvoří instanci (validuje se proti manifestu) |
 | `PUT /api/v1/instances/{id}` | admin | upraví instanci |

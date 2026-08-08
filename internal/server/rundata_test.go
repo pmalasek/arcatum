@@ -1,7 +1,6 @@
 package server
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +17,7 @@ func uploadData(srv *Server, runID, body string, cert *x509.Certificate) *httpte
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/runs/"+runID+"/data", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/octet-stream")
 	if cert != nil {
-		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+		r.TLS = tlsStateWith(cert)
 	}
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, r)
@@ -28,7 +27,7 @@ func uploadData(srv *Server, runID, body string, cert *x509.Certificate) *httpte
 // startedRun creates a run for the fixture instance and marks it running.
 func startedRun(t *testing.T, srv *Server) *Run {
 	t.Helper()
-	run, err := srv.store.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"})
+	run, err := srv.store.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}

@@ -128,8 +128,38 @@ async function loadRuns() {
       <td class="num">${fmtBytes(r.data_bytes || r.bytes)}</td>
       <td>${fmtTime(r.started_at)}</td>
       <td class="num">${fmtDuration(r.started_at, r.ended_at)}</td>
-      <td><button class="action" data-open="${esc(r.id)}">výstup</button></td>
+      <td>
+        <button class="action" data-open="${esc(r.id)}">výstup</button>
+        ${stopButton(r)}
+      </td>
     </tr>`).join('');
+}
+
+// stopButton se nabízí jen u nedokončeného běhu a jen adminovi. Po požádání zůstane
+// vidět jako neaktivní: runner se ptá po pár sekundách, takže mezi kliknutím a koncem
+// běhu je prodleva a bez téhle zpětné vazby vypadá tlačítko, že nic neudělalo.
+function stopButton(run) {
+  if (run.status !== 'running' && run.status !== 'pending') return '';
+  if (run.cancel_requested) {
+    return '<button class="action admin-only" disabled>zastavuji…</button>';
+  }
+  return `<button class="action admin-only" data-cancel="${esc(run.id)}">zastavit</button>`;
+}
+
+// cancelRun požádá o zastavení běhu. Potvrzení je tu schválně: rozdělaná záloha se
+// zahodí a příští proběhne až podle rozvrhu.
+async function cancelRun(runID) {
+  if (!confirm(`Zastavit běh ${runID}? Rozdělaná záloha se zahodí.`)) return;
+  try {
+    await api(`/runs/${encodeURIComponent(runID)}/cancel`, { method: 'POST' });
+  } catch (err) {
+    showError(err);
+    return;
+  }
+  refresh();
+  if (currentRun === runID) {
+    try { renderRunMeta(await api('/runs/' + encodeURIComponent(runID))); } catch (_) {}
+  }
 }
 
 async function loadInstances() {
@@ -974,6 +1004,7 @@ async function openRun(runID) {
 function renderRunMeta(run) {
   el('detail-status').className = 'badge ' + run.status;
   el('detail-status').textContent = run.status;
+  renderStopButton(run);
   el('detail-meta').innerHTML = `
     <dt>instance</dt><dd>${esc(run.instance_id)}</dd>
     <dt>skript</dt><dd>${esc(run.script)}</dd>
@@ -984,6 +1015,17 @@ function renderRunMeta(run) {
     <dt>začátek</dt><dd>${fmtTime(run.started_at)}</dd>
     <dt>trvání</dt><dd>${fmtDuration(run.started_at, run.ended_at)}</dd>
     ${run.err ? `<dt>chyba</dt><dd>${esc(run.err)}</dd>` : ''}`;
+}
+
+// renderStopButton řídí tlačítko v hlavičce detailu. Skryté u doběhnutého běhu,
+// neaktivní, když už zastavení běží — runner se ptá po pár sekundách.
+function renderStopButton(run) {
+  const btn = el('detail-stop');
+  const stoppable = run.status === 'running' || run.status === 'pending';
+  btn.classList.toggle('hidden', !stoppable);
+  btn.disabled = !!run.cancel_requested;
+  btn.textContent = run.cancel_requested ? 'zastavuji…' : 'zastavit';
+  btn.dataset.run = run.id;
 }
 
 // dataRow ukazuje zálohovaná data odděleně od logu. Ke stažení se nabídnou jen po
@@ -1056,6 +1098,7 @@ el('pw-reset-value').addEventListener('keydown', (e) => {
 });
 
 el('back').addEventListener('click', () => showView('runs'));
+el('detail-stop').addEventListener('click', (e) => cancelRun(e.currentTarget.dataset.run));
 
 el('stream').addEventListener('change', () => {
   // Switching stream restarts the tail from the beginning of that stream.
@@ -1073,6 +1116,12 @@ document.addEventListener('click', async (e) => {
   if (open) {
     e.stopPropagation();
     openRun(open.dataset.open);
+    return;
+  }
+  const stop = e.target.closest('[data-cancel]');
+  if (stop) {
+    e.stopPropagation(); // ať klik neotevře zároveň detail běhu
+    cancelRun(stop.dataset.cancel);
     return;
   }
   const trigger = e.target.closest('[data-trigger]');

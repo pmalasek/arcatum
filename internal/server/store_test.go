@@ -121,7 +121,7 @@ func TestRunLifecycle(t *testing.T) {
 	st, _ := openTestStore(t)
 	inst := &Instance{ID: "hello-demo", Script: "hello", RunnerID: "host-1"}
 
-	run, err := st.CreateRun(inst)
+	run, err := st.CreateRun(inst, 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestFinishRunStatusMapping(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			run, err := st.CreateRun(inst)
+			run, err := st.CreateRun(inst, 3600)
 			if err != nil {
 				t.Fatalf("CreateRun: %v", err)
 			}
@@ -209,7 +209,7 @@ func TestListRunsNewestFirstWithLimit(t *testing.T) {
 	st, _ := openTestStore(t)
 	inst := &Instance{ID: "i", Script: "hello", RunnerID: "h"}
 	for i := 0; i < 3; i++ {
-		if _, err := st.CreateRun(inst); err != nil {
+		if _, err := st.CreateRun(inst, 3600); err != nil {
 			t.Fatalf("CreateRun: %v", err)
 		}
 	}
@@ -301,7 +301,7 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	run, err := st.CreateRun(inst)
+	run, err := st.CreateRun(inst, 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 		t.Fatalf("runs lost across reopen: %+v", runs)
 	}
 	// Run ids must keep counting up, not restart at 1 and collide.
-	next, err := reopened.CreateRun(inst)
+	next, err := reopened.CreateRun(inst, 3600)
 	if err != nil {
 		t.Fatalf("CreateRun after reopen: %v", err)
 	}

@@ -513,13 +513,15 @@ func (s *Store) Runners() ([]*Runner, error) {
 
 // --- runs -------------------------------------------------------------------
 
-// CreateRun records a new pending run for an instance.
-func (s *Store) CreateRun(inst *Instance) (*Run, error) {
+// CreateRun records a new pending run for an instance. timeoutSec is the timeout the
+// run is being dispatched with; the server keeps it so it can later tell a run that is
+// merely slow from one whose runner is never going to report back (reaper.go).
+func (s *Store) CreateRun(inst *Instance, timeoutSec int) (*Run, error) {
 	now := time.Now()
 	res, err := s.db.Exec(`
-		INSERT INTO runs (instance_id, runner_id, script, status, created_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		inst.ID, inst.RunnerID, inst.Script, string(StatusPending), toMillis(now))
+		INSERT INTO runs (instance_id, runner_id, script, status, created_at, timeout_sec)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		inst.ID, inst.RunnerID, inst.Script, string(StatusPending), toMillis(now), timeoutSec)
 	if err != nil {
 		return nil, err
 	}
@@ -533,6 +535,7 @@ func (s *Store) CreateRun(inst *Instance) (*Run, error) {
 		RunnerID:   inst.RunnerID,
 		Script:     inst.Script,
 		Status:     StatusPending,
+		TimeoutSec: timeoutSec,
 	}, nil
 }
 
@@ -559,6 +562,36 @@ func (s *Store) SetRunDataBytes(runID string, total int64) error {
 	return err
 }
 
+// RequestRunCancel records that an operator wants a run stopped. It does not stop
+// anything by itself: in a pull model the server cannot reach into a runner, so this is
+// a flag the runner polls for while it works (cancel.go).
+func (s *Store) RequestRunCancel(runID string) error {
+	n, err := parseRunID(runID)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE runs SET cancel_requested = 1 WHERE id = ?`, n)
+	return err
+}
+
+// CancelRequested reports whether a run has been asked to stop.
+func (s *Store) CancelRequested(runID string) (bool, error) {
+	n, err := parseRunID(runID)
+	if err != nil {
+		return false, err
+	}
+	return s.cancelRequested(n)
+}
+
+func (s *Store) cancelRequested(id int64) (bool, error) {
+	var flag int
+	err := s.db.QueryRow(`SELECT cancel_requested FROM runs WHERE id = ?`, id).Scan(&flag)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return flag != 0, err
+}
+
 // FinishRun records a run's terminal state. A non-empty execErr means the runner
 // failed around the execution; otherwise the exit code decides success vs failure.
 func (s *Store) FinishRun(runID string, at time.Time, exitCode int, execErr string) error {
@@ -572,6 +605,18 @@ func (s *Store) FinishRun(runID string, at time.Time, exitCode int, execErr stri
 		status = StatusError
 	case exitCode != 0:
 		status = StatusFailed
+	}
+	// A run an operator stopped is reported as cancelled rather than failed: the killed
+	// process looks exactly like a crash from here, and "failed" would send somebody
+	// looking for a fault that was a deliberate act.
+	//
+	// Only a non-success outcome is relabelled. A job that finished cleanly in the moment
+	// between the request and the runner noticing it produced a real backup, and calling
+	// that cancelled would throw it away for nothing.
+	if status != StatusSuccess {
+		if requested, err := s.cancelRequested(n); err == nil && requested {
+			status = StatusCancelled
+		}
 	}
 	// No more output is coming, so the handles are released and the buffered byte count
 	// is written before the run is reported as finished — the UI reads it right after.
@@ -589,21 +634,47 @@ func (s *Store) FinishRun(runID string, at time.Time, exitCode int, execErr stri
 	return s.discardData(runID)
 }
 
-const runCols = `id, instance_id, runner_id, script, status, exit_code, bytes, data_bytes, started_at, ended_at, err`
+const runCols = `id, instance_id, runner_id, script, status, exit_code, bytes, data_bytes, ` +
+	`created_at, started_at, ended_at, err, timeout_sec, cancel_requested`
 
 func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	var r Run
 	var id int64
-	var started, ended int64
+	var created, started, ended int64
 	var status string
+	var cancelRequested int
 	if err := sc.Scan(&id, &r.InstanceID, &r.RunnerID, &r.Script, &status,
-		&r.ExitCode, &r.Bytes, &r.DataBytes, &started, &ended, &r.Err); err != nil {
+		&r.ExitCode, &r.Bytes, &r.DataBytes, &created, &started, &ended, &r.Err,
+		&r.TimeoutSec, &cancelRequested); err != nil {
 		return nil, err
 	}
+	r.CancelRequested = cancelRequested != 0
 	r.ID = formatRunID(id)
 	r.Status = RunStatus(status)
+	r.CreatedAt = fromMillis(created)
 	r.StartedAt, r.EndedAt = fromMillis(started), fromMillis(ended)
 	return &r, nil
+}
+
+// UnfinishedRuns returns every run still pending or running, oldest first. The list is
+// what the reaper walks, so it is small in normal operation: one entry per job actually
+// in flight.
+func (s *Store) UnfinishedRuns() ([]*Run, error) {
+	rows, err := s.db.Query(`SELECT `+runCols+` FROM runs WHERE status IN (?, ?) ORDER BY id`,
+		string(StatusPending), string(StatusRunning))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // Run returns one run by id, or nil if it does not exist.

@@ -120,7 +120,7 @@ func tailFor(t *testing.T, srv *Server, runID string, offset int64, stream strin
 func TestHandleRunTailFollowsRunToCompletion(t *testing.T) {
 	srv, _ := resticTestServer(t, false)
 	inst := &Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}
-	run, err := srv.store.CreateRun(inst)
+	run, err := srv.store.CreateRun(inst, 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}

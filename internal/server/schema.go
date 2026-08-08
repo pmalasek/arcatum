@@ -116,4 +116,12 @@ var addColumns = []struct{ table, column, definition string }{
 	// Set once the retention sweeper has deleted a run's logs, so old runs are not
 	// re-scanned on every pass (retention.go).
 	{"runs", "logs_pruned", "INTEGER NOT NULL DEFAULT 0"},
+	// The timeout this run was dispatched with. The runner enforces it, but the server
+	// needs its own copy: a runner that dies mid-run reports nothing, and without this
+	// there is no moment at which the server may conclude the run is never coming back
+	// (reaper.go). 0 means the default was in force.
+	{"runs", "timeout_sec", "INTEGER NOT NULL DEFAULT 0"},
+	// Set when an operator asks for a run to stop. The runner polls for it, since in a
+	// pull model the server cannot reach in and interrupt anything (cancel.go).
+	{"runs", "cancel_requested", "INTEGER NOT NULL DEFAULT 0"},
 }

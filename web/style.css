@@ -177,6 +177,8 @@ td.mono, .mono { font-family: var(--mono); font-size: .85em; }
 .badge.failed, .badge.error { color: var(--fail); }
 .badge.running { color: var(--run); }
 .badge.pending { color: var(--warn); }
+/* Zastavený běh není porucha, jen nedokončená práce — proto tlumeně, ne červeně. */
+.badge.cancelled { color: var(--muted); }
 .badge.approved { color: var(--ok); }
 .badge.rejected { color: var(--fail); }
 

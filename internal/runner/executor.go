@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"arcatum/pkg/proto"
 )
@@ -42,6 +45,12 @@ func Execute(ctx context.Context, d proto.JobDispatch, baseDir string, emit func
 		emit(u)
 	}
 
+	// Cancellable from inside as well as from the caller: when the payload turns out to
+	// have nowhere to go, letting the script run to the end would keep a dump hammering
+	// the database to produce bytes that are already being thrown away.
+	runCtx, abort := context.WithCancel(ctx)
+	defer abort()
+
 	workDir, err := os.MkdirTemp(baseDir, "run-"+d.RunID+"-")
 	if err != nil {
 		finish(-1, fmt.Errorf("mktemp: %w", err))
@@ -49,7 +58,7 @@ func Execute(ctx context.Context, d proto.JobDispatch, baseDir string, emit func
 	}
 	defer os.RemoveAll(workDir)
 
-	cmd, err := prepare(ctx, d, workDir)
+	cmd, err := prepare(runCtx, d, workDir)
 	if err != nil {
 		finish(-1, err)
 		return
@@ -73,12 +82,19 @@ func Execute(ctx context.Context, d proto.JobDispatch, baseDir string, emit func
 	var wg sync.WaitGroup
 	var uploaded int64
 	var uploadErr error
+	var uploadFailed bool // the upload broke on its own, rather than being interrupted
 	wg.Add(2)
 	if proto.StreamsPayload(d.Capture) && upload != nil {
 		go func() {
 			defer wg.Done()
-			uploaded, uploadErr = upload(ctx, d.RunID, stdout)
+			uploaded, uploadErr = upload(runCtx, d.RunID, stdout)
 			if uploadErr != nil {
+				// A cancelled run fails its upload too; that is not the upload's fault and
+				// must not be reported as one.
+				if runCtx.Err() == nil {
+					uploadFailed = true
+					abort()
+				}
 				// Nobody is reading stdout any more. Drain it, or the process blocks on a
 				// full pipe and cmd.Wait below never returns.
 				io.Copy(io.Discard, stdout)
@@ -94,13 +110,22 @@ func Execute(ctx context.Context, d proto.JobDispatch, baseDir string, emit func
 	wg.Wait()
 
 	err = cmd.Wait()
+	if runCtx.Err() != nil {
+		killProcessGroup(cmd)
+	}
 	code, execErr := exitCode(err), nonExitError(err)
 	switch {
-	case uploadErr != nil && execErr == nil && code == 0:
-		// The script itself was fine, so without this the run would be recorded as a
-		// successful backup that never arrived.
+	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+		code, execErr = -1, fmt.Errorf("timed out after %d seconds", d.TimeoutSec)
+	case uploadFailed:
+		// The script may well have exited cleanly — it wrote its dump. Without this the
+		// run would be recorded as a successful backup that never arrived.
 		code, execErr = -1, fmt.Errorf("uploading backup data: %w", uploadErr)
-	case uploadErr == nil && uploaded > 0:
+	case runCtx.Err() != nil:
+		// Stopped from outside: an operator asked for it, or the runner is shutting down.
+		// The killed process's exit code says enough, and the server decides between
+		// "cancelled" and "failed" from the request it recorded.
+	case uploaded > 0:
 		// The run log of a streaming job would otherwise be empty; say what was sent.
 		emit(proto.RunUpdate{RunID: d.RunID, Kind: proto.KindOutput, Stream: "stdout",
 			Data: []byte(fmt.Sprintf("streamed %d bytes of backup data to the server\n", uploaded))})
@@ -157,7 +182,44 @@ func prepare(ctx context.Context, d proto.JobDispatch, workDir string) (*exec.Cm
 	}
 	cmd.Env = env
 	cmd.Dir = workDir
+	setupProcessGroup(cmd)
 	return cmd, nil
+}
+
+// killGrace is how long a job gets to shut down after being signalled before it is taken
+// apart. Enough for mysqldump to close a connection, not enough to hold up an operator
+// who has asked for the run to stop.
+const killGrace = 10 * time.Second
+
+// setupProcessGroup makes a cancelled run actually stop.
+//
+// The artifact is a shell script, but what produces the backup is a child of it —
+// `mysqldump`, or a whole pipeline. Killing the interpreter alone leaves those running,
+// still holding the write end of the pipes this run reads from, so the read never ends,
+// cmd.Wait never returns, and the run hangs having "stopped". Worse, a dump would keep
+// running against the database nobody is watching any more.
+//
+// So the job gets its own process group and the signal goes to the group. WaitDelay is
+// the backstop for anything that ignores it: the pipes get closed and the run ends
+// regardless.
+func setupProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// A negative pid signals the whole process group.
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	}
+	cmd.WaitDelay = killGrace
+}
+
+// killProcessGroup removes whatever survived the polite signal. Called only for a run
+// that was cancelled or timed out: after a normal exit there is nothing to clean up, and
+// a script that deliberately left something running is not ours to kill.
+func killProcessGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	// ESRCH simply means the group is already gone, which is the expected case.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
 
 func streamPipe(wg *sync.WaitGroup, r io.Reader, stream, runID string, emit func(proto.RunUpdate)) {

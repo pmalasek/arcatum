@@ -134,7 +134,8 @@ kohokoli, kdo je na zálohovaném stroji dost blízko. Soubor má práva `0600` 
 | stderr | streamuje se zvlášť — sem patří diagnostika, vždycky jako log |
 | `bytes` u běhu | kolik **logu** server přijal (oba streamy dohromady) |
 | `data_bytes` u běhu | kolik **zálohovaných dat** dorazilo, jen u `capture = "stream"` |
-| timeout | z instance, jinak z manifestu, jinak 1 h; po vypršení se proces zabije |
+| timeout | z instance, jinak z manifestu, jinak 1 h; po vypršení se zabije **celá procesní skupina** |
+| zastavení | operátor smí běh kdykoli zastavit; runner se ptá co 5 s a pak zabije celou skupinu |
 | návratový kód | 0 = úspěch, cokoli jiného = selhání běhu |
 
 ---
@@ -279,6 +280,8 @@ Co si přečíst z hlavičky běhu, než se pustíš do logů:
 | dump je v logu místo v datech | manifest nemá `capture = "stream"`, takže server bere stdout jako log |
 | `bytes` = 0 u log skriptu | skript nevypsal vůbec nic |
 | `status` = `pending` | úloha byla přidělena, ale runner se neozval — problém je na straně runneru |
+| `status` = `cancelled` | běh zastavil operátor tlačítkem **zastavit**; není co vyšetřovat |
+| `err` = `runner did not report completion…` | runner umřel uprostřed běhu (restart, reboot, OOM) a běh doklidil server |
 
 Na zálohovaném hostu:
 

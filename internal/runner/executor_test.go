@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"arcatum/pkg/proto"
 )
@@ -144,4 +147,94 @@ func TestExecuteReportsScriptFailure(t *testing.T) {
 	if !strings.Contains(c.stderr.String(), "broken") {
 		t.Errorf("stderr = %q, want the script's message", c.stderr.String())
 	}
+}
+
+// Cancelling the run's context has to kill the process. That is the whole mechanism
+// behind "stop" in the web UI: the runner cancels, exec.CommandContext does the rest.
+func TestExecuteStopsWhenTheContextIsCancelled(t *testing.T) {
+	d := dispatchFor(t, "echo started; sleep 60", proto.CaptureLog)
+	var c collector
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		// Cancel once the script has actually started, so this tests the kill and not a
+		// race against process startup.
+		for i := 0; i < 200; i++ {
+			c.mu.Lock()
+			started := strings.Contains(c.stdout.String(), "started")
+			c.mu.Unlock()
+			if started {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		Execute(ctx, d, t.TempDir(), c.emit, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Execute did not return after the context was cancelled — the process was not killed")
+	}
+
+	if c.finished == nil || c.finished.ExitCode == 0 {
+		t.Errorf("finished = %+v, want a non-zero exit for a killed process", c.finished)
+	}
+}
+
+// The backup is a child of the shell — mysqldump, or a whole pipeline. Killing only the
+// shell would leave it running against the database, still holding the pipes, which is
+// both a hung run and a dump nobody is watching.
+func TestExecuteKillsTheWholeProcessGroup(t *testing.T) {
+	// Report the background child's pid, then wait for it as a real script would.
+	d := dispatchFor(t, "sleep 120 & echo $! >&2; wait", proto.CaptureLog)
+	var c collector
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		Execute(ctx, d, t.TempDir(), c.emit, nil)
+		close(done)
+	}()
+
+	var child int
+	for i := 0; i < 500; i++ {
+		c.mu.Lock()
+		out := strings.TrimSpace(c.stderr.String())
+		c.mu.Unlock()
+		if out != "" {
+			if pid, err := strconv.Atoi(out); err == nil {
+				child = pid
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if child == 0 {
+		cancel()
+		<-done
+		t.Fatal("the script never reported its child's pid")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Execute did not return")
+	}
+
+	// Signal 0 only checks whether the process exists.
+	for i := 0; i < 200; i++ {
+		if err := syscall.Kill(child, 0); err != nil {
+			return // gone, as it must be
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	syscall.Kill(child, syscall.SIGKILL) // do not leak it out of the test
+	t.Fatalf("the script's child (pid %d) survived the cancellation", child)
 }
