@@ -22,7 +22,12 @@ type Manifest struct {
 	Entrypoint string           `toml:"entrypoint"`
 	Platforms  []string         `toml:"platforms"` // e.g. ["linux/amd64"] — only for type=binary
 	Timeout    string           `toml:"timeout"`   // default; an instance may override
-	Params     []Param          `toml:"param"`
+	// Capture declares what the script writes to stdout: "log" (the default) or
+	// "stream", meaning stdout is the backup payload itself. It belongs here rather
+	// than on the instance because it is a property of the script — mysqldump writes a
+	// dump wherever it is pointed. An instance may only turn streaming off.
+	Capture string  `toml:"capture"`
+	Params  []Param `toml:"param"`
 }
 
 // Param declares one input the script accepts. The server uses these to render a
@@ -61,6 +66,17 @@ func (m *Manifest) Validate() error {
 	// instance's parameters (paths, excludes, retention).
 	if m.Entrypoint == "" && m.Type != proto.TypeRestic {
 		return fmt.Errorf("manifest %q: entrypoint is required", m.Name)
+	}
+	switch m.Capture {
+	case "", proto.CaptureLog, proto.CaptureStream:
+	default:
+		return fmt.Errorf("manifest %q: capture must be %q or %q, got %q",
+			m.Name, proto.CaptureLog, proto.CaptureStream, m.Capture)
+	}
+	// restic pushes its data into the repository over its own connection; its stdout is
+	// progress output. Declaring it as a payload stream would silently hide that log.
+	if m.Capture == proto.CaptureStream && m.Type == proto.TypeRestic {
+		return fmt.Errorf("manifest %q: a restic job cannot use capture = %q", m.Name, proto.CaptureStream)
 	}
 	seen := map[string]bool{}
 	for _, p := range m.Params {

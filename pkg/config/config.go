@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -121,9 +122,56 @@ type Server struct {
 	LogLevel string `toml:"log_level"` // debug | info | warn | error
 }
 
-// Storage holds where backup data lands.
+// Storage holds where backup data lands, and how long the logs beside it are kept.
 type Storage struct {
 	BackupDir string `toml:"backup_dir"` // e.g. /central_backup/arcatum
+	// How long a finished run's stdout/stderr logs are kept. A failed run's log is what
+	// an operator reads when something broke, so it outlives a successful one by
+	// default. "0" or "" keeps logs forever.
+	//
+	// This is about logs only. Backup payloads (data.bin) are never deleted here —
+	// throwing away a backup is not a retention default anybody should inherit.
+	LogRetentionSuccess string `toml:"log_retention_success"`
+	LogRetentionFailed  string `toml:"log_retention_failed"`
+}
+
+// LogRetention parses the two retention windows. A zero duration means "keep forever".
+func (s Storage) LogRetention() (success, failed time.Duration, err error) {
+	if success, err = parseRetention("log_retention_success", s.LogRetentionSuccess); err != nil {
+		return 0, 0, err
+	}
+	if failed, err = parseRetention("log_retention_failed", s.LogRetentionFailed); err != nil {
+		return 0, 0, err
+	}
+	return success, failed, nil
+}
+
+// parseRetention accepts a Go duration, plus a day suffix ("14d"). Retention is thought
+// about in days and time.ParseDuration stops at hours, which would make the obvious
+// value for this setting the one thing it rejects.
+func parseRetention(field, value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" {
+		return 0, nil
+	}
+	if days, cut := strings.CutSuffix(value, "d"); cut {
+		n, err := strconv.Atoi(days)
+		if err != nil {
+			return 0, fmt.Errorf("config: [storage] %s %q: expected a number of days, e.g. \"14d\"", field, value)
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("config: [storage] %s must not be negative", field)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("config: [storage] %s %q: %w", field, value, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("config: [storage] %s must not be negative", field)
+	}
+	return d, nil
 }
 
 // TLS holds the mTLS material for one side of the connection.
@@ -215,7 +263,9 @@ func Default() *Config {
 			Listen: "0.0.0.0:8080",
 		},
 		Storage: Storage{
-			BackupDir: "/central_backup/arcatum",
+			BackupDir:           "/central_backup/arcatum",
+			LogRetentionSuccess: "14d",
+			LogRetentionFailed:  "90d",
 		},
 	}
 }

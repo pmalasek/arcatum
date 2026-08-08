@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"arcatum/pkg/crypto"
@@ -30,6 +31,13 @@ type Store struct {
 	// box holds the secrets master key and its predecessors, so a rotation can read
 	// values written under an older key. Nil means secrets are stored in plaintext.
 	box *crypto.Keyring
+
+	// Run logs are appended to constantly while a job runs, so the handles stay open and
+	// the byte counters are buffered rather than written per chunk. See AppendOutput.
+	logMu      sync.Mutex
+	logFiles   map[string]*logFile // "<runID>/<stream>" -> open append handle
+	logPending map[string]int64    // runID -> received bytes not yet in the database
+	logFlushed time.Time           // when the counters last reached the database
 }
 
 // Open opens (creating if needed) the SQLite database at dbPath and applies the
@@ -54,7 +62,14 @@ func Open(dbPath, backupDir string, box *crypto.Keyring) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db, backupDir: backupDir, box: box}, nil
+	return &Store{
+		db:         db,
+		backupDir:  backupDir,
+		box:        box,
+		logFiles:   map[string]*logFile{},
+		logPending: map[string]int64{},
+		logFlushed: time.Now(),
+	}, nil
 }
 
 // migrate adds any columns introduced after the initial schema. Existing databases are
@@ -102,7 +117,18 @@ func hasColumn(db *sql.DB, table, column string) (bool, error) {
 }
 
 // Close releases the database.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	// Buffered byte counters would otherwise be lost on shutdown, and open log handles
+	// would go with the process.
+	s.logMu.Lock()
+	for key, lf := range s.logFiles {
+		lf.f.Close()
+		delete(s.logFiles, key)
+	}
+	s.flushLogBytesLocked()
+	s.logMu.Unlock()
+	return s.db.Close()
+}
 
 // --- instances ---------------------------------------------------------------
 
@@ -521,13 +547,15 @@ func (s *Store) MarkRunStarted(runID string, at time.Time) error {
 	return err
 }
 
-// AddRunBytes accumulates received output/data bytes for a run.
-func (s *Store) AddRunBytes(runID string, delta int64) error {
+// SetRunDataBytes records how much backup payload a run has uploaded. Unlike the log
+// counter this is set outright rather than accumulated, because the payload arrives as
+// one request with one running total.
+func (s *Store) SetRunDataBytes(runID string, total int64) error {
 	n, err := parseRunID(runID)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE runs SET bytes = bytes + ? WHERE id = ?`, delta, n)
+	_, err = s.db.Exec(`UPDATE runs SET data_bytes = ? WHERE id = ?`, total, n)
 	return err
 }
 
@@ -545,12 +573,23 @@ func (s *Store) FinishRun(runID string, at time.Time, exitCode int, execErr stri
 	case exitCode != 0:
 		status = StatusFailed
 	}
-	_, err = s.db.Exec(`UPDATE runs SET status = ?, exit_code = ?, ended_at = ?, err = ? WHERE id = ?`,
-		string(status), exitCode, toMillis(at), execErr, n)
-	return err
+	// No more output is coming, so the handles are released and the buffered byte count
+	// is written before the run is reported as finished — the UI reads it right after.
+	s.closeRunLogs(runID)
+	if _, err := s.db.Exec(`UPDATE runs SET status = ?, exit_code = ?, ended_at = ?, err = ? WHERE id = ?`,
+		string(status), exitCode, toMillis(at), execErr, n); err != nil {
+		return err
+	}
+	// The payload is promoted here and nowhere else, so "there is a data.bin" and "the
+	// run succeeded" cannot disagree. A dump cut short by a failing script or a dropped
+	// connection is not a backup and must never be left looking like one.
+	if status == StatusSuccess {
+		return s.commitData(runID)
+	}
+	return s.discardData(runID)
 }
 
-const runCols = `id, instance_id, runner_id, script, status, exit_code, bytes, started_at, ended_at, err`
+const runCols = `id, instance_id, runner_id, script, status, exit_code, bytes, data_bytes, started_at, ended_at, err`
 
 func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	var r Run
@@ -558,7 +597,7 @@ func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	var started, ended int64
 	var status string
 	if err := sc.Scan(&id, &r.InstanceID, &r.RunnerID, &r.Script, &status,
-		&r.ExitCode, &r.Bytes, &started, &ended, &r.Err); err != nil {
+		&r.ExitCode, &r.Bytes, &r.DataBytes, &started, &ended, &r.Err); err != nil {
 		return nil, err
 	}
 	r.ID = formatRunID(id)
@@ -605,24 +644,207 @@ func (s *Store) ListRuns(limit int) ([]*Run, error) {
 	return out, rows.Err()
 }
 
+// --- run payload (the backup itself) ----------------------------------------
+
+// A script declared with capture = "stream" writes its backup to stdout. That stream is
+// not a log and is not treated as one: it is uploaded to the server as a single raw
+// request and stored next to the log as data.bin.
+//
+// The upload lands in data.part first. FinishRun renames it once — and only if — the run
+// succeeded, which is what stops a truncated dump from ever presenting itself as a
+// finished backup.
+const (
+	dataFileName = "data.bin"
+	dataPartName = "data.part"
+)
+
+// DataPath returns where a run's completed payload is stored.
+func (s *Store) DataPath(runID string) string {
+	return filepath.Join(s.backupDir, "runs", runID, dataFileName)
+}
+
+func (s *Store) dataPartPath(runID string) string {
+	return filepath.Join(s.backupDir, "runs", runID, dataPartName)
+}
+
+// CreateData opens a run's partial payload file for writing, discarding whatever an
+// earlier attempt left behind.
+func (s *Store) CreateData(runID string) (*os.File, error) {
+	dir := filepath.Join(s.backupDir, "runs", runID)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(s.dataPartPath(runID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+}
+
+// commitData promotes a fully uploaded payload to its final name.
+func (s *Store) commitData(runID string) error {
+	err := os.Rename(s.dataPartPath(runID), s.DataPath(runID))
+	if os.IsNotExist(err) {
+		return nil // nothing was streamed, which is the normal case for a log-only job
+	}
+	return err
+}
+
+// discardData removes a partial payload.
+func (s *Store) discardData(runID string) error {
+	err := os.Remove(s.dataPartPath(runID))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 // --- run output (files, not DB) ---------------------------------------------
 
-// AppendOutput appends streamed bytes to backupDir/runs/<runID>/<stream>.log and
-// returns the number of bytes written.
+// Log writing is on the hot path of every run, so it is deliberately not the obvious
+// open-write-close per chunk. That cost three syscalls and one SQLite transaction for
+// every 32 KiB of output, which a long restic run produces tens of thousands of.
+// Instead the file stays open for as long as the run is producing output, and the byte
+// counter is buffered and written a few times a minute.
+const (
+	// maxRunLogBytes caps one stream of one run. A log is for reading; past a few
+	// megabytes nobody does, and a script stuck in a loop should not be able to fill the
+	// disk. The backup payload does not come through here (see rundata.go).
+	maxRunLogBytes = 4 << 20
+	// logTruncatedMarker is appended once when the cap is reached, so a cut log says so
+	// instead of just stopping.
+	logTruncatedMarker = "\n--- log truncated at 4 MiB; further output was discarded ---\n"
+	// logFlushEvery is how often buffered byte counters reach the database, and how
+	// often idle log files are closed.
+	logFlushEvery = 2 * time.Second
+	// logIdleTimeout closes the handle of a run that has gone quiet. A runner that dies
+	// mid-run never reports "finished", and its file would otherwise stay open forever.
+	logIdleTimeout = 5 * time.Minute
+)
+
+// logFile is one open run stream, with what is needed to enforce the size cap.
+type logFile struct {
+	f         *os.File
+	written   int64 // bytes in the file, counted against maxRunLogBytes
+	truncated bool
+	lastUsed  time.Time
+}
+
+// write appends to the log until the cap is reached, then writes the marker once and
+// silently drops the rest.
+func (lf *logFile) write(data []byte) error {
+	if lf.truncated {
+		return nil
+	}
+	room := maxRunLogBytes - lf.written
+	if int64(len(data)) <= room {
+		n, err := lf.f.Write(data)
+		lf.written += int64(n)
+		return err
+	}
+	if room > 0 {
+		n, err := lf.f.Write(data[:room])
+		lf.written += int64(n)
+		if err != nil {
+			return err
+		}
+	}
+	lf.truncated = true
+	_, err := lf.f.WriteString(logTruncatedMarker)
+	return err
+}
+
+// AppendOutput appends streamed bytes to backupDir/runs/<runID>/<stream>.log and returns
+// how many bytes were received. Bytes dropped by the size cap are still counted: the
+// counter reports what the run produced, which is the interesting number when a log has
+// been truncated.
 func (s *Store) AppendOutput(runID, stream string, data []byte) (int, error) {
 	if stream != "stdout" && stream != "stderr" {
 		stream = "stdout"
 	}
-	dir := filepath.Join(s.backupDir, "runs", runID)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return 0, err
-	}
-	f, err := os.OpenFile(filepath.Join(dir, stream+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+
+	lf, err := s.openLogLocked(runID, stream)
 	if err != nil {
 		return 0, err
 	}
-	defer f.Close()
-	return f.Write(data)
+	now := time.Now()
+	lf.lastUsed = now
+	if err := lf.write(data); err != nil {
+		return 0, err
+	}
+	s.logPending[runID] += int64(len(data))
+	if now.Sub(s.logFlushed) >= logFlushEvery {
+		s.flushLogBytesLocked()
+		s.closeIdleLogsLocked(now)
+	}
+	return len(data), nil
+}
+
+// openLogLocked returns the open handle for a run stream, opening it on first use.
+func (s *Store) openLogLocked(runID, stream string) (*logFile, error) {
+	key := runID + "/" + stream
+	if lf, ok := s.logFiles[key]; ok {
+		return lf, nil
+	}
+	dir := filepath.Join(s.backupDir, "runs", runID)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, stream+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	if err != nil {
+		return nil, err
+	}
+	lf := &logFile{f: f}
+	// Size comes from the file, not from what this process has written: the handle may
+	// have been closed for being idle, and the cap applies to the log as a whole.
+	if info, err := f.Stat(); err == nil {
+		lf.written = info.Size()
+		lf.truncated = lf.written >= maxRunLogBytes+int64(len(logTruncatedMarker))
+	}
+	s.logFiles[key] = lf
+	return lf, nil
+}
+
+// flushLogBytesLocked writes the buffered byte counters to the database. A counter that
+// cannot be written stays buffered and is retried on the next flush.
+func (s *Store) flushLogBytesLocked() {
+	s.logFlushed = time.Now()
+	for runID, delta := range s.logPending {
+		n, err := parseRunID(runID)
+		if err != nil {
+			delete(s.logPending, runID) // not a run id; retrying cannot help
+			continue
+		}
+		if delta == 0 {
+			delete(s.logPending, runID)
+			continue
+		}
+		if _, err := s.db.Exec(`UPDATE runs SET bytes = bytes + ? WHERE id = ?`, delta, n); err == nil {
+			delete(s.logPending, runID)
+		}
+	}
+}
+
+// closeIdleLogsLocked closes handles for runs that have stopped producing output.
+func (s *Store) closeIdleLogsLocked(now time.Time) {
+	for key, lf := range s.logFiles {
+		if now.Sub(lf.lastUsed) >= logIdleTimeout {
+			lf.f.Close()
+			delete(s.logFiles, key)
+		}
+	}
+}
+
+// closeRunLogs flushes and closes a finished run's log files.
+func (s *Store) closeRunLogs(runID string) {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	for _, stream := range []string{"stdout", "stderr"} {
+		key := runID + "/" + stream
+		if lf, ok := s.logFiles[key]; ok {
+			lf.f.Close()
+			delete(s.logFiles, key)
+		}
+	}
+	s.flushLogBytesLocked()
 }
 
 // OutputPath returns where a run's stdout is stored (for the UI/inspection).
@@ -660,6 +882,60 @@ func (s *Store) ReadOutputFrom(runID, stream string, offset int64, max int) (dat
 		return nil, offset, err
 	}
 	return buf[:n], offset + int64(n), nil
+}
+
+// PrunableLogRuns returns finished runs whose logs are past their retention window. A
+// zero time for either class means it is kept forever. limit caps one pass.
+func (s *Store) PrunableLogRuns(successBefore, failedBefore time.Time, limit int) ([]string, error) {
+	var conds []string
+	var args []any
+	if !successBefore.IsZero() {
+		conds = append(conds, `(status = 'success' AND ended_at < ?)`)
+		args = append(args, toMillis(successBefore))
+	}
+	if !failedBefore.IsZero() {
+		conds = append(conds, `(status IN ('failed', 'error') AND ended_at < ?)`)
+		args = append(args, toMillis(failedBefore))
+	}
+	if len(conds) == 0 {
+		return nil, nil
+	}
+	// logs_pruned keeps an already-swept run out of every later pass; without it the
+	// sweep would re-stat the whole history once an hour, forever.
+	q := `SELECT id FROM runs WHERE logs_pruned = 0 AND ended_at > 0 AND (` +
+		strings.Join(conds, " OR ") + `) ORDER BY id LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n int64
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, formatRunID(n))
+	}
+	return out, rows.Err()
+}
+
+// PruneRunLogs deletes a run's log files and marks it swept. The run row and its backup
+// payload are left alone: the metadata is small and the payload is the backup.
+func (s *Store) PruneRunLogs(runID string) error {
+	n, err := parseRunID(runID)
+	if err != nil {
+		return err
+	}
+	for _, stream := range []string{"stdout", "stderr"} {
+		if err := os.Remove(s.StreamPath(runID, stream)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`UPDATE runs SET logs_pruned = 1 WHERE id = ?`, n)
+	return err
 }
 
 // StreamPath returns the file backing one of a run's streams ("stdout"/"stderr").

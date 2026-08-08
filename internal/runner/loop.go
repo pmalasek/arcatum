@@ -199,7 +199,7 @@ func (a *Agent) runDispatch(ctx context.Context, d proto.JobDispatch) {
 		a.executeRestic(runCtx, d, emit)
 	} else {
 		a.log.Printf("run=%s: executing script %q (%s)", d.RunID, d.Script, d.Type)
-		Execute(runCtx, d, a.workBase, emit)
+		Execute(runCtx, d, a.workBase, emit, a.client.UploadData)
 	}
 	close(updates)
 

@@ -133,11 +133,11 @@ func TestRunLifecycle(t *testing.T) {
 	if err := st.MarkRunStarted(run.ID, now); err != nil {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
-	if err := st.AddRunBytes(run.ID, 100); err != nil {
-		t.Fatalf("AddRunBytes: %v", err)
+	if _, err := st.AppendOutput(run.ID, "stdout", make([]byte, 100)); err != nil {
+		t.Fatalf("AppendOutput: %v", err)
 	}
-	if err := st.AddRunBytes(run.ID, 23); err != nil {
-		t.Fatalf("AddRunBytes: %v", err)
+	if _, err := st.AppendOutput(run.ID, "stderr", make([]byte, 23)); err != nil {
+		t.Fatalf("AppendOutput: %v", err)
 	}
 	got, err := st.Run(run.ID)
 	if err != nil {
@@ -145,9 +145,6 @@ func TestRunLifecycle(t *testing.T) {
 	}
 	if got.Status != StatusRunning {
 		t.Errorf("status = %s, want running", got.Status)
-	}
-	if got.Bytes != 123 {
-		t.Errorf("bytes = %d, want 123 (accumulated)", got.Bytes)
 	}
 	if got.StartedAt.IsZero() {
 		t.Error("started_at not recorded")
@@ -159,6 +156,11 @@ func TestRunLifecycle(t *testing.T) {
 	got, _ = st.Run(run.ID)
 	if got.Status != StatusSuccess {
 		t.Errorf("status = %s, want success", got.Status)
+	}
+	// Byte counters are buffered while a run produces output and written when it ends,
+	// so this is the point at which the total has to be right.
+	if got.Bytes != 123 {
+		t.Errorf("bytes = %d, want 123 (accumulated over both streams)", got.Bytes)
 	}
 }
 

@@ -41,6 +41,8 @@ type Server struct {
 	bootstrapListen string
 	// web configures the plain-HTTP web listener's sessions (see users.go).
 	web WebOptions
+	// retention is how long finished runs' logs are kept (see retention.go).
+	retention RetentionOptions
 	// logins throttles failed password logins.
 	logins *loginLimiter
 }
@@ -71,6 +73,9 @@ type Options struct {
 	BootstrapListen string
 	// Web configures password login on the plain-HTTP web listener (see users.go).
 	Web WebOptions
+	// Retention bounds how long finished runs' logs are kept. Backup payloads are never
+	// removed by it (see retention.go).
+	Retention RetentionOptions
 }
 
 // New builds a Server over an open Store: loads the script catalog and starts
@@ -108,6 +113,7 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		dist:               &distCache{dir: opts.DistDir},
 		bootstrapListen:    opts.BootstrapListen,
 		web:                opts.Web,
+		retention:          opts.Retention,
 		logins:             newLoginLimiter(),
 	}, nil
 }
@@ -136,6 +142,8 @@ func (s *Server) Handler() http.Handler {
 	// --- runners: identified by their certificate ---
 	mux.HandleFunc("POST /api/v1/checkin", s.handleCheckin)
 	mux.HandleFunc("POST /api/v1/runs/updates", s.handleUpdates)
+	// The backup payload of a streaming job, raw and in one request (rundata.go).
+	mux.HandleFunc("POST /api/v1/runs/{id}/data", s.handleUploadRunData)
 	// Renewal is authenticated by the runner's current certificate, not by an operator.
 	mux.HandleFunc("POST /api/v1/renew", s.handleRenew)
 	// Trust material: runners fetch it every check-in so a rotation propagates by itself.
@@ -202,6 +210,7 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux, read, write guard) {
 	mux.HandleFunc("GET /api/v1/runs/{id}", read(s.handleRunDetail))
 	mux.HandleFunc("GET /api/v1/runs/{id}/output", read(s.handleRunOutput))
 	mux.HandleFunc("GET /api/v1/runs/{id}/tail", read(s.handleRunTail))
+	mux.HandleFunc("GET /api/v1/runs/{id}/data", read(s.handleDownloadRunData))
 	mux.HandleFunc("GET /api/v1/runners", read(s.handleListRunners))
 	mux.HandleFunc("GET /api/v1/install", read(s.handleInstallInfo))
 	mux.HandleFunc("POST /api/v1/runners/{id}/approve", write(s.handleApproveRunner))
@@ -289,10 +298,6 @@ func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 	if err != nil {
 		return proto.JobDispatch{}, fmt.Errorf("create run: %w", err)
 	}
-	capture := in.Capture
-	if capture == "" {
-		capture = "stream"
-	}
 	d := proto.JobDispatch{
 		RunID:      run.ID,
 		InstanceID: in.ID,
@@ -306,7 +311,7 @@ func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 		Params:     in.Params,
 		Secrets:    in.Secrets,
 		TimeoutSec: timeoutSeconds(in.Timeout, entry.Manifest.Timeout),
-		Capture:    capture,
+		Capture:    effectiveCapture(entry.Manifest, in),
 	}
 	if s.signer != nil {
 		sig, err := s.signer.Sign(d.SigningBytes())
@@ -366,11 +371,9 @@ func (s *Server) applyUpdate(u proto.RunUpdate) {
 			s.log.Printf("run=%s started", u.RunID)
 		}
 	case proto.KindOutput:
-		var n int
-		n, err = s.store.AppendOutput(u.RunID, u.Stream, u.Data)
-		if err == nil {
-			err = s.store.AddRunBytes(u.RunID, int64(n))
-		}
+		// AppendOutput accounts the bytes itself, buffered: one database write per chunk
+		// is what made a large run crawl.
+		_, err = s.store.AppendOutput(u.RunID, u.Stream, u.Data)
 	case proto.KindFinished:
 		err = s.store.FinishRun(u.RunID, time.Now(), u.ExitCode, u.Error)
 		if err == nil {

@@ -5,7 +5,7 @@ Zálohovací systém pro interní síť Xtuning. Monorepo, jazyk **Go** pro runn
 Stav implementace: fáze A–J hotové — scaffold, protokol, SQLite, mTLS a podpis úloh,
 šifrování secrets, restic zálohy, web UI, instalace a enrollment, životní cyklus
 certifikátů, obnova z webu, rotace klíčů, správa instancí z webu, auto-update runnerů,
-přihlášení do webu jménem a heslem. Přehled v §10, detaily v §11–16.
+přihlášení do webu jménem a heslem. Přehled v §10, detaily v §11–17.
 
 ---
 
@@ -122,6 +122,7 @@ type        = "bash"              # bash | python | binary | restic
 entrypoint  = "mysql_backup.sh"   # cesta relativně k tomuto configu
 platforms   = ["linux/amd64"]     # jen pro type=binary (výběr artefaktu dle archu runneru)
 timeout     = "1h"                # default, instance může přepsat
+capture     = "stream"            # co je stdout: "log" (výchozí) nebo "stream" = payload zálohy (§17)
 
 # Deklarace parametrů → server z toho generuje formulář ve webu a validuje instanci
 [[param]]
@@ -236,6 +237,17 @@ server je čte do katalogu při startu.
 **Výstup běhů také není v DB** — streamuje se do
 `backup_dir/runs/<run_id>/{stdout,stderr}.log`. Payload zálohy patří do úložiště, ne
 do tabulky; v DB je jen metadata a počet bajtů.
+
+**Log a data jsou dvě různé věci.** Skript deklarovaný v manifestu jako
+`capture = "stream"` (např. `mysql-backup`) píše na stdout samotný dump. Ten neputuje
+kanálem pro výstup — jde vlastním requestem do `runs/<run_id>/data.bin` a v logu se
+neobjeví. Kdyby šel logem, byl by base64 v ndjson streamu, po chuncích, s vlastní SQLite
+transakcí na každý z nich, a webová stránka běhů by nabízela k prohlížení gigabajtový
+SQL dump. Podrobněji v §17.
+
+Logy mají strop **4 MiB na stream a běh** (přetečení se označí markerem) a **retenci**:
+`[storage] log_retention_success` / `log_retention_failed`. Data se retencí nemažou —
+smazat zálohu není výchozí chování, které by měl kdokoli zdědit bez vlastního rozhodnutí.
 
 Časy jsou unix millis (0 = nenastaveno). **Secrets jsou v `instances.secrets` šifrované**
 (viz §7). Přechod na Postgres zůstává otevřený.
@@ -879,3 +891,66 @@ Runnery přes mTLS listener nedotčené (`checkin` funguje dál), UI se na portu
 
 **Nevykresleno v prohlížeči** — v tomhle prostředí není headless browser, takže přihlašovací
 obrazovka a záložka Uživatelé jsou ověřené jen na úrovni API a servírování assetů.
+
+---
+
+## 17. Payload vs. log
+
+Skript může na stdout psát dvě zcela různé věci: **log** (co se dělo) nebo **data**
+(samotnou zálohu). `mysql_backup.sh` píše na stdout dump databáze — proto ho manifest
+deklaruje jako `capture = "stream"`.
+
+Dokud se obojí posílalo stejným kanálem, mělo to dva důsledky:
+
+1. **Stránka běhů nabízela k prohlížení gigabajtový SQL dump** místo logu. Log se tím
+   stal nepoužitelným a `runs/<run_id>/stdout.log` neomezeně rostl.
+2. **Bylo to pomalé.** 1,2 GB dumpu trvalo ~20 minut (~1 MB/s). Cesta byla:
+   stdout → chunky po 32 KiB → `RunUpdate` s base64 v ndjson → server: `MkdirAll` +
+   `open` + `write` + `close` na chunk + `UPDATE runs SET bytes = bytes + ?` na chunk.
+   Na 1,2 GB to je ~39 000 SQLite transakcí (WAL se `synchronous = FULL`, tedy ~39 000
+   fsyncy) a stejný počet otevření souboru.
+
+### Rozdělení
+
+| | log (`capture = "log"`, výchozí) | data (`capture = "stream"`) |
+|---|---|---|
+| kanál | `POST /api/v1/runs/updates` (ndjson `RunUpdate`) | `POST /api/v1/runs/{id}/data` (raw tělo) |
+| uloží se do | `runs/<run_id>/{stdout,stderr}.log` | `runs/<run_id>/data.bin` |
+| ve webu | živý tail v detailu běhu | odkaz „stáhnout“, `GET …/runs/{id}/data` |
+| v DB | `runs.bytes` | `runs.data_bytes` |
+| strop | 4 MiB na stream | žádný |
+| retence | `[storage] log_retention_*` | nikdy se nemaže automaticky |
+
+Runner předá `cmd.StdoutPipe()` rovnou jako tělo requestu — dump tedy nikde nečeká,
+nechunkuje se, neprochází JSONem a na zálohovaném hostu se nestaguje.
+
+### Kdo rozhoduje, co je stdout
+
+**Manifest, ne instance** (`effectiveCapture` v `internal/server/catalog.go`). Jestli
+skript tiskne dump nebo průběh, je vlastnost skriptu, ne cíle, na kterém běží. Navíc
+instance jsou starší než ta deklarace a nesou `capture = "stream"` i u skriptů, které
+odjakživa jen tiskly text — respektovat to by znamenalo poslat výstup `hello` do
+datového souboru, kde ho nikdo nehledá. Instance smí streamování jen **vypnout**
+(`capture = "local"`), pro skript, který si data odloží sám.
+
+### Nedokončený dump není záloha
+
+Upload padá do `data.part` a přejmenuje se na `data.bin` až ve `FinishRun`, a jen když
+běh skončil úspěšně. Neúspěšný běh svůj částečný soubor zahodí. Runner navíc počká na
+dokončení uploadu, než ohlásí `finished`, takže verdikt nikdy nepředběhne data; když
+upload selže a skript sám skončil v pořádku, běh se přesto označí za chybný — jinak by
+se jako úspěšná záloha tvářilo něco, co nedorazilo.
+
+### Zápis logu
+
+Log zůstává na `runs/<run_id>/{stdout,stderr}.log`, ale už se pro každý chunk
+neotevírá a nezavírá: handle je otevřený po dobu, kdy běh produkuje výstup (idle 5 min
+ho zavře, `FinishRun` taky). Počítadlo bajtů se bufferuje a do DB jde po 2 s a při
+dokončení běhu. `PRAGMA synchronous = NORMAL` (s WAL bezpečné) ruší fsync na každý
+commit.
+
+### Kompatibilita při upgradu
+
+**Nejdřív server, pak runnery.** Starý runner proti novému serveru posílá stdout postaru
+přes ndjson — funguje to, jen bez zrychlení. Nový runner proti starému serveru by dostal
+na `/runs/{id}/data` 404 a běh by selhal. Auto-update pořadí drží sám.

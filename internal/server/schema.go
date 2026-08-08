@@ -6,6 +6,11 @@ const schemaSQL = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
+-- With WAL, NORMAL syncs at checkpoints rather than on every commit. The default (FULL)
+-- means one fsync per transaction, which a run's progress updates pay for repeatedly.
+-- A crash can then lose the last few commits, but not corrupt the database — and what
+-- would be lost is run metadata, seconds old, never a backup.
+PRAGMA synchronous = NORMAL;
 
 CREATE TABLE IF NOT EXISTS runners (
   id         TEXT PRIMARY KEY,
@@ -105,4 +110,10 @@ var addColumns = []struct{ table, column, definition string }{
 	// The build a runner reports at check-in, so an operator can see which hosts have
 	// picked up a published update.
 	{"runners", "version", "TEXT NOT NULL DEFAULT ''"},
+	// Backup payload received for a run, kept apart from `bytes` (the log). Runs from
+	// before the split have their dump counted in `bytes`, which is what it meant then.
+	{"runs", "data_bytes", "INTEGER NOT NULL DEFAULT 0"},
+	// Set once the retention sweeper has deleted a run's logs, so old runs are not
+	// re-scanned on every pass (retention.go).
+	{"runs", "logs_pruned", "INTEGER NOT NULL DEFAULT 0"},
 }

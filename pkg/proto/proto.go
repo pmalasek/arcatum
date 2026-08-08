@@ -43,7 +43,7 @@ type JobDispatch struct {
 	Params     map[string]string `json:"params"`   // non-secret params -> env vars
 	Secrets    map[string]string `json:"secrets"`  // decrypted only for this runner over mTLS -> temp file
 	TimeoutSec int               `json:"timeout_sec"`
-	Capture    string            `json:"capture"`   // "stream" | "local"
+	Capture    string            `json:"capture"`   // "log" | "stream" | "local"
 	Signature  []byte            `json:"signature"` // server signature over the dispatch (runner verifies)
 }
 
@@ -53,6 +53,23 @@ type Artifact struct {
 	SHA256   string `json:"sha256"`
 	Content  []byte `json:"content,omitempty"` // inline for small scripts; large binaries fetched separately
 }
+
+// Capture says what a script's stdout *is*. It is the difference between a job whose
+// output is something to read and a job whose output is the backup itself.
+//
+//	CaptureLog     stdout is a log: stored as text, shown in the web UI, capped in size.
+//	CaptureStream  stdout is the backup payload: uploaded raw to the server as one
+//	               request and never routed through the update stream (it would be
+//	               base64-encoded, chunked, and would fill the log with a database dump).
+//	CaptureLocal   the script keeps the data itself; stdout is a log, as with CaptureLog.
+const (
+	CaptureLog    = "log"
+	CaptureStream = "stream"
+	CaptureLocal  = "local"
+)
+
+// StreamsPayload reports whether stdout carries the backup payload rather than a log.
+func StreamsPayload(capture string) bool { return capture == CaptureStream }
 
 // UpdateKind classifies a RunUpdate.
 type UpdateKind string

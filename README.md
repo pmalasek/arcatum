@@ -879,7 +879,8 @@ se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém
 | Metoda a cesta | Role | Účel |
 |---|---|---|
 | `POST /api/v1/checkin` | runner | runner se hlásí, dostane úlohy k spuštění |
-| `POST /api/v1/runs/updates` | runner | příjem ndjson streamu průběhu a výstupu |
+| `POST /api/v1/runs/updates` | runner | příjem ndjson streamu průběhu a **logu** |
+| `POST /api/v1/runs/{id}/data` | runner | příjem **payloadu zálohy** (surové tělo, jeden request) |
 | `POST /api/v1/instances/{id}/run` | admin | **manuální spuštění** („spusť teď") |
 | `GET /api/v1/instances` | čtení | instance včetně `next_run` (secrets maskované) |
 | `POST /api/v1/instances` | admin | vytvoří instanci (validuje se proti manifestu) |
@@ -890,6 +891,7 @@ se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém
 | `GET /api/v1/runs/{id}` | čtení | detail jednoho běhu |
 | `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | čtení | zachycený výstup běhu |
 | `GET /api/v1/runs/{id}/tail?offset=N&stream=` | čtení | přírůstek výstupu — základ živého tailu |
+| `GET /api/v1/runs/{id}/data` | čtení | stažení payloadu zálohy (jen po úspěšném běhu) |
 | `GET /api/v1/runners` | čtení | evidované runnery (stav, platforma, `last_seen`) |
 | `GET /api/v1/install` | čtení | příkaz, kterým se instaluje nový runner (adresa se skládá z hostu dotazu a bootstrap portu) |
 | `GET /api/v1/whoami` | čtení | kdo jsi, jak jsi se přihlásil, expirace certifikátů |
@@ -965,6 +967,13 @@ a `just run-output 1` (recept přijme `run-1` i holé číslo — přes API je s
 
 Výstup se ukládá do `backup_dir/runs/<run_id>/{stdout,stderr}.log`, takže do něj lze
 kdykoli nahlédnout i přímo na serveru. Chystá se dry-run režim.
+
+**Log a data nejsou totéž.** Skript, který má v manifestu `capture = "stream"` (třeba
+`mysql-backup`), píše na stdout samotný dump — ten do logu nepatří a neputuje tam.
+Uloží se vedle něj jako `runs/<run_id>/data.bin` a ve webu se nabídne ke stažení, kdežto
+log obsahuje jen jednu shrnující řádku a stderr. Logy mají strop 4 MiB na stream a mažou
+se podle `[storage] log_retention_success` / `log_retention_failed`; **zálohovaná data se
+retencí nemažou nikdy**. Detaily v [architektuře, §17](docs/architecture.md).
 
 Celá vývojová smyčka včetně spuštění skriptu nasucho mimo Arcatum a katalogu chybových
 zpráv: [Vývoj a ladění skriptů](docs/script-development.md).

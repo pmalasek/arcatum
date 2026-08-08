@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
@@ -210,6 +211,10 @@ func main() {
 	if err != nil {
 		logger.Fatalf("config: %v", err)
 	}
+	logKeepSuccess, logKeepFailed, err := cfg.Storage.LogRetention()
+	if err != nil {
+		logger.Fatalf("config: %v", err)
+	}
 	opts := server.Options{
 		RequireClientCert: cfg.TLS.Enabled(),
 		// The same directory the bootstrap listener installs from is what auto-update
@@ -221,6 +226,11 @@ func main() {
 		Web: server.WebOptions{
 			SessionTTL:   sessionTTL,
 			SecureCookie: cfg.Web.SecureCookie,
+		},
+		// Logs of finished runs are swept on a schedule; backup payloads never are.
+		Retention: server.RetentionOptions{
+			LogSuccess: logKeepSuccess,
+			LogFailed:  logKeepFailed,
 		},
 	}
 	var tlsConfig *tls.Config
@@ -281,6 +291,10 @@ func main() {
 	if err != nil {
 		logger.Fatalf("init server: %v", err)
 	}
+
+	// Old run logs are removed in the background. The process runs until it is killed,
+	// so the sweep's context lives as long as the server does.
+	srv.StartLogRetention(context.Background())
 
 	// The bootstrap listener is plain HTTP on purpose: a host that has no certificate
 	// yet cannot get through the mTLS handshake, so this is what install.sh talks to.

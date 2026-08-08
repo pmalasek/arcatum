@@ -20,10 +20,18 @@ import (
 	"arcatum/pkg/proto"
 )
 
+// DataUploader ships a run's backup payload to the server. It is separate from emit
+// because the payload is not output to be logged: it is the backup itself, and routing
+// it through the update stream would base64-encode a database dump into the run log.
+// Nil means the job's stdout is treated as a log whatever the dispatch says, which is
+// what a caller with nowhere to put a payload (the tests) needs.
+type DataUploader func(ctx context.Context, runID string, r io.Reader) (int64, error)
+
 // Execute runs one dispatched job. It emits RunUpdate values (started, output
-// chunks, finished) through emit. All temp files live under a per-run dir that is
-// removed on return.
-func Execute(ctx context.Context, d proto.JobDispatch, baseDir string, emit func(proto.RunUpdate)) {
+// chunks, finished) through emit, and for a job declared capture = "stream" hands the
+// process's stdout to upload instead of logging it. All temp files live under a per-run
+// dir that is removed on return.
+func Execute(ctx context.Context, d proto.JobDispatch, baseDir string, emit func(proto.RunUpdate), upload DataUploader) {
 	emit(proto.RunUpdate{RunID: d.RunID, Kind: proto.KindStarted})
 
 	finish := func(exit int, execErr error) {
@@ -63,13 +71,41 @@ func Execute(ctx context.Context, d proto.JobDispatch, baseDir string, emit func
 	}
 
 	var wg sync.WaitGroup
+	var uploaded int64
+	var uploadErr error
 	wg.Add(2)
-	go streamPipe(&wg, stdout, "stdout", d.RunID, emit)
+	if proto.StreamsPayload(d.Capture) && upload != nil {
+		go func() {
+			defer wg.Done()
+			uploaded, uploadErr = upload(ctx, d.RunID, stdout)
+			if uploadErr != nil {
+				// Nobody is reading stdout any more. Drain it, or the process blocks on a
+				// full pipe and cmd.Wait below never returns.
+				io.Copy(io.Discard, stdout)
+			}
+		}()
+	} else {
+		go streamPipe(&wg, stdout, "stdout", d.RunID, emit)
+	}
 	go streamPipe(&wg, stderr, "stderr", d.RunID, emit)
+	// Waiting for the upload before finishing is what keeps the two in step: the server
+	// promotes the payload when the run is marked successful, so that verdict must not be
+	// sent until the upload has either completed or failed.
 	wg.Wait()
 
 	err = cmd.Wait()
-	finish(exitCode(err), nonExitError(err))
+	code, execErr := exitCode(err), nonExitError(err)
+	switch {
+	case uploadErr != nil && execErr == nil && code == 0:
+		// The script itself was fine, so without this the run would be recorded as a
+		// successful backup that never arrived.
+		code, execErr = -1, fmt.Errorf("uploading backup data: %w", uploadErr)
+	case uploadErr == nil && uploaded > 0:
+		// The run log of a streaming job would otherwise be empty; say what was sent.
+		emit(proto.RunUpdate{RunID: d.RunID, Kind: proto.KindOutput, Stream: "stdout",
+			Data: []byte(fmt.Sprintf("streamed %d bytes of backup data to the server\n", uploaded))})
+	}
+	finish(code, execErr)
 }
 
 // prepare validates the artifact hash, writes the executable and secrets file, and

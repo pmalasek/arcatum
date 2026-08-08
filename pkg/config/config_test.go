@@ -252,3 +252,49 @@ listen = "0.0.0.0:80"
 		})
 	}
 }
+
+// Retention is thought about in days, which is exactly what time.ParseDuration rejects.
+func TestLogRetentionParsing(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"days", "14d", 14 * 24 * time.Hour, false},
+		{"go duration", "36h", 36 * time.Hour, false},
+		{"zero keeps forever", "0", 0, false},
+		{"empty keeps forever", "", 0, false},
+		{"negative", "-5d", 0, true},
+		{"nonsense", "soon", 0, true},
+		{"nonsense days", "twod", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := Storage{LogRetentionSuccess: tc.value}.LogRetention()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("%q was accepted, want an error", tc.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%q: %v", tc.value, err)
+			}
+			if got != tc.want {
+				t.Errorf("%q = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// The shipped defaults have to parse, or every server would refuse to start.
+func TestDefaultLogRetentionIsValid(t *testing.T) {
+	success, failed, err := Default().Storage.LogRetention()
+	if err != nil {
+		t.Fatalf("default retention: %v", err)
+	}
+	if success <= 0 || failed <= success {
+		t.Errorf("defaults = success %v / failed %v, want both set and failures kept longer", success, failed)
+	}
+}

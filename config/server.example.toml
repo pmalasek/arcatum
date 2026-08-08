@@ -39,6 +39,14 @@ session_ttl = "12h"                         # inactivity window; slides while th
 [storage]
 backup_dir = "/central_backup/arcatum"      # where backup data is stored
 
+# How long the stdout/stderr logs of a finished run are kept. A failed run's log is the
+# one somebody reads, so it outlives a successful one. Accepts days ("14d") or a Go
+# duration ("36h"); "0" keeps logs forever.
+#
+# Backup data is never deleted by this — only logs.
+log_retention_success = "14d"
+log_retention_failed  = "90d"
+
 # mTLS. Generate the files with: deploy/gen-certs.sh -H <server-ip-or-dns> <runner-id>...
 # All three paths must be set together. Without them the server speaks plain HTTP and
 # does NOT authenticate callers — development only.

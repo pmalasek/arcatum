@@ -52,6 +52,7 @@ type       = "bash"              # bash | python | binary | restic
 entrypoint = "mysql_backup.sh"   # relativně k tomuhle souboru
 timeout    = "1h"                # default; instance smí přepsat
 platforms  = ["linux/amd64"]     # jen pro type = "binary"
+capture    = "stream"            # co je stdout: "log" (výchozí) | "stream" = payload zálohy
 
 [[param]]
 name     = "host"
@@ -129,9 +130,10 @@ kohokoli, kdo je na zálohovaném stroji dost blízko. Soubor má práva `0600` 
 |---|---|
 | pracovní adresář | dočasný `run-<id>-*` pod `data_dir/work`, **po běhu smazán** |
 | ostatní env | dědí se od procesu runneru (systemd služba — čekej minimální `PATH`) |
-| stdout | streamuje se na server — tady mají tečt zálohovaná data |
-| stderr | streamuje se zvlášť — sem patří diagnostika |
-| `bytes` u běhu | součet **obou** streamů, jak je server přijal (upovídaný stderr se do něj počítá taky) |
+| stdout | podle `capture` v manifestu: buď log, nebo **zálohovaná data** (viz níže) |
+| stderr | streamuje se zvlášť — sem patří diagnostika, vždycky jako log |
+| `bytes` u běhu | kolik **logu** server přijal (oba streamy dohromady) |
+| `data_bytes` u běhu | kolik **zálohovaných dat** dorazilo, jen u `capture = "stream"` |
 | timeout | z instance, jinak z manifestu, jinak 1 h; po vypršení se proces zabije |
 | návratový kód | 0 = úspěch, cokoli jiného = selhání běhu |
 
@@ -139,8 +141,11 @@ kohokoli, kdo je na zálohovaném stroji dost blízko. Soubor má práva `0600` 
 
 ## 4. Pravidla, která se vyplatí držet
 
-- **Data piš na stdout.** Celý smysl systému je, že na zálohovaném serveru nic nezůstává.
-  Skript, který si dump uloží do `/var/backups`, tenhle model obchází.
+- **Data piš na stdout — a řekni to v manifestu.** Celý smysl systému je, že na
+  zálohovaném serveru nic nezůstává; skript, který si dump uloží do `/var/backups`,
+  tenhle model obchází. Aby server stdout bral jako zálohu a ne jako log, musí manifest
+  mít `capture = "stream"`. Bez toho ti dump skončí v logu, kde ho strop 4 MiB usekne
+  a retence po čase smaže.
 - **`set -euo pipefail`** v každém bashi. Bez `pipefail` projde `mysqldump | gzip`
   jako úspěch, i když dump selže — a máš zálohu, která obsahuje půl databáze.
 - **Povinné vstupy kontroluj sám** (`: "${ARCATUM_HOST:?}"`). Validace serveru chytá
@@ -233,7 +238,9 @@ parametrů a secretu) a `slow-demo` (píše řádek za sekundu — pro živý ta
 
 **Cesta z webu je nejpohodlnější:** záložka **Instance** → **spustit teď**, pak klik na běh.
 Otevře se detail s **živým tailem** — u probíhající úlohy se log dosypává, jak přichází,
-s přepínačem `stdout`/`stderr` a zaškrtávátkem „sledovat".
+s přepínačem `stdout`/`stderr` a zaškrtávátkem „sledovat". U skriptu s
+`capture = "stream"` je ve `stdout` jen shrnutí („streamed N bytes…"); samotná data se
+netailují, ale po úspěšném běhu jsou v detailu ke stažení.
 
 Ze shellu totéž:
 
@@ -267,8 +274,10 @@ Co si přečíst z hlavičky běhu, než se pustíš do logů:
 |---|---|
 | `exit_code` > 0 | skript sám selhal → hledej ve `stderr` |
 | `exit_code` = -1 s `err` | selhalo prostředí: chybí interpret, špatný hash artefaktu, timeout |
-| `bytes` = 0 u úspěchu | skript nevypsal vůbec nic — často zapomenuté `exec`/přesměrování |
-| `bytes` podezřele malé | data tekla jinam než na stdout (uložila se lokálně?), nebo dump selhal bez `pipefail` |
+| `data_bytes` = 0 u `capture = "stream"` | skript nevypsal na stdout nic — často zapomenuté `exec`/přesměrování |
+| `data_bytes` podezřele malé | data tekla jinam než na stdout (uložila se lokálně?), nebo dump selhal bez `pipefail` |
+| dump je v logu místo v datech | manifest nemá `capture = "stream"`, takže server bere stdout jako log |
+| `bytes` = 0 u log skriptu | skript nevypsal vůbec nic |
 | `status` = `pending` | úloha byla přidělena, ale runner se neozval — problém je na straně runneru |
 
 Na zálohovaném hostu:

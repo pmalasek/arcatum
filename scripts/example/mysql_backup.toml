@@ -4,6 +4,9 @@ name       = "mysql-backup"
 type       = "bash"            # bash | python | binary | restic
 entrypoint = "mysql_backup.sh" # relative to this manifest
 timeout    = "1h"              # default; an instance may override
+# stdout of this script is the dump itself, not a log: the server takes it as the
+# backup payload, uploads it raw and never shows it in the run log.
+capture    = "stream"
 
 # Parameter declarations → the server renders a form and validates instances.
 [[param]]

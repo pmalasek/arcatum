@@ -20,7 +20,7 @@ type Instance struct {
 	RunnerID string            `json:"runner_id"` // exactly one target (N:1)
 	Params   map[string]string `json:"params"`    // non-secret -> env vars
 	Secrets  map[string]string `json:"secrets"`   // secret -> temp file on the runner
-	Capture  string            `json:"capture"`   // "stream" | "local"
+	Capture  string            `json:"capture"`   // "" (follow the manifest) | "log" | "local"
 	Timeout  string            `json:"timeout"`   // overrides manifest default
 	Schedule ScheduleJSON      `json:"schedule"`
 }
@@ -100,7 +100,8 @@ type Run struct {
 	Script     string    `json:"script"`
 	Status     RunStatus `json:"status"`
 	ExitCode   int       `json:"exit_code"`
-	Bytes      int64     `json:"bytes"` // output/data bytes received
+	Bytes      int64     `json:"bytes"`      // log bytes received (stdout+stderr)
+	DataBytes  int64     `json:"data_bytes"` // backup payload received (capture = "stream")
 	StartedAt  time.Time `json:"started_at"`
 	EndedAt    time.Time `json:"ended_at"`
 	Err        string    `json:"err,omitempty"`

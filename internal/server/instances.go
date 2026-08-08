@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"arcatum/pkg/jobspec"
+	"arcatum/pkg/proto"
 )
 
 // Managing instances through the API is what takes the plaintext seed file out of the
@@ -253,10 +254,13 @@ func (s *Server) instanceFromPayload(p instancePayload, existing *Instance) (*In
 			return nil, fmt.Errorf("timeout %q: %w", p.Timeout, err)
 		}
 	}
+	// What stdout is comes from the script's manifest; this only lets an instance opt
+	// out of streaming (see effectiveCapture).
 	switch p.Capture {
-	case "", "stream", "local":
+	case "", proto.CaptureLog, proto.CaptureStream, proto.CaptureLocal:
 	default:
-		return nil, fmt.Errorf("capture must be \"stream\" or \"local\", got %q", p.Capture)
+		return nil, fmt.Errorf("capture must be %q, %q or %q, got %q",
+			proto.CaptureLog, proto.CaptureStream, proto.CaptureLocal, p.Capture)
 	}
 
 	secrets := map[string]string{}

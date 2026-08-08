@@ -125,7 +125,7 @@ async function loadRuns() {
       <td>${esc(r.instance_id)}</td>
       <td>${badge(r.status)}</td>
       <td class="num">${r.exit_code}</td>
-      <td class="num">${fmtBytes(r.bytes)}</td>
+      <td class="num">${fmtBytes(r.data_bytes || r.bytes)}</td>
       <td>${fmtTime(r.started_at)}</td>
       <td class="num">${fmtDuration(r.started_at, r.ended_at)}</td>
       <td><button class="action" data-open="${esc(r.id)}">výstup</button></td>
@@ -979,10 +979,23 @@ function renderRunMeta(run) {
     <dt>skript</dt><dd>${esc(run.script)}</dd>
     <dt>runner</dt><dd>${esc(run.runner_id)}</dd>
     <dt>návratový kód</dt><dd>${run.exit_code}</dd>
-    <dt>přeneseno</dt><dd>${fmtBytes(run.bytes)}</dd>
+    ${dataRow(run)}
+    <dt>log</dt><dd>${fmtBytes(run.bytes)}</dd>
     <dt>začátek</dt><dd>${fmtTime(run.started_at)}</dd>
     <dt>trvání</dt><dd>${fmtDuration(run.started_at, run.ended_at)}</dd>
     ${run.err ? `<dt>chyba</dt><dd>${esc(run.err)}</dd>` : ''}`;
+}
+
+// dataRow ukazuje zálohovaná data odděleně od logu. Ke stažení se nabídnou jen po
+// úspěšném běhu — server nedokončený dump zahazuje, takže odkaz by jinak vedl na nic.
+function dataRow(run) {
+  if (!run.data_bytes) return '';
+  const size = fmtBytes(run.data_bytes);
+  if (run.status !== 'success') {
+    return `<dt>data</dt><dd>${size} <span class="hint">(běh neuspěl, data zahozena)</span></dd>`;
+  }
+  const href = `${API}/runs/${encodeURIComponent(run.id)}/data`;
+  return `<dt>data</dt><dd>${size} · <a href="${href}" download>stáhnout</a></dd>`;
 }
 
 // pollTail fetches output from where the last poll stopped, so nothing is re-sent and

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"arcatum/pkg/proto"
 )
@@ -92,6 +93,45 @@ func (c *Client) Checkin(ctx context.Context, req proto.CheckinRequest) (*proto.
 		return nil, err
 	}
 	return &out, nil
+}
+
+// UploadData ships a run's backup payload to the server as one raw request. The reader
+// is the script's stdout, so the dump goes straight from the process to the server
+// without being chunked, base64-encoded or staged on this host — which is the whole
+// point: for a streaming job the payload is the backup, not something to log.
+//
+// The body has no known length, so it is sent with chunked transfer encoding. It is
+// deliberately not retryable: a half-sent dump cannot be resumed by replaying it.
+func (c *Client) UploadData(ctx context.Context, runID string, r io.Reader) (int64, error) {
+	counted := &countingReader{r: r}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.base+"/api/v1/runs/"+url.PathEscape(runID)+"/data", counted)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return counted.n, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 300 {
+		return counted.n, fmt.Errorf("data upload: server returned %s", resp.Status)
+	}
+	return counted.n, nil
+}
+
+// countingReader records how much was read, so a failed upload can say how far it got.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // StreamUpdates sends run updates as an ndjson stream in a single request. Updates
