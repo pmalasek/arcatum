@@ -124,4 +124,13 @@ var addColumns = []struct{ table, column, definition string }{
 	// Set when an operator asks for a run to stop. The runner polls for it, since in a
 	// pull model the server cannot reach in and interrupt anything (cancel.go).
 	{"runs", "cancel_requested", "INTEGER NOT NULL DEFAULT 0"},
+	// Set once retention has deleted a run's backup payload. data_bytes is left alone, so
+	// the history still says what the run produced (dumps.go).
+	{"runs", "data_pruned", "INTEGER NOT NULL DEFAULT 0"},
+	// How many dumps an instance keeps, and for how long. A dump is one opaque artifact
+	// restored whole, so it is rotated by count and age rather than deduplicated into a
+	// repository. 0 for both means keep everything: deleting a backup must never be a
+	// default somebody inherits without having asked for it.
+	{"instances", "keep_last", "INTEGER NOT NULL DEFAULT 0"},
+	{"instances", "keep_days", "INTEGER NOT NULL DEFAULT 0"},
 }

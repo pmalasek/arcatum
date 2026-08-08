@@ -297,6 +297,9 @@ func main() {
 	srv.StartLogRetention(context.Background())
 	// Runs whose runner died mid-job would otherwise stay "running" forever.
 	srv.StartRunReaper(context.Background())
+	// Backup dumps are rotated per instance (keep_last / keep_days); an instance that
+	// sets neither keeps everything.
+	srv.StartDumpRetention(context.Background())
 
 	// The bootstrap listener is plain HTTP on purpose: a host that has no certificate
 	// yet cannot get through the mTLS handshake, so this is what install.sh talks to.

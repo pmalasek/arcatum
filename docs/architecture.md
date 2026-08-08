@@ -5,7 +5,7 @@ Zálohovací systém pro interní síť Xtuning. Monorepo, jazyk **Go** pro runn
 Stav implementace: fáze A–J hotové — scaffold, protokol, SQLite, mTLS a podpis úloh,
 šifrování secrets, restic zálohy, web UI, instalace a enrollment, životní cyklus
 certifikátů, obnova z webu, rotace klíčů, správa instancí z webu, auto-update runnerů,
-přihlášení do webu jménem a heslem. Přehled v §10, detaily v §11–18.
+přihlášení do webu jménem a heslem. Přehled v §10, detaily v §11–19.
 
 ---
 
@@ -1011,3 +1011,59 @@ se nedotkne.
 
 Selhaný upload payloadu běh ukončí hned. Nechat skript doběhnout by znamenalo držet dump
 na databázi kvůli bajtům, které se stejně zahazují.
+
+---
+
+## 19. Retence databázových záloh
+
+Souborové zálohy jdou do resticu (§3, §13). Dumpy databází ne — a je to vědomé
+rozhodnutí, ne opomenutí.
+
+Restic umí procházet strom, obnovit jeden soubor a dedupovat napříč filesystémem. Dump
+je **jeden neprůhledný artefakt, který se obnovuje celý**: dovnitř se nikdo nedívá a
+jeden řádek z něj nikdo netahá. Zbyl by tedy dedup mezi dny, a platilo by se za něj tím,
+že ve chvíli, kdy je potřeba obnovit databázi, stojí mezi operátorem a daty repozitář,
+jeho heslo a binárka resticu. `gunzip < dump.sql.gz | mysql` je proti tomu neprůstřelné.
+
+Takže **rotace místo deduplikace**: drží se posledních N a všechno mladší než D dnů.
+
+### Nastavení
+
+Na instanci (`keep_last`, `keep_days`), ne v parametrech skriptu. U resticu jsou
+`keep_daily` a spol. parametry, protože je konzumuje runner, který pouští
+`restic forget`; dumpy maže **server** a skript o retenci neví nic.
+
+Obě hodnoty jsou **sjednocení**, ne průnik — „aspoň tolik kopií **a** aspoň tak staré".
+Malý počet tak nemůže potichu zkrátit časové okno, ani naopak.
+
+**0 u obou znamená držet všechno.** Smazat zálohu nesmí být výchozí chování, které někdo
+zdědí, aniž si o něj řekl; formulář nové instance předvyplňuje `keep_last = 7`, ale u
+existující instance se na uloženou hodnotu nesahá.
+
+### Kdy se maže
+
+Hned po úspěšném běhu (`pruneDumpsForRun`), protože právě tehdy disk narostl — čekat na
+hodinový sweep by znamenalo držet celou kopii navíc přesně v nejnevhodnější chvíli.
+Hodinový sweep (`StartDumpRetention`) je pojistka: zachytí změnu politiky a instance,
+které zrovna neběžely.
+
+Smaže se **soubor**, ne řádek běhu: `data_bytes` zůstává a nastaví se `data_pruned`.
+Historie tedy dál říká, co běh vyrobil, a stažení odrotovaného dumpu vrací `410 Gone` s
+vysvětlením — ne `404`, které by vypadalo, že běh nikdy nic nevyrobil.
+
+### Ve webu
+
+Sloupec **Repozitář** ukazuje u streamované instance `<velikost> · N dumpů` místo `—`
+(`storedSummary`), takže instance, která má každou zálohu, jakou si vyžádala, už
+nevypadá jako instance bez záloh. Záložka **Obnova** u ní vypíše dumpy ke stažení místo
+procházení stromu — není co procházet.
+
+### Co tím není vyřešeno
+
+**Komprese.** Nezávisí na tomhle rozhodnutí a je to největší jednotlivá úspora: SQL text
+se srazí zhruba 5–10×, což zmenší disk i dobu přenosu. Jde udělat hned ve skriptu
+(`mysqldump … | gzip -1`); vlajka v manifestu, aby to věděl i web a soubor dostal
+příponu `.sql.gz`, zatím není.
+
+**Dlouhá historie.** `keep_last = 7` při denním rozvrhu znamená, že celá historie je
+týden — tiché poškození dat nebo ransomware se pozná i za měsíc. Na to je `keep_days`.

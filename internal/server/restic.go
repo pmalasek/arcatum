@@ -361,6 +361,10 @@ type ResticRepoInfo struct {
 	Packs      int       `json:"packs"`
 	Snapshots  int       `json:"snapshots"`
 	ModTime    time.Time `json:"mod_time"`
+	// Dumps is what a streaming instance has instead of a repository: rotated copies of
+	// the payload, one per successful run. Without it such an instance reads as having no
+	// backups at all, when in fact it has every one it was told to keep (dumps.go).
+	Dumps DumpStats `json:"dumps"`
 }
 
 // resticRepoInfo measures a repository on disk. Size is computed on demand rather than
@@ -410,6 +414,13 @@ func (s *Server) handleRepoInfo(w http.ResponseWriter, r *http.Request) {
 	info, err := s.resticRepoInfo(id)
 	if err != nil {
 		s.log.Printf("repo info %s: %v", id, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// A streaming instance keeps dumps, not a repository; report both so one endpoint
+	// answers "what does this instance actually have stored" whichever kind it is.
+	if info.Dumps, err = s.store.InstanceDumpStats(id); err != nil {
+		s.log.Printf("dump stats %s: %v", id, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

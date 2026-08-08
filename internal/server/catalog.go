@@ -104,3 +104,12 @@ func (e *ScriptEntry) readArtifact() (content []byte, sha string, err error) {
 	sum := sha256.Sum256(content)
 	return content, hex.EncodeToString(sum[:]), nil
 }
+
+// effectiveManifestCapture is what a script's stdout is before any instance has a say.
+// Exposed to the web UI so a form can offer dump retention only where dumps exist.
+func effectiveManifestCapture(m *jobspec.Manifest) string {
+	if m.Capture == proto.CaptureStream {
+		return proto.CaptureStream
+	}
+	return proto.CaptureLog
+}

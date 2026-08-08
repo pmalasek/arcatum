@@ -130,6 +130,12 @@ func (s *Server) handleDownloadRunData(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := os.Open(s.store.DataPath(runID))
 	if os.IsNotExist(err) {
+		// Telling these two apart matters: one means the job never produced a payload,
+		// the other that retention did its job exactly as configured.
+		if run.DataPruned {
+			http.Error(w, "this run's dump has been rotated away by retention", http.StatusGone)
+			return
+		}
 		http.Error(w, "this run has no backup data", http.StatusNotFound)
 		return
 	}

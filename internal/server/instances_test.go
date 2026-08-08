@@ -313,6 +313,96 @@ func TestUpdateInstanceChangesSecret(t *testing.T) {
 	}
 }
 
+// Copying an instance is how a second database on the same server gets configured: the
+// form can only send secrets back masked, so the copy has to pick them up from the source
+// rather than make the operator retype every password.
+func TestCreateInstanceCopyFrom(t *testing.T) {
+	srv := instanceAPIServer(t)
+	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance()); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d", rec.Code)
+	}
+
+	// Exactly what the form sends for a copy: the source's values, the secret masked, a
+	// new id and the one parameter that actually differs.
+	payload := validInstance()
+	payload["id"] = "mysql-web01-orders"
+	payload["copy_from"] = "mysql-web01"
+	payload["secrets"] = map[string]string{"password": redactedSecret}
+	payload["params"] = map[string]string{"host": "127.0.0.1", "database": "orders"}
+	rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("copy = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+
+	copied, err := srv.store.Instance("mysql-web01-orders")
+	if err != nil || copied == nil {
+		t.Fatalf("Instance: %v", err)
+	}
+	if copied.Secrets["password"] != "hunter2" {
+		t.Errorf("password = %q, want the source's value", copied.Secrets["password"])
+	}
+	if copied.Params["database"] != "orders" {
+		t.Errorf("database = %q, want the value the copy was given", copied.Params["database"])
+	}
+	// The source is untouched and both are scheduled.
+	source, _ := srv.store.Instance("mysql-web01")
+	if source.Params["database"] != "shop" {
+		t.Errorf("source database = %q, want it left alone", source.Params["database"])
+	}
+	if _, ok := srv.sched.NextRun("mysql-web01-orders"); !ok {
+		t.Error("a copied instance must be scheduled straight away")
+	}
+}
+
+// A copy may switch script, and the source's secrets then belong to parameters the new
+// script does not declare. Dragging them along would fail validation on a name the
+// operator never typed; the copy takes only what it asked for.
+func TestCreateInstanceCopyToOtherScript(t *testing.T) {
+	srv := instanceAPIServer(t)
+	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance()); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d", rec.Code)
+	}
+
+	payload := map[string]any{
+		"id":        "files-web01",
+		"copy_from": "mysql-web01",
+		"script":    "files-backup",
+		"runner_id": "web-01",
+		"params":    map[string]string{"paths": "/etc"},
+		"secrets":   map[string]string{"restic_password": "a-real-one"},
+		"schedule":  map[string]any{"frequency": "daily", "time": "02:30"},
+	}
+	rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("copy = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	copied, _ := srv.store.Instance("files-web01")
+	if _, ok := copied.Secrets["password"]; ok {
+		t.Error("the copy kept a secret belonging to the source's script")
+	}
+	if copied.Secrets["restic_password"] != "a-real-one" {
+		t.Errorf("restic_password = %q, want the supplied value", copied.Secrets["restic_password"])
+	}
+}
+
+// A copy of something that is not there must say so, not create an instance with whatever
+// secrets the payload happened to carry.
+func TestCreateInstanceCopyFromUnknown(t *testing.T) {
+	srv := instanceAPIServer(t)
+	payload := validInstance()
+	payload["copy_from"] = "nope"
+	rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("copy from unknown = %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "nope") {
+		t.Errorf("error %q should name the missing source", rec.Body.String())
+	}
+	if got, _ := srv.store.Instance("mysql-web01"); got != nil {
+		t.Error("the instance was created despite the unknown source")
+	}
+}
+
 // A changed schedule must apply without a restart.
 func TestUpdateInstanceRetracksSchedule(t *testing.T) {
 	srv := instanceAPIServer(t)

@@ -162,34 +162,120 @@ async function cancelRun(runID) {
   }
 }
 
+// syncRows překreslí tělo tabulky po řádcích místo toho, aby ho celé zahodilo a postavilo
+// znovu. Řádek, jehož obsah se nezměnil, tak zůstane i s tlačítkem — obnovování každých
+// pár sekund jinak mizí a znovu vzniká přesně pod kurzorem, kterým na to tlačítko míříš.
+//
+// keyOf říká, co je tentýž řádek napříč obnoveními; htmlOf vyrábí jeho buňky; initRow
+// dostane nově vzniklý řádek, aby mu doplnil to, co se s obsahem nemění (třída, data-*).
+function syncRows(body, items, keyOf, htmlOf, initRow) {
+  const existing = new Map();
+  for (const tr of [...body.children]) {
+    if (tr.dataset.key === undefined) tr.remove(); // „načítám…" a podobné výplně
+    else existing.set(tr.dataset.key, tr);
+  }
+  let prev = null;
+  for (const item of items) {
+    const key = String(keyOf(item));
+    const html = htmlOf(item);
+    let tr = existing.get(key);
+    if (tr) {
+      existing.delete(key);
+      if (tr.dataset.html !== html) {
+        tr.innerHTML = html;
+        tr.dataset.html = html;
+      }
+    } else {
+      tr = document.createElement('tr');
+      tr.dataset.key = key;
+      tr.dataset.html = html;
+      tr.innerHTML = html;
+      if (initRow) initRow(tr, item);
+    }
+    const want = prev ? prev.nextSibling : body.firstChild;
+    if (tr !== want) body.insertBefore(tr, want);
+    prev = tr;
+  }
+  for (const tr of existing.values()) tr.remove();
+}
+
+// markRowStale zahodí zapamatované html řádku, do kterého se sáhlo ručně — třeba když se
+// vypnulo tlačítko. Bez toho by ho syncRows viděl jako nezměněný a nechal ho tak už
+// natrvalo.
+function markRowStale(node) {
+  const tr = node.closest('tr');
+  if (tr) delete tr.dataset.html;
+}
+
+// Údaj o repozitáři je zvláštní dotaz na každou instanci a trvá tak dlouho, jak dlouho
+// trvá sáhnout na repozitář. Drží se proto stranou a obnovuje se vlastním, pomalejším
+// tempem: znovu ho tahat s každým obnovením seznamu znamenalo, že sloupec projel přes
+// „…" zpátky na hodnotu a tabulka u toho přeskakovala na šířku.
+const REPO_REFRESH_MS = 60000;
+const repoCache = new Map(); // instance id -> { text, at }
+let instanceList = [];       // poslední načtený seznam, aby šel překreslit i bez dotazu
+
 async function loadInstances() {
-  const list = await api('/instances');
+  instanceList = (await api('/instances')) || [];
+  renderInstances();
+  refreshRepoInfo();
+}
+
+function renderInstances() {
   const body = el('instances-body');
-  if (!list || list.length === 0) {
+  if (instanceList.length === 0) {
     body.innerHTML = '<tr><td colspan="6" class="empty">žádné instance</td></tr>';
     return;
   }
-  body.innerHTML = list.map((i) => `
-    <tr class="clickable" data-instance="${esc(i.id)}">
+  syncRows(body, instanceList, (i) => i.id, (i) => {
+    const repo = repoCache.get(i.id);
+    return `
       <td class="mono">${esc(i.id)}</td>
       <td>${esc(i.script)}</td>
       <td>${esc(i.runner_id)}</td>
       <td>${fmtTime(i.next_run)}</td>
-      <td class="mono" data-repo="${esc(i.id)}">…</td>
-      <td><button class="action" data-trigger="${esc(i.id)}">spustit teď</button></td>
-    </tr>`).join('');
+      <td class="mono repo">${esc(repo ? repo.text : '…')}</td>
+      <td class="actions">
+        <button class="action" data-trigger="${esc(i.id)}">spustit teď</button>
+        <button class="action admin-only" data-copy="${esc(i.id)}">kopírovat</button>
+      </td>`;
+  }, (tr, i) => {
+    tr.className = 'clickable';
+    tr.dataset.instance = i.id;
+  });
+}
 
-  // Repository sizes are a separate call per instance; fill them in as they arrive.
-  for (const cell of body.querySelectorAll('[data-repo]')) {
-    const id = cell.dataset.repo;
-    api(`/instances/${encodeURIComponent(id)}/repo`)
-      .then((info) => {
-        cell.textContent = info.exists
-          ? `${fmtBytes(info.bytes)} · ${info.snapshots} snap.`
-          : '—';
-      })
-      .catch(() => { cell.textContent = '—'; });
+function refreshRepoInfo() {
+  const now = Date.now();
+  for (const inst of instanceList) {
+    const cached = repoCache.get(inst.id);
+    if (cached && now - cached.at < REPO_REFRESH_MS) continue;
+    // Zapsat hned, ať se na tutéž instanci nezeptáme znovu, dokud odpověď letí.
+    repoCache.set(inst.id, { text: cached ? cached.text : '…', at: now });
+    api(`/instances/${encodeURIComponent(inst.id)}/repo`)
+      .then((info) => setRepoText(inst.id, storedSummary(info)))
+      .catch(() => setRepoText(inst.id, '—'));
   }
+  // Smazané instance nemá smysl držet v paměti.
+  const live = new Set(instanceList.map((i) => i.id));
+  for (const id of [...repoCache.keys()]) {
+    if (!live.has(id)) repoCache.delete(id);
+  }
+}
+
+function setRepoText(id, text) {
+  repoCache.set(id, { text, at: Date.now() });
+  if (currentView === 'instances') renderInstances();
+}
+
+// storedSummary popisuje, co má instance uloženo. Souborové zálohy mají restic
+// repozitář, databázové rotované dumpy — bez druhé větve vypadá instance, která má
+// každou zálohu, jakou si vyžádala, jako by neměla žádnou.
+function storedSummary(info) {
+  if (info.exists) return `${fmtBytes(info.bytes)} · ${info.snapshots} snap.`;
+  const d = info.dumps;
+  if (d && d.count > 0) return `${fmtBytes(d.bytes)} · ${d.count} dump${d.count === 1 ? '' : 'ů'}`;
+  return '—';
 }
 
 // shortFp abbreviates a fingerprint; the full value is in the title attribute so it can
@@ -596,14 +682,29 @@ async function loadRestore() {
   }
 }
 
+// loadSnapshots rozhoduje, co se vlastně obnovuje. Souborová instance má restic
+// repozitář, který se prochází; databázová má rotované dumpy, kde je „obnova" prostě
+// stažení jednoho souboru. Bez téhle výhybky se u databáze jen ukázala chyba nad
+// repozitářem, který nikdy neexistoval.
 async function loadSnapshots() {
   const sel = el('restore-snapshot');
   el('restore-info').textContent = '';
+  el('restore-crumbs').innerHTML = '';
   if (!restore.instance) {
     sel.innerHTML = '<option value="">…</option>';
     return;
   }
   sel.innerHTML = '<option value="">načítám…</option>';
+  sel.disabled = false; // mohl ho vypnout předchozí výběr databázové instance
+
+  let info = null;
+  try {
+    info = await api(`/instances/${encodeURIComponent(restore.instance)}/repo`);
+  } catch (_) { /* rozhodne se podle snapshotů níž */ }
+  if (info && !info.exists && info.dumps && info.dumps.count > 0) {
+    await loadDumps();
+    return;
+  }
   let snaps;
   try {
     snaps = await api(`/instances/${encodeURIComponent(restore.instance)}/snapshots`);
@@ -626,6 +727,38 @@ async function loadSnapshots() {
   restore.path = (snaps[0].paths && snaps[0].paths[0]) || '/';
   el('restore-info').textContent = `${snaps.length} snapshot${snaps.length === 1 ? '' : 'ů'}`;
   await loadRestoreDir();
+}
+
+// loadDumps vypíše uložené dumpy instance. Dump je jeden neprůhledný artefakt — dovnitř
+// se nechodí, obnova je stáhnout ho celý — takže tu není co procházet.
+async function loadDumps() {
+  const sel = el('restore-snapshot');
+  const body = el('restore-body');
+  sel.innerHTML = '<option value="">— dumpy —</option>';
+  sel.disabled = true;
+
+  let dumps;
+  try {
+    dumps = await api(`/instances/${encodeURIComponent(restore.instance)}/dumps`);
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">${esc(err.message)}</td></tr>`;
+    return;
+  }
+  if (!dumps || dumps.length === 0) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">tato instance zatím nemá uložený žádný dump</td></tr>';
+    return;
+  }
+  const total = dumps.reduce((sum, d) => sum + d.bytes, 0);
+  el('restore-info').textContent =
+    `${dumps.length} dump${dumps.length === 1 ? '' : 'ů'} · ${fmtBytes(total)}`;
+  body.innerHTML = dumps.map((d) => `
+    <tr>
+      <td class="mono">${esc(d.run_id)}</td>
+      <td>dump</td>
+      <td class="num">${fmtBytes(d.bytes)}</td>
+      <td>${fmtTime(d.ended_at)}</td>
+      <td><a class="action" href="${API}/runs/${encodeURIComponent(d.run_id)}/data" download>stáhnout</a></td>
+    </tr>`).join('');
 }
 
 function renderCrumbs() {
@@ -711,7 +844,8 @@ el('restore-crumbs').addEventListener('click', async (e) => {
 // from the parameters the script declares, so a missing password or a mistyped name is
 // caught on save, and secrets are encrypted from the moment they are stored.
 let scriptsCache = null;
-let editing = null; // instance id being edited, null when creating
+let editing = null;     // instance id being edited, null when creating
+let copyingFrom = null; // instance the form was seeded from, null when not copying
 
 async function scripts() {
   if (!scriptsCache) scriptsCache = await api('/scripts');
@@ -764,11 +898,17 @@ function textRunnerField(current, hint) {
   return { html: `<input id="f-runner" value="${esc(current)}" placeholder="web-01">`, hint };
 }
 
-async function openInstanceForm(id) {
-  editing = id || null;
+// openInstanceForm otevře formulář nad instancí id, nebo prázdný, když je id null.
+// S opts.copy se id bere jako předloha: formulář se vyplní podle ní, ale zakládá se nová
+// instance — druhá databáze na tomtéž serveru se pak liší dvěma políčky, ne celým
+// vyplňováním znovu.
+async function openInstanceForm(id, opts) {
+  const copy = !!(opts && opts.copy) && !!id;
+  editing = copy ? null : (id || null);
+  copyingFrom = copy ? id : null;
   el('form-error').textContent = '';
-  el('form-title').textContent = id ? id : 'Nová instance';
-  el('form-delete').classList.toggle('hidden', !id);
+  el('form-title').textContent = copy ? `Kopie instance ${id}` : (id || 'Nová instance');
+  el('form-delete').classList.toggle('hidden', !editing);
   showView('instance-form');
 
   const list = await scripts();
@@ -781,10 +921,12 @@ async function openInstanceForm(id) {
   const runner = await runnerField(inst ? inst.runner_id : '');
 
   el('form-body').innerHTML =
-    fieldRow('id', id
-      ? `<input id="f-id" value="${esc(id)}" disabled>`
-      : '<input id="f-id" placeholder="mysql-web01">',
-      id ? 'id nelze změnit' : 'krátký identifikátor, používá se i jako název repozitáře')
+    fieldRow('id', editing
+      ? `<input id="f-id" value="${esc(editing)}" disabled>`
+      : `<input id="f-id" placeholder="${esc(copy ? id + '-2' : 'mysql-web01')}">`,
+      editing ? 'id nelze změnit'
+        : (copy ? `nové id — zbytek je předvyplněný podle ${id}, včetně hesel`
+          : 'krátký identifikátor, používá se i jako název repozitáře'))
     + fieldRow('skript', `<select id="f-script">${list.map((sc) =>
         `<option value="${esc(sc.name)}"${sc.name === chosen ? ' selected' : ''}>${esc(sc.name)} (${esc(sc.type)})</option>`).join('')}</select>`)
     + fieldRow('runner', runner.html, runner.hint)
@@ -799,10 +941,35 @@ async function openInstanceForm(id) {
         <input id="f-tz" value="${esc(inst ? inst.schedule.timezone || '' : '')}" placeholder="Europe/Prague" size="16">`,
         'weekdays platí pro weekly, den pro monthly')
     + fieldRow('timeout', `<input id="f-timeout" value="${esc(inst ? inst.timeout : '')}" placeholder="1h" size="8">`)
+    + fieldRow('retence záloh', `
+        <input id="f-keep-last" type="number" min="0" value="${keepDefault(inst, 'keep_last', 7)}" size="4">
+        <span class="hint">posledních</span>
+        <input id="f-keep-days" type="number" min="0" value="${keepDefault(inst, 'keep_days', 0)}" size="4">
+        <span class="hint">dnů</span>`,
+        'platí jen pro skripty, které streamují data (dump databáze); 0 = neomezeně, '
+        + 'obojí najednou znamená „aspoň tolik kopií a aspoň tak staré"')
     + '<div id="f-params"></div>';
 
-  el('f-script').addEventListener('change', () => renderParams(inst));
+  el('f-script').addEventListener('change', () => { renderParams(inst); toggleRetention(); });
   renderParams(inst);
+  toggleRetention();
+  if (copy) el('f-id').focus(); // jediné, co kopii ještě chybí
+}
+
+// keepDefault předvyplní retenci u nové instance. U existující se nesahá na to, co je
+// uloženo — jinak by pouhé otevření formuláře začalo mazat zálohy.
+function keepDefault(inst, field, fallback) {
+  if (inst) return inst[field] || 0;
+  return fallback;
+}
+
+// toggleRetention schová retenci u skriptů, které žádné dumpy nevyrábějí. U restiku se
+// retence nastavuje parametry keep_daily/keep_weekly, které pouští runner.
+async function toggleRetention() {
+  const list = await scripts();
+  const sc = list.find((s) => s.name === el('f-script').value);
+  const row = el('f-keep-last').closest('.field');
+  if (row) row.classList.toggle('hidden', !sc || sc.capture !== 'stream');
 }
 
 // renderParams builds the inputs for whatever the selected script declares.
@@ -828,11 +995,20 @@ async function renderParams(inst) {
       p.required ? 'povinné' : 'nepovinné',
       p.secret ? 'secret' : '',
       p.default ? `default ${p.default}` : '',
+      // Hodnotu secretu API ven nepustí, takže i v kopii je na obrazovce jen maska —
+      // tohle říká, že se přesto přenese, a že ji lze přepsat.
+      (p.secret && same && copyingFrom) ? `převezme se z ${copyingFrom}` : '',
     ].filter(Boolean).join(' · ');
     return fieldRow(p.name,
       `<input data-param="${esc(p.name)}" data-secret="${p.secret}" value="${esc(value)}"`
       + `${p.secret ? ' placeholder="(nezměněno)"' : ''}>`, hint);
   }).join('');
+}
+
+// keepValue čte políčko retence; prázdné i nesmyslné znamená 0, tedy neomezeně.
+function keepValue(id) {
+  const n = parseInt(el(id).value, 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 function collectInstance() {
@@ -852,9 +1028,13 @@ function collectInstance() {
   const day = parseInt(el('f-day').value, 10);
   return {
     id: el('f-id').value.trim(),
+    // Podle předlohy server doplní secrety, které se do formuláře dostaly jen jako maska.
+    copy_from: copyingFrom || '',
     script: el('f-script').value,
     runner_id: el('f-runner').value.trim(),
     timeout: el('f-timeout').value.trim(),
+    keep_last: keepValue('f-keep-last'),
+    keep_days: keepValue('f-keep-days'),
     params, secrets,
     schedule: {
       frequency: el('f-freq').value,
@@ -1124,11 +1304,18 @@ document.addEventListener('click', async (e) => {
     cancelRun(stop.dataset.cancel);
     return;
   }
+  const copy = e.target.closest('[data-copy]');
+  if (copy) {
+    e.stopPropagation(); // ať klik zároveň neotevře úpravu předlohy
+    await openInstanceForm(copy.dataset.copy, { copy: true });
+    return;
+  }
   const trigger = e.target.closest('[data-trigger]');
   if (trigger) {
     const id = trigger.dataset.trigger;
     trigger.disabled = true;
     trigger.textContent = 'zařazeno…';
+    markRowStale(trigger); // ať se řádek při dalším obnovení postaví načisto
     try {
       await api(`/instances/${encodeURIComponent(id)}/run`, { method: 'POST' });
       // The job starts at the runner's next check-in; the Runs tab will show it.

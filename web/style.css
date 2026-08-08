@@ -165,6 +165,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.mono, .mono { font-family: var(--mono); font-size: .85em; }
 .empty { color: var(--muted); text-align: center; padding: 1.5rem; }
 
+/* Instance: údaj o repozitáři přichází až po zbytku řádku a mění šířku. Volné místo
+   proto dostane právě ten sloupec — ostatní si drží šířku podle obsahu a tlačítka vpravo
+   zůstanou při obnovení tam, kam na ně člověk míří. */
+#view-instances th:nth-child(5) { width: 100%; }
+
 .badge {
   display: inline-block;
   padding: .1rem .5rem;

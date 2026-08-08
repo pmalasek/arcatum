@@ -58,14 +58,15 @@ func (s *Store) SaveInstance(in *Instance, mustBeNew bool) error {
 		return err
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO instances (id, script, runner_id, params, secrets, capture, timeout, schedule)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO instances (id, script, runner_id, params, secrets, capture, timeout, schedule,
+		  keep_last, keep_days)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  script=excluded.script, runner_id=excluded.runner_id, params=excluded.params,
 		  secrets=excluded.secrets, capture=excluded.capture, timeout=excluded.timeout,
-		  schedule=excluded.schedule`,
+		  schedule=excluded.schedule, keep_last=excluded.keep_last, keep_days=excluded.keep_days`,
 		in.ID, in.Script, in.RunnerID, string(params), string(secrets),
-		in.Capture, in.Timeout, string(sched))
+		in.Capture, in.Timeout, string(sched), in.KeepLast, in.KeepDays)
 	return err
 }
 
@@ -107,11 +108,14 @@ func orEmptyMap(m map[string]string) map[string]string {
 // ScriptInfo describes a script and the parameters it accepts, so the web UI can render
 // a form instead of asking an operator to hand-write JSON.
 type ScriptInfo struct {
-	Name       string      `json:"name"`
-	Type       string      `json:"type"`
-	Entrypoint string      `json:"entrypoint,omitempty"`
-	Timeout    string      `json:"timeout,omitempty"`
-	Params     []ParamInfo `json:"params"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Entrypoint string `json:"entrypoint,omitempty"`
+	Timeout    string `json:"timeout,omitempty"`
+	// Capture tells the UI whether this script's stdout is the backup payload, which is
+	// what decides whether an instance of it has dumps to rotate (see dumps.go).
+	Capture string      `json:"capture"`
+	Params  []ParamInfo `json:"params"`
 }
 
 // ParamInfo is one declared parameter.
@@ -137,6 +141,7 @@ func (s *Server) handleListScripts(w http.ResponseWriter, r *http.Request) {
 			Type:       string(m.Type),
 			Entrypoint: m.Entrypoint,
 			Timeout:    m.Timeout,
+			Capture:    effectiveManifestCapture(m),
 			Params:     []ParamInfo{},
 		}
 		for _, p := range m.Params {
@@ -152,24 +157,45 @@ func (s *Server) handleListScripts(w http.ResponseWriter, r *http.Request) {
 
 // instancePayload is what the API accepts for an instance.
 type instancePayload struct {
-	ID       string            `json:"id"`
-	Script   string            `json:"script"`
-	RunnerID string            `json:"runner_id"`
+	ID       string `json:"id"`
+	Script   string `json:"script"`
+	RunnerID string `json:"runner_id"`
+	// CopyFrom names an instance to take secrets from when creating this one. Secrets
+	// leave the server only masked, so a copy made from what the API hands out would
+	// otherwise mean retyping every password the original already has.
+	CopyFrom string            `json:"copy_from"`
 	Params   map[string]string `json:"params"`
 	Secrets  map[string]string `json:"secrets"`
 	Capture  string            `json:"capture"`
 	Timeout  string            `json:"timeout"`
 	Schedule ScheduleJSON      `json:"schedule"`
+	KeepLast int               `json:"keep_last"`
+	KeepDays int               `json:"keep_days"`
 }
 
-// handleCreateInstance adds a new instance (admin only).
+// handleCreateInstance adds a new instance (admin only). With copy_from it starts from
+// another instance: everything visible the caller sends itself, and the secrets it can
+// only send back masked are taken from the named source.
 func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	var p instancePayload
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
 		writeError(w, http.StatusBadRequest, "bad request: "+err.Error())
 		return
 	}
-	in, err := s.instanceFromPayload(p, nil)
+	var source *Instance
+	if p.CopyFrom != "" {
+		var err error
+		if source, err = s.store.Instance(p.CopyFrom); err != nil {
+			s.log.Printf("instance copy source %q: %v", p.CopyFrom, err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if source == nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown source instance %q", p.CopyFrom))
+			return
+		}
+	}
+	in, err := s.instanceFromPayload(p, source)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -181,7 +207,12 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	if err := s.sched.Track(in, time.Now()); err != nil {
 		s.log.Printf("instance %q: schedule: %v", in.ID, err)
 	}
-	s.log.Printf("instance %q created (script=%s runner=%s)", in.ID, in.Script, in.RunnerID)
+	if source != nil {
+		s.log.Printf("instance %q created as a copy of %q (script=%s runner=%s)",
+			in.ID, source.ID, in.Script, in.RunnerID)
+	} else {
+		s.log.Printf("instance %q created (script=%s runner=%s)", in.ID, in.Script, in.RunnerID)
+	}
 	writeJSONStatus(w, http.StatusCreated, in.Redacted())
 }
 
@@ -237,7 +268,8 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 //
 // When updating, a secret left out — or sent back as the mask the API hands out — keeps
 // its stored value. Without that, loading a form and saving it would replace every
-// password with the string "***".
+// password with the string "***". A copy resolves its masked secrets the same way, only
+// against the instance it is copied from (existing is then that source).
 func (s *Server) instanceFromPayload(p instancePayload, existing *Instance) (*Instance, error) {
 	if err := validateInstanceID(p.ID); err != nil {
 		return nil, err
@@ -253,6 +285,11 @@ func (s *Server) instanceFromPayload(p instancePayload, existing *Instance) (*In
 		if _, err := time.ParseDuration(p.Timeout); err != nil {
 			return nil, fmt.Errorf("timeout %q: %w", p.Timeout, err)
 		}
+	}
+	// Retention of backup dumps. Negative would silently mean "keep everything", which is
+	// the opposite of what somebody typing -1 expects.
+	if p.KeepLast < 0 || p.KeepDays < 0 {
+		return nil, fmt.Errorf("keep_last and keep_days must not be negative")
 	}
 	// What stdout is comes from the script's manifest; this only lets an instance opt
 	// out of streaming (see effectiveCapture).
@@ -279,8 +316,9 @@ func (s *Server) instanceFromPayload(p instancePayload, existing *Instance) (*In
 		secrets[name] = value
 	}
 	// Secrets the payload does not mention at all are kept too, so a partial update does
-	// not quietly drop a password.
-	if existing != nil {
+	// not quietly drop a password. A copy takes only the secrets it asked for: the source
+	// may be running a different script, whose parameters the new one knows nothing about.
+	if existing != nil && existing.ID == p.ID {
 		for name, old := range existing.Secrets {
 			if _, mentioned := p.Secrets[name]; !mentioned {
 				secrets[name] = old
@@ -297,6 +335,8 @@ func (s *Server) instanceFromPayload(p instancePayload, existing *Instance) (*In
 		Capture:  p.Capture,
 		Timeout:  p.Timeout,
 		Schedule: p.Schedule,
+		KeepLast: p.KeepLast,
+		KeepDays: p.KeepDays,
 	}
 	// A dispatch carries the stored params and secrets verbatim, so a declared default has
 	// to be materialised here or it would never reach the runner: validation would pass on

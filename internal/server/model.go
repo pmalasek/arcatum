@@ -23,6 +23,12 @@ type Instance struct {
 	Capture  string            `json:"capture"`   // "" (follow the manifest) | "log" | "local"
 	Timeout  string            `json:"timeout"`   // overrides manifest default
 	Schedule ScheduleJSON      `json:"schedule"`
+	// KeepLast and KeepDays bound how many backup dumps this instance keeps, for a script
+	// that streams its payload (capture = "stream"). A dump is restored whole, so it is
+	// rotated rather than deduplicated. The two are a union — "at least this many, and at
+	// least this old" — and 0 for both keeps everything. See dumps.go.
+	KeepLast int `json:"keep_last"`
+	KeepDays int `json:"keep_days"`
 }
 
 // Redacted returns a copy safe to expose over the API or in logs: secret *names*
@@ -114,4 +120,7 @@ type Run struct {
 	// CancelRequested is set once an operator has asked for the run to stop. The UI uses
 	// it to show that a stop is on its way but the runner has not acted on it yet.
 	CancelRequested bool `json:"cancel_requested"`
+	// DataPruned says the backup payload has been rotated away by retention. DataBytes
+	// still reports what the run produced, so the history stays honest.
+	DataPruned bool `json:"data_pruned"`
 }

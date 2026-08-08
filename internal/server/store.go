@@ -191,13 +191,15 @@ func (s *Store) ImportInstances(path string, overwrite bool) (int, error) {
 			return 0, err
 		}
 		_, err = tx.Exec(`
-			INSERT INTO instances (id, script, runner_id, params, secrets, capture, timeout, schedule)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO instances (id, script, runner_id, params, secrets, capture, timeout, schedule,
+			  keep_last, keep_days)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(id) DO UPDATE SET
 			  script=excluded.script, runner_id=excluded.runner_id, params=excluded.params,
 			  secrets=excluded.secrets, capture=excluded.capture, timeout=excluded.timeout,
-			  schedule=excluded.schedule`,
-			in.ID, in.Script, in.RunnerID, string(params), string(secrets), in.Capture, in.Timeout, string(sched))
+			  schedule=excluded.schedule, keep_last=excluded.keep_last, keep_days=excluded.keep_days`,
+			in.ID, in.Script, in.RunnerID, string(params), string(secrets), in.Capture, in.Timeout, string(sched),
+			in.KeepLast, in.KeepDays)
 		if err != nil {
 			return 0, fmt.Errorf("upsert instance %q: %w", in.ID, err)
 		}
@@ -209,7 +211,7 @@ func (s *Store) ImportInstances(path string, overwrite bool) (int, error) {
 	return imported, nil
 }
 
-const instanceCols = `id, script, runner_id, params, secrets, capture, timeout, schedule`
+const instanceCols = `id, script, runner_id, params, secrets, capture, timeout, schedule, keep_last, keep_days`
 
 // sealValue encrypts one secret value with the primary master key. Without a keyring the
 // value is stored as-is (development mode).
@@ -362,7 +364,8 @@ func (s *Store) openSecrets(instanceID string, stored map[string]string) (map[st
 func (s *Store) scanInstance(sc interface{ Scan(...any) error }) (*Instance, error) {
 	var in Instance
 	var params, secrets, sched string
-	if err := sc.Scan(&in.ID, &in.Script, &in.RunnerID, &params, &secrets, &in.Capture, &in.Timeout, &sched); err != nil {
+	if err := sc.Scan(&in.ID, &in.Script, &in.RunnerID, &params, &secrets, &in.Capture, &in.Timeout, &sched,
+		&in.KeepLast, &in.KeepDays); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(params), &in.Params); err != nil {
@@ -635,20 +638,20 @@ func (s *Store) FinishRun(runID string, at time.Time, exitCode int, execErr stri
 }
 
 const runCols = `id, instance_id, runner_id, script, status, exit_code, bytes, data_bytes, ` +
-	`created_at, started_at, ended_at, err, timeout_sec, cancel_requested`
+	`created_at, started_at, ended_at, err, timeout_sec, cancel_requested, data_pruned`
 
 func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	var r Run
 	var id int64
 	var created, started, ended int64
 	var status string
-	var cancelRequested int
+	var cancelRequested, dataPruned int
 	if err := sc.Scan(&id, &r.InstanceID, &r.RunnerID, &r.Script, &status,
 		&r.ExitCode, &r.Bytes, &r.DataBytes, &created, &started, &ended, &r.Err,
-		&r.TimeoutSec, &cancelRequested); err != nil {
+		&r.TimeoutSec, &cancelRequested, &dataPruned); err != nil {
 		return nil, err
 	}
-	r.CancelRequested = cancelRequested != 0
+	r.CancelRequested, r.DataPruned = cancelRequested != 0, dataPruned != 0
 	r.ID = formatRunID(id)
 	r.Status = RunStatus(status)
 	r.CreatedAt = fromMillis(created)
@@ -764,6 +767,120 @@ func (s *Store) discardData(runID string) error {
 		return nil
 	}
 	return err
+}
+
+// --- stored dumps (payload retention, see dumps.go) --------------------------
+
+// InstanceDumps returns an instance's stored backup dumps, newest first. Only successful
+// runs appear: a payload is promoted on success and discarded otherwise, so anything else
+// has no file to offer. limit 0 means all of them.
+func (s *Store) InstanceDumps(instanceID string, limit int) ([]DumpInfo, error) {
+	q := `SELECT id, ended_at, data_bytes FROM runs
+	       WHERE instance_id = ? AND status = ? AND data_bytes > 0 AND data_pruned = 0
+	       ORDER BY id DESC`
+	args := []any{instanceID, string(StatusSuccess)}
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DumpInfo{}
+	for rows.Next() {
+		var id, ended, bytes int64
+		if err := rows.Scan(&id, &ended, &bytes); err != nil {
+			return nil, err
+		}
+		out = append(out, DumpInfo{RunID: formatRunID(id), EndedAt: fromMillis(ended), Bytes: bytes})
+	}
+	return out, rows.Err()
+}
+
+// DumpStats summarises what an instance currently has stored.
+type DumpStats struct {
+	Count int       `json:"count"`
+	Bytes int64     `json:"bytes"`
+	Last  time.Time `json:"last"`
+}
+
+// InstanceDumpStats reports how many dumps an instance holds and how much they weigh.
+func (s *Store) InstanceDumpStats(instanceID string) (DumpStats, error) {
+	var st DumpStats
+	var bytes, last *int64
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*), SUM(data_bytes), MAX(ended_at) FROM runs
+		 WHERE instance_id = ? AND status = ? AND data_bytes > 0 AND data_pruned = 0`,
+		instanceID, string(StatusSuccess)).Scan(&count, &bytes, &last)
+	if err != nil {
+		return st, err
+	}
+	st.Count = count
+	if bytes != nil {
+		st.Bytes = *bytes
+	}
+	if last != nil {
+		st.Last = fromMillis(*last)
+	}
+	return st, nil
+}
+
+// PrunableDumps returns the runs whose dumps have fallen outside an instance's retention,
+// oldest last. keepLast and keepDays are a union: a dump survives if it is among the most
+// recent keepLast, *or* if it is younger than keepDays. Zero disables that half; with
+// both zero nothing is ever prunable.
+func (s *Store) PrunableDumps(instanceID string, keepLast, keepDays int, now time.Time) ([]string, error) {
+	if keepLast <= 0 && keepDays <= 0 {
+		return nil, nil
+	}
+	dumps, err := s.InstanceDumps(instanceID, 0)
+	if err != nil {
+		return nil, err
+	}
+	var cutoff time.Time
+	if keepDays > 0 {
+		cutoff = now.AddDate(0, 0, -keepDays)
+	}
+	var out []string
+	for i, d := range dumps {
+		if keepLast > 0 && i < keepLast {
+			continue // among the most recent
+		}
+		if keepDays > 0 && d.EndedAt.After(cutoff) {
+			continue // still inside the time window
+		}
+		out = append(out, d.RunID)
+	}
+	return out, nil
+}
+
+// DeleteRunPayload removes a run's stored dump and returns how large it was. The run row
+// and its byte count stay: the history should still say what the run produced, so a
+// missing dump reads as "rotated away" rather than "never happened".
+func (s *Store) DeleteRunPayload(runID string) (int64, error) {
+	n, err := parseRunID(runID)
+	if err != nil {
+		return 0, err
+	}
+	var bytes int64
+	if err := s.db.QueryRow(`SELECT data_bytes FROM runs WHERE id = ?`, n).Scan(&bytes); err != nil {
+		return 0, err
+	}
+	if err := os.Remove(s.DataPath(runID)); err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	// The partial file cannot exist for a successful run, but a crash mid-upload could
+	// have left one behind under a different run; removing it here costs nothing.
+	if err := s.discardData(runID); err != nil {
+		return 0, err
+	}
+	if _, err := s.db.Exec(`UPDATE runs SET data_pruned = 1 WHERE id = ?`, n); err != nil {
+		return 0, err
+	}
+	return bytes, nil
 }
 
 // --- run output (files, not DB) ---------------------------------------------

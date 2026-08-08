@@ -5,6 +5,7 @@
     "runner_id": "REPLACE-WITH-RUNNER-HOSTNAME",
     "params": { "name": "hello-demo", "target": "db-server-01" },
     "secrets": { "token": "s3cr3t-abcdef" },
+    "keep_last": 7,
     "schedule": { "frequency": "daily", "time": "03:00", "timezone": "Europe/Prague" }
   },
   {

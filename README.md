@@ -823,6 +823,11 @@ už při uložení, takže nikde nezůstávají v plaintextu.
 Klik na řádek instance ji otevře k úpravě. U uloženého secretu se zobrazí `(nezměněno)`;
 když pole necháš prázdné, stará hodnota zůstane.
 
+**Kopie hotové instance** — tlačítko **kopírovat** u řádku otevře formulář předvyplněný
+podle ní. Druhá databáze na stejném serveru je pak otázka dvou políček: nové `id` a jiný
+název databáze. Hesla přebere server ze zdrojové instance — ven je nepustí ani do
+formuláře, takže je není kde opsat.
+
 Totéž přes API:
 
 ```sh
@@ -842,7 +847,21 @@ curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
 }'
 curl "${A[@]}" -X PUT    $API/instances/mysql-web01 -d '…'   # úprava
 curl "${A[@]}" -X DELETE $API/instances/mysql-web01          # smazání
+
+# kopie: "copy_from" doplní secrety ze zdrojové instance, ať je není nutné znát
+curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
+  "id": "mysql-web01-orders", "copy_from": "mysql-web01",
+  "script": "mysql-backup", "runner_id": "web-01",
+  "params":  { "host": "127.0.0.1", "port": "3306", "database": "orders", "user": "backup" },
+  "secrets": { "password": "***" },
+  "schedule": { "frequency": "daily", "time": "03:00" }
+}'
 ```
+
+`copy_from` platí jen pro vytvoření. Secret poslaný jako `"***"` nebo prázdný se vezme ze
+zdroje, jakákoli jiná hodnota ho přepíše; secret, který požadavek vůbec nezmíní, se
+nepřebírá (uplatní se default z manifestu, nebo to neprojde validací). Všechno ostatní je
+vždy to, co přišlo v požadavku — kopie tedy může běžet na jiném runneru i jiném rozvrhu.
 
 Rozvrh: `frequency` je `daily` | `weekly` | `monthly`; `weekdays` platí pro `weekly`,
 `day` (1–28) pro `monthly`. `timezone` je nepovinná — jinak platí default ze `server.toml`.
@@ -894,6 +913,7 @@ se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém
 | `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | čtení | zachycený výstup běhu |
 | `GET /api/v1/runs/{id}/tail?offset=N&stream=` | čtení | přírůstek výstupu — základ živého tailu |
 | `GET /api/v1/runs/{id}/data` | čtení | stažení payloadu zálohy (jen po úspěšném běhu) |
+| `GET /api/v1/instances/{id}/dumps` | čtení | uložené dumpy instance — obdoba snapshotů pro databáze |
 | `GET /api/v1/runners` | čtení | evidované runnery (stav, platforma, `last_seen`) |
 | `GET /api/v1/install` | čtení | příkaz, kterým se instaluje nový runner (adresa se skládá z hostu dotazu a bootstrap portu) |
 | `GET /api/v1/whoami` | čtení | kdo jsi, jak jsi se přihlásil, expirace certifikátů |
@@ -974,8 +994,14 @@ kdykoli nahlédnout i přímo na serveru. Chystá se dry-run režim.
 `mysql-backup`), píše na stdout samotný dump — ten do logu nepatří a neputuje tam.
 Uloží se vedle něj jako `runs/<run_id>/data.bin` a ve webu se nabídne ke stažení, kdežto
 log obsahuje jen jednu shrnující řádku a stderr. Logy mají strop 4 MiB na stream a mažou
-se podle `[storage] log_retention_success` / `log_retention_failed`; **zálohovaná data se
-retencí nemažou nikdy**. Detaily v [architektuře, §17](docs/architecture.md).
+se podle `[storage] log_retention_success` / `log_retention_failed`. Detaily
+v [architektuře, §17](docs/architecture.md).
+
+**Dumpy se rotují, nededuplikují.** Databázová záloha je jeden artefakt, který se
+obnovuje celý, takže se nedává do resticu — drží se posledních N (`keep_last`) a všechno
+mladší než D dnů (`keep_days`), obojí nastavené **na instanci**. Nula u obou znamená
+držet všechno; formulář nové instance předvyplňuje 7. Mazání běží hned po úspěšné záloze
+a pro jistotu ještě jednou za hodinu. Viz [§19](docs/architecture.md).
 
 Celá vývojová smyčka včetně spuštění skriptu nasucho mimo Arcatum a katalogu chybových
 zpráv: [Vývoj a ladění skriptů](docs/script-development.md).

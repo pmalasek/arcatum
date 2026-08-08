@@ -223,6 +223,8 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux, read, write guard) {
 	mux.HandleFunc("GET /api/v1/rotation", read(s.handleRotationStatus))
 	mux.HandleFunc("POST /api/v1/secrets/rekey", write(s.handleRekeySecrets))
 	mux.HandleFunc("GET /api/v1/instances/{id}/repo", read(s.handleRepoInfo))
+	// Stored dumps of a streaming instance — the restore view's equivalent of snapshots.
+	mux.HandleFunc("GET /api/v1/instances/{id}/dumps", read(s.handleListDumps))
 	// Restore: browse the repository the server already holds and pull files back out.
 	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots", read(s.handleSnapshots))
 	mux.HandleFunc("GET /api/v1/instances/{id}/snapshots/{snapshot}/ls", read(s.handleSnapshotLS))
@@ -384,6 +386,9 @@ func (s *Server) applyUpdate(u proto.RunUpdate) {
 		err = s.store.FinishRun(u.RunID, time.Now(), u.ExitCode, u.Error)
 		if err == nil {
 			s.log.Printf("run=%s finished exit=%d err=%q", u.RunID, u.ExitCode, u.Error)
+			// Off the update stream: rotating dumps means deleting files, and the runner
+			// is still holding this request open.
+			go s.pruneDumpsForRun(u.RunID)
 		}
 	}
 	if err != nil {
