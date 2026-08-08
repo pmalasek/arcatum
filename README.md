@@ -1161,7 +1161,8 @@ just                   # vypíše všechny recepty i s popisem
 | `just dev-init` | vytvoří `local/{data,backup}`, `local/server.toml` a `local/instances.json`, pokud chybí (a doplní do seedu hostname) |
 | `just server` | spustí server nad `local/` configem |
 | `just runner-once` / `just runner` | jeden cyklus runneru, nebo běh jako služba |
-| `just passwd [user] [role]` | nastaví heslo účtu webu a vypíše ho (default `admin`/`admin`) |
+| `just passwd [user]` | změní heslo účtu webu a vypíše ho (default `admin`) |
+| `just user-add <user> [role]` | vytvoří účet webu a vypíše jeho heslo (default role `viewer`) |
 | `just trigger [instance]` | vynutí spuštění instance (default `hello-demo`) |
 | `just runs`, `just instances`, `just runners`, `just status` | přehledy z API |
 | `just run-output <id> [stream]` | zachycený výstup běhu (přijme `run-1` i `1`) |
@@ -1185,6 +1186,7 @@ SERVER_CONFIG=local/server-mtls.toml just server
 LISTEN=0.0.0.0:8443 just dev-init           # dostupné i z jiného stroje (viz níže)
 WEB_LISTEN=0.0.0.0:8080 just dev-init       # totéž pro web UI
 ARCATUM_PASSWORD=tajneheslo just passwd petr # konkrétní heslo místo vygenerovaného
+ARCATUM_PASSWORD=tajneheslo just user-add kolega viewer # totéž při zakládání účtu
 ```
 
 > Vývojový config naslouchá jen na `127.0.0.1`, takže z jiného stroje se na server

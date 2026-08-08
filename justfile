@@ -90,9 +90,18 @@ dev-init:
 server config=server_cfg instances_file=instances:
 	{{go}} run ./cmd/server -config "{{config}}" -instances "{{instances_file}}"
 
-# Set (or create) a web account's password; prints a generated one. Use ARCATUM_PASSWORD
-# to choose it yourself, e.g. `ARCATUM_PASSWORD=tajneheslo just passwd petr`.
-passwd user="admin" role="admin" config=server_cfg:
+# Ends the account's sessions and re-enables it if it was disabled. ARCATUM_PASSWORD picks
+# the password instead of generating one: `ARCATUM_PASSWORD=tajneheslo just passwd petr`.
+# An account that does not exist yet is created as an admin — for a new account of another
+# role use `just user-add`.
+# Change a web account's password and print it (default admin).
+passwd user="admin" config=server_cfg:
+	{{go}} run ./cmd/server -config "{{config}}" -passwd "{{user}}"
+
+# ARCATUM_PASSWORD works here too. On an account that already exists this only resets the
+# password — the role is left alone, so this cannot silently promote a viewer to admin.
+# Create a web account with a role (viewer or admin) and print its password.
+user-add user role="viewer" config=server_cfg:
 	{{go}} run ./cmd/server -config "{{config}}" -passwd "{{user}}" -passwd-role "{{role}}"
 
 # Run runner once against local server.
