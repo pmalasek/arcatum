@@ -156,6 +156,17 @@
       <button id="new-user" class="action">přidat uživatele</button>
       <span class="hint">bez hesla ho server vygeneruje a jednorázově zobrazí</span>
     </div>
+    <!-- Nové heslo cizího účtu. Otevře se tlačítkem u uživatele: buď se zadá, nebo
+         nechá vygenerovat serverem. -->
+    <div id="pw-reset" class="section-foot hidden">
+      <span>nové heslo pro <b id="pw-reset-user" class="mono"></b>:</span>
+      <input id="pw-reset-value" type="password" placeholder="heslo (nejméně 8 znaků)"
+             autocomplete="new-password" size="22">
+      <button id="pw-reset-save" class="action">nastavit</button>
+      <button id="pw-reset-generate" class="action">vygenerovat</button>
+      <button id="pw-reset-cancel" class="ghost">zrušit</button>
+      <span class="hint">staré heslo přestane platit a přihlášení uživatele se ukončí</span>
+    </div>
     <div id="users-error" class="section-foot hidden"></div>
   </section>
 

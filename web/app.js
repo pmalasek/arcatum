@@ -505,6 +505,39 @@ async function updateUser(name, payload, note) {
   }
 }
 
+// Formulář pro nové heslo cizího účtu. Heslo se dá zadat ručně — vygenerování serverem
+// je jen jedna z možností, ne jediná cesta.
+function openPasswordReset(name) {
+  el('pw-reset-user').textContent = name;
+  el('pw-reset').dataset.user = name;
+  el('pw-reset').classList.remove('hidden');
+  el('pw-reset-value').value = '';
+  el('pw-reset-value').focus();
+  userNote('');
+}
+
+function closePasswordReset() {
+  el('pw-reset').classList.add('hidden');
+  el('pw-reset').dataset.user = '';
+  el('pw-reset-value').value = '';
+}
+
+// submitPasswordReset pošle zadané heslo, nebo si o vygenerování řekne serveru. Delší
+// kontrolu (minimální délku) dělá server, aby platila stejně pro API i UI.
+async function submitPasswordReset(generate) {
+  const name = el('pw-reset').dataset.user;
+  if (!name) return;
+  const value = el('pw-reset-value').value;
+  if (!generate && !value) {
+    userNote('zadej heslo, nebo ho nech vygenerovat', true);
+    el('pw-reset-value').focus();
+    return;
+  }
+  const payload = generate ? { generate_password: true } : { password: value };
+  closePasswordReset();
+  await updateUser(name, payload, `Heslo uživatele <b>${esc(name)}</b> změněno.`);
+}
+
 async function deleteUser(name) {
   try {
     await api(`/users/${encodeURIComponent(name)}`, { method: 'DELETE' });
@@ -905,6 +938,7 @@ function showView(name) {
     tab.classList.toggle('active', tab.dataset.view === name);
   }
   if (name === 'users') userNote('');
+  closePasswordReset(); // rozdělaná změna hesla se odchodem z tabulky zahazuje
   if (name !== 'detail') {
     stopTail();
     refresh();
@@ -1000,6 +1034,13 @@ el('open-account').addEventListener('click', () => {
 el('account-back').addEventListener('click', () => showView('runs'));
 el('pw-save').addEventListener('click', changeOwnPassword);
 el('new-user').addEventListener('click', createUser);
+el('pw-reset-save').addEventListener('click', () => submitPasswordReset(false));
+el('pw-reset-generate').addEventListener('click', () => submitPasswordReset(true));
+el('pw-reset-cancel').addEventListener('click', closePasswordReset);
+el('pw-reset-value').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') submitPasswordReset(false);
+  if (e.key === 'Escape') closePasswordReset();
+});
 
 el('back').addEventListener('click', () => showView('runs'));
 
@@ -1064,10 +1105,7 @@ document.addEventListener('click', async (e) => {
   // Správa uživatelů: nové heslo, změna role, vypnutí/zapnutí, smazání.
   const reset = e.target.closest('[data-reset]');
   if (reset) {
-    const name = reset.dataset.reset;
-    if (!confirm(`Vygenerovat nové heslo pro "${name}"?\n\n`
-      + 'Staré heslo přestane platit a jeho přihlášení se ukončí.')) return;
-    await updateUser(name, { generate_password: true });
+    openPasswordReset(reset.dataset.reset);
     return;
   }
   const roleBtn = e.target.closest('[data-role]');
