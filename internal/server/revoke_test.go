@@ -97,9 +97,8 @@ func TestRevokeSendsRunnerBackToPending(t *testing.T) {
 func TestRevokedRunnerLosesRepositoryAccess(t *testing.T) {
 	srv, _ := enrollTestServer(t, true)
 	// The fixture's instance targets web-01.
-	path := writeInstances(t, t.TempDir(), []*Instance{{
-		ID: "files-web01", Script: "files-backup", RunnerID: "web-01",
-		Schedule: ScheduleJSON{Frequency: "daily", Time: "01:30"},
+	path := writeInstances(t, t.TempDir(), []*seedInstance{{
+		Instance: Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"},
 	}})
 	if _, err := srv.store.ImportInstances(path, true); err != nil {
 		t.Fatalf("ImportInstances: %v", err)

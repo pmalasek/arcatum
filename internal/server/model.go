@@ -10,10 +10,10 @@ import (
 	"arcatum/pkg/schedule"
 )
 
-// Instance binds a script definition to one runner with concrete parameters and a
-// schedule. In this stage instances are loaded from a JSON file; later they live in
-// the DB and are managed via the web UI. Secrets are plaintext here — encryption at
-// rest lands with the DB.
+// Instance binds a script definition to one runner with concrete parameters. It is the
+// definition of a task — what to back up, with which script, on which host — and says
+// nothing about when it runs: that is Schedule, of which an instance may have several.
+// An instance with no schedule at all is legal and is run on demand.
 type Instance struct {
 	ID       string            `json:"id"`
 	Script   string            `json:"script"`    // manifest name
@@ -22,7 +22,6 @@ type Instance struct {
 	Secrets  map[string]string `json:"secrets"`   // secret -> temp file on the runner
 	Capture  string            `json:"capture"`   // "" (follow the manifest) | "log" | "local"
 	Timeout  string            `json:"timeout"`   // overrides manifest default
-	Schedule ScheduleJSON      `json:"schedule"`
 	// KeepLast and KeepDays bound how many backup dumps this instance keeps, for a script
 	// that streams its payload (capture = "stream"). A dump is restored whole, so it is
 	// rotated rather than deduplicated. The two are a union — "at least this many, and at
@@ -45,7 +44,25 @@ func (i *Instance) Redacted() *Instance {
 	return &copyInst
 }
 
-// ScheduleJSON is the on-disk form of a schedule.
+// Schedule is one "when" for one instance. An instance may have several: a nightly
+// incremental and a full copy once a month are two schedules of the same task, not two
+// tasks. Splitting them out of the instance is what makes that possible, and what lets a
+// schedule be paused without touching the backup it belongs to.
+type Schedule struct {
+	ID         string `json:"id"` // "sch-<n>"
+	InstanceID string `json:"instance_id"`
+	Name       string `json:"name,omitempty"` // operator's label, e.g. "nightly"
+	// The timing itself, flattened into the same JSON object.
+	ScheduleJSON
+	// Enabled false keeps the definition and stops it coming due. See scheduler.go.
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+}
+
+// ScheduleJSON is the timing half of a schedule: frequency, time of day and which days
+// it applies to. It is also the shape schedules had when they lived inside an instance,
+// so it is what an older config archive or seed file is read back through.
 type ScheduleJSON struct {
 	Frequency string   `json:"frequency"` // daily | weekly | monthly
 	Time      string   `json:"time"`      // HH:MM
@@ -101,10 +118,14 @@ const (
 
 // Run records one execution of an instance.
 type Run struct {
-	ID         string    `json:"id"`
-	InstanceID string    `json:"instance_id"`
-	RunnerID   string    `json:"runner_id"`
-	Script     string    `json:"script"`
+	ID         string `json:"id"`
+	InstanceID string `json:"instance_id"`
+	RunnerID   string `json:"runner_id"`
+	Script     string `json:"script"`
+	// ScheduleID is the schedule that caused this run; empty means somebody pressed
+	// "run now". Without it a task's history cannot say which of its schedules a run
+	// came from, which is the whole point of having more than one.
+	ScheduleID string    `json:"schedule_id,omitempty"`
 	Status     RunStatus `json:"status"`
 	ExitCode   int       `json:"exit_code"`
 	Bytes      int64     `json:"bytes"`      // log bytes received (stdout+stderr)

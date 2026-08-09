@@ -49,7 +49,7 @@ The README is a reference overview. Step-by-step procedures have their own docum
 
 Two components:
 
-- **arcatum-server** — the central brain. Holds the schedule, script definitions, the run
+- **arcatum-server** — the central brain. Holds the schedules, script definitions, the run
   database and the storage for backed-up data. Provides the API (and later the web UI).
 - **arcatum-runner** — a lightweight service on every backed-up server. Runs scripts and
   streams the result to the server.
@@ -78,25 +78,34 @@ only), which is firewall-friendly and shrinks the attack surface.
 
 The most important distinction in the whole system — a **template** and its **deployment**:
 
-| | **Script** (definition) | **Instance** (deployment) |
-|---|---|---|
-| What it is | template: code/binary + parameter manifest | a concrete deployment onto a single target |
-| Where it lives | `scripts/` — versioned in git | database (SQLite) |
-| Contains secrets | **no, never** | yes (encrypted in the DB) |
-| Schedule | no | **yes** |
-| Example | `mysql-backup` | `mysql-web01`, `mysql-web02`, … |
+| | **Script** (definition) | **Instance** (deployment) | **Schedule** (timing) |
+|---|---|---|---|
+| What it is | template: code/binary + parameter manifest | a concrete deployment onto a single target | when that deployment runs |
+| Where it lives | `scripts/` — versioned in git | database (SQLite) | database (SQLite) |
+| Contains secrets | **no, never** | yes (encrypted in the DB) | no |
+| How many | one per kind of backup | any number per script | **any number per instance** |
+| Example | `mysql-backup` | `mysql-web01`, `mysql-web02`, … | `nightly` 02:30, `monthly full` day 1 |
 
 So a single "MySQL backup" script serves any number of MySQL servers — each as a separate
-instance with its own credentials, database and run time.
+instance with its own credentials and database.
 
 An instance targets **exactly one runner**. One runner can host multiple instances.
-**More databases = more instances** (that gives each one an independent schedule, status
-and retry).
+**More databases = more instances** (that gives each one an independent status and retry).
+
+**When** a task runs is deliberately not part of the instance. One task often wants more
+than one timetable — a nightly dump *and* a full copy on the first of the month — and
+pausing the night run for a week must not mean editing the backup itself. So a schedule is
+a thing of its own, and an instance may have several, or none at all: an instance with no
+schedule is perfectly legal and runs when somebody presses **run now**.
+
+If two schedules of the same task come due in the same minute, the server dispatches
+**one** run, not two: they describe the same work, and two processes in one repository is
+not something a backup system should ever arrange for itself.
 
 ### Three levels of configuration
 
 1. **Script definition** — `scripts/<name>/<name>.toml` (git, no secrets)
-2. **Instance** — in the DB, seeded from `data/instances.json`
+2. **Instance and its schedules** — in the DB, seeded from `data/instances.json`
 3. **Host level** — `config/server.toml` and `config/runner.toml`
 
 ---
@@ -190,7 +199,9 @@ curl http://127.0.0.1:8443/api/v1/runs                   # list of runs
 curl http://127.0.0.1:8443/api/v1/runs/run-1/output      # captured output
 ```
 
-Or in the web UI at `http://127.0.0.1:8080/` — the **Runs** tab, then click a run.
+Or in the web UI at `http://127.0.0.1:8080/` — the **Dashboard** shows what is running and
+what failed in the last day; a task's full history is under **Instances** → the task →
+**run now** or the **history** button beside its schedule.
 
 The runner as a service (without `-once`) checks in repeatedly according to `poll_interval`.
 
@@ -625,7 +636,7 @@ The instance then determines what is backed up and for how long it is kept:
     "keep_monthly": "6"
   },
   "secrets": { "restic_password": "long-random-password" },
-  "schedule": { "frequency": "daily", "time": "01:30" }
+  "schedules": [{ "frequency": "daily", "time": "01:30" }]
 }
 ```
 
@@ -724,8 +735,9 @@ Overviews and run detail:
 
 | Tab | What it shows |
 |---|---|
-| **Runs** | history: status, **off-site transfer status**, exit code, transferred data, duration |
-| **Instances** | next run, restic repository size, **run now**; a click opens the editor, plus a **new instance** button |
+| **Dashboard** | the landing page: what is **running now**, what **failed in the last 24 hours**, and the **next runs** — plus a strip of counts (instances, schedules and how many are paused, running, failures, offline runners). Every row leads somewhere: to the failing run, or to the history of the task that is about to run |
+| **Instances** | script, runner, how many **schedules** the task has (or "on demand"), next run, restic repository size, **run now**; a click opens the editor, plus a **new instance** button |
+| **Schedules** | one row per schedule: which task, **when** it runs, its **state** (running / ok / failed / never / paused), its **last run** and its **next run**; **pause** or resume without losing the settings, **history** for that task, and a **new schedule** button |
 | **Restore** | snapshots, tree browsing, downloading a file or directory as a `.tar` |
 | **Keys** | rotation status of all three keys, secret re-encryption, CA migration progress |
 | **Runners** | status, platform, **build version**, certificate expiry, when it last checked in; **approve / reject / revoke** |
@@ -737,10 +749,22 @@ header. A viewer is not shown the buttons that change anything at all — and th
 rejects them anyway (403), so the UI matching real permissions is not a matter of trusting
 the browser.
 
+**A run is found beside the task it belongs to.** There is no flat list of everything the
+server has ever done: from an instance, a schedule row or a "run now" you land in that
+task's **run history**, newest first, loading more on request. That answers "how has this
+backup been doing" in one place, which a single mixed list never did. The flat list still
+exists over the API (`GET /api/v1/runs`) for the shell and the `/status` page.
+
 Clicking a run opens a **detail with a live tail of the output** — for a job in progress the
 log keeps filling in as it arrives. There is a `stdout`/`stderr` switch and a "follow"
 checkbox (automatic scrolling). Exactly what you were after when you asked to make script
 debugging easier: run it by hand and see immediately what the script prints.
+
+The UI is **responsive**. On a tablet the forms and metadata fold into one column and the
+tabs become a scrolling strip; on a phone the tables stop being tables and each row becomes
+a card with its column headings beside the values — because scrolling a table sideways to
+find out whether last night succeeded is exactly what makes a UI useless on the device you
+happen to have with you at seven in the morning.
 
 The live tail does not use websockets — the browser asks
 `GET /api/v1/runs/{id}/tail?offset=N` and the server sends only what has been added since the
@@ -865,10 +889,16 @@ A single zip with everything that together forms the server's settings:
 ```
 manifest.json     format, time, host, which secrets master keys are needed, checksums
 instances.json    instances including secrets — exactly as they sit in the database
+schedules.json    when each instance runs, including paused ones
 users.json        web accounts including password verifiers (PBKDF2), not the passwords
 runners.json      the runner registry: enrollment status, certificate, fingerprint
 server.toml       a copy of the config — for reference only, the import does not use it
 ```
+
+The manifest's `format` is **2**. Format 1 — written before timing moved out of the instance
+— is still importable: its inline schedules are lifted into schedules of their own on the way
+in. The archive somebody reaches for is the one exported before the server was lost, and
+refusing to read it because the layout has moved on would defeat the entire feature.
 
 What is **not** in the archive: runs, logs, dumps, restic repositories — and above all **no
 keys**. The CA key, the signing key and `secrets-master.key` do not belong in it: one such
@@ -885,9 +915,9 @@ The archive nevertheless contains operator password hashes. **It is not a public
 
 ### Restoring the configuration
 
-The import **replaces the whole configuration**: `instances`, `users` and `runners` are
-emptied and filled with the archive's contents, so whatever is not in the archive will not be
-on the server after the import either. All sessions are invalidated — after the import
+The import **replaces the whole configuration**: `instances`, `schedules`, `users` and
+`runners` are emptied and filled with the archive's contents, so whatever is not in the
+archive will not be on the server after the import either. All sessions are invalidated — after the import
 everyone, you included, logs in again.
 
 Runs, logs and backup data are **not deleted**. When an instance disappears from the
@@ -905,7 +935,9 @@ The import refuses an archive that would leave behind a state there is no way ou
 - no enabled `admin` account — nobody could get into the web UI
 - an instance referring to a script that is not on the server (the server would not come up
   after a restart)
-- a schedule the scheduler does not understand
+- a schedule the scheduler does not understand, or one that parses but never comes due
+- a schedule belonging to an instance the archive does not contain — a row that could never
+  run anything
 - secrets encrypted with a key this server does not have
 - a corrupted archive (the checksum does not match)
 
@@ -915,9 +947,9 @@ own door; whoever wants to change it does so by hand, with a restart at the read
 ### Wiping the server
 
 Deletes **all backups, dumps, logs and the entire run history** — that is `backup_dir/runs`,
-`backup_dir/restic` and the cache. Keys, users, instances and approved runners stay, so the
-server is immediately operational again, just without anything collected; run numbering
-starts over from `run-1`.
+`backup_dir/restic` and the cache. Keys, users, instances, their schedules and approved
+runners stay, so the server is immediately operational again, just without anything
+collected; run numbering starts over from `run-1`.
 
 Stored configuration archives (`backup_dir/config-backups`) are not deleted — they are ways
 back, and a reset is not the moment to throw them away.
@@ -1006,8 +1038,13 @@ the parameters the selected script declares, and the values are **validated agai
 manifest on save**: a missing password or a typo in a parameter name shows up right away, not
 during the nightly backup.
 
-Changes take effect **immediately, without restarting the server** — including a schedule
-change. Passwords are encrypted on save, so they are never left in plaintext anywhere.
+The form has no time fields: a new instance starts with **no schedule** and runs when you
+press **run now**. Give it one under **Schedules** → **new schedule** — as many as the task
+needs.
+
+Changes take effect **immediately, without restarting the server**, for the instance and for
+its schedules alike. Passwords are encrypted on save, so they are never left in plaintext
+anywhere.
 
 Clicking an instance row opens it for editing. A stored secret shows as `(unchanged)`; if you
 leave the field empty, the old value stays.
@@ -1030,36 +1067,60 @@ curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
   "runner_id": "web-01",
   "params":  { "host": "127.0.0.1", "port": "3306", "database": "shop", "user": "backup" },
   "secrets": { "password": "…" },
-  "timeout": "2h",
-  "schedule": { "frequency": "weekly", "time": "02:30",
-                "weekdays": ["mon","thu"], "timezone": "Europe/Prague" }
+  "timeout": "2h"
+}'
+# when it runs is a second, separate call — and a task may have several
+curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/schedules -d '{
+  "instance_id": "mysql-web01", "name": "nightly",
+  "frequency": "weekly", "time": "02:30",
+  "weekdays": ["mon","thu"], "timezone": "Europe/Prague"
 }'
 curl "${A[@]}" -X PUT    $API/instances/mysql-web01 -d '…'   # edit
-curl "${A[@]}" -X DELETE $API/instances/mysql-web01          # delete
+curl "${A[@]}" -X DELETE $API/instances/mysql-web01          # delete, schedules included
 
 # copy: "copy_from" fills in the secrets from the source instance, so you do not need to know them
 curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
   "id": "mysql-web01-orders", "copy_from": "mysql-web01",
   "script": "mysql-backup", "runner_id": "web-01",
   "params":  { "host": "127.0.0.1", "port": "3306", "database": "orders", "user": "backup" },
-  "secrets": { "password": "***" },
-  "schedule": { "frequency": "daily", "time": "03:00" }
+  "secrets": { "password": "***" }
 }'
 ```
 
 `copy_from` applies to creation only. A secret sent as `"***"` or empty is taken from the
 source, any other value overwrites it; a secret the request does not mention at all is not
 carried over (the manifest default applies, or it fails validation). Everything else is
-always what came in the request — so a copy can run on a different runner and a different
-schedule.
+always what came in the request — so a copy can run on a different runner. **Schedules are
+not copied**: a copy starts with none, and its timetable is a decision of its own.
 
-Schedule: `frequency` is `daily` | `weekly` | `monthly`; `weekdays` applies to `weekly`,
-`day` (1–28) to `monthly`. `timezone` is optional — otherwise the default from `server.toml`
-applies.
-
-> **Deleting an instance does not delete the backups.** Only the configuration is removed;
-> the restic repository stays on disk. When you really want it gone, delete it manually from
+> **Deleting an instance does not delete the backups.** The configuration is removed and its
+> schedules go with it — a schedule outliving its task is a row that can never run anything.
+> The restic repository stays on disk; when you really want it gone, delete it manually from
 > `backup_dir/restic/<instance>/`.
+
+### Schedules
+
+```sh
+curl "${A[@]}" $API/schedules                              # all of them, with state and next run
+curl "${A[@]}" $API/instances/mysql-web01/schedules        # just this task's
+curl "${A[@]}" -X PUT $API/schedules/sch-1 -d '{"enabled": false}'   # pause
+curl "${A[@]}" -X DELETE $API/schedules/sch-1                        # delete
+```
+
+`frequency` is `daily` | `weekly` | `monthly`; `weekdays` applies to `weekly`, `day` (1–28)
+to `monthly` — never above 28, or the schedule would skip February. `timezone` is optional;
+otherwise the default from `server.toml` applies. `name` is a label, so several schedules of
+one task can be told apart. A frequency the server does not recognise is **refused on save**
+rather than accepted into a schedule that silently never comes due.
+
+**Pausing** (`enabled: false`) keeps the definition and stops it coming due. Prefer it to
+deleting and retyping a week later: that is how a schedule comes back subtly different from
+the one that was working.
+
+Each schedule reports a **state**: `running` (a run of that task is in flight), `ok`,
+`failed`, `never` (it has not run yet) or `paused`. Runs record which schedule caused them,
+so a task's history says whether it was the nightly or the monthly one — and a manual "run
+now" belongs to no schedule and is never reported as one's outcome.
 
 ### The seed file `data/instances.json`
 
@@ -1067,6 +1128,27 @@ It remains as the **initial** fill: at startup only instances that do not exist 
 created from it. Existing ones are **not overwritten**, otherwise a server restart would
 revert changes made from the web UI every time. Overwriting can be forced with the
 `-import-force` flag.
+
+An entry may carry the schedules it starts with:
+
+```json
+{
+  "id": "hello-demo", "script": "hello", "runner_id": "web-01",
+  "params": { "name": "hello-demo" },
+  "schedules": [
+    { "frequency": "daily",   "time": "03:00", "timezone": "Europe/Prague" },
+    { "frequency": "monthly", "time": "23:00", "day": 1 }
+  ]
+}
+```
+
+The older singular `"schedule": { … }` is still accepted, so a seed file sitting on an
+existing server does not have to be rewritten.
+
+> **Schedules are only applied to an instance the import actually created.** For an instance
+> that already exists nothing happens — deliberately, because otherwise every restart would
+> re-create a schedule an operator had deleted. With `-import-force` the instance's schedules
+> are **replaced** by the seed's rather than added to them.
 
 Careful: the file contains passwords in plaintext, which is why it is in `.gitignore`. When
 you manage instances from the web UI, you can happily delete it once it has been imported.
@@ -1096,12 +1178,20 @@ web port always applies.
 | `POST /api/v1/instances/{id}/run` | admin | **manual trigger** ("run now") |
 | `POST /api/v1/runs/{id}/cancel` | admin | **stops a run** — the runner picks it up within a few seconds |
 | `GET /api/v1/runs/{id}/cancel` | runner | a running job asking whether it should stop |
-| `GET /api/v1/instances` | read | instances including `next_run` (secrets masked) |
-| `POST /api/v1/instances` | admin | creates an instance (validated against the manifest) |
+| `GET /api/v1/dashboard` | read | the overview in one request: counts, what is running, failures in the last 24 h, the next runs |
+| `GET /api/v1/instances` | read | instances with `next_run` (the earliest across their **enabled** schedules) and how many schedules each has (secrets masked) |
+| `POST /api/v1/instances` | admin | creates an instance (validated against the manifest) — no timing, that is a schedule |
 | `PUT /api/v1/instances/{id}` | admin | edits an instance |
-| `DELETE /api/v1/instances/{id}` | admin | deletes an instance (the backups stay) |
+| `DELETE /api/v1/instances/{id}` | admin | deletes an instance **and its schedules** (the backups stay) |
+| `GET /api/v1/schedules` | read | every schedule with its state, last run and next run |
+| `POST /api/v1/schedules` | admin | adds a schedule to an instance |
+| `GET /api/v1/schedules/{id}` | read | one schedule |
+| `PUT /api/v1/schedules/{id}` | admin | edits a schedule, or pauses it with `{"enabled": false}` |
+| `DELETE /api/v1/schedules/{id}` | admin | deletes a schedule (the task and its backups stay) |
+| `GET /api/v1/instances/{id}/schedules` | read | the schedules of one task |
+| `GET /api/v1/instances/{id}/runs?limit=&offset=` | read | **one task's run history**, newest first, with `has_more` for the next page |
 | `GET /api/v1/scripts` | read | scripts and the parameters they declare |
-| `GET /api/v1/runs?limit=N` | read | run history, newest first |
+| `GET /api/v1/runs?limit=N` | read | the flat run history, newest first — for the shell and `/status`; the UI reads history per task |
 | `GET /api/v1/runs/{id}` | read | detail of a single run |
 | `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | read | captured output of a run |
 | `GET /api/v1/runs/{id}/tail?offset=N&stream=` | read | the increment of the output — the basis of the live tail |
@@ -1169,7 +1259,7 @@ overwrite another's results.
 
 ## Debugging scripts
 
-The most convenient way is the [web UI](#web-ui): the **Instances** tab → **run now**, then
+The most convenient way is the [web UI](#web-ui): the **Instances** tab → **run now**, which drops you into that task's history — then
 click the run and watch the live tail of the output. The same from a shell:
 
 ```sh
@@ -1451,8 +1541,8 @@ an endpoint / column / script type, tests and debugging:
 
 **Done:**
 - The pull protocol end to end: checkin → job delivery → execution → output streamed to the server
-- Schedule (daily/weekly/monthly) + manual trigger
-- Persistence in SQLite (instances, runs, the runner registry) — survives a restart
+- Schedules as an entity of their own: several per task (daily/weekly/monthly), pausable, plus a manual trigger
+- Persistence in SQLite (instances, schedules, runs, the runner registry) — survives a restart
 - Three levels of configuration, a manifest declaring parameters
 - **mTLS** between the server and the runners, identity and role from the certificate, PKI tooling
 - **Job signing** (Ed25519) — the runner verifies before running, and refuses otherwise
@@ -1460,7 +1550,7 @@ an endpoint / column / script type, tests and debugging:
 - **File backups through restic** — the repository on the server (our own restic REST
   backend), dedup and incremental snapshots, repository isolation between runners
 - **Retention (GFS)** — `forget --prune` after a successful backup, restricted to its own snapshots
-- **A web UI** embedded in the binary — runs, instances, runners, a **live tail of the output**, "run now"
+- **A web UI** embedded in the binary, **responsive** — a dashboard, instances, schedules, per-task run history, runners, a **live tail of the output**, "run now"
 - **Web login with a username and password** on its own port, `admin`/`viewer` roles, account
   management from the web UI (PBKDF2 hashes, sessions in a cookie); runners stay on certificates
 - **One-command installation** (`install.sh`) and **enrollment** — the runner generates its own

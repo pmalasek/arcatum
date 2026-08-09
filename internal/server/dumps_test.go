@@ -21,7 +21,7 @@ func dumpServer(t *testing.T) *Server {
 // ended at the given time.
 func storeDump(t *testing.T, st *Store, instanceID string, endedAt time.Time, size int) *Run {
 	t.Helper()
-	run, err := st.CreateRun(&Instance{ID: instanceID, Script: "mysql-backup", RunnerID: "db-01"}, 3600)
+	run, err := st.CreateRun(&Instance{ID: instanceID, Script: "mysql-backup", RunnerID: "db-01"}, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}

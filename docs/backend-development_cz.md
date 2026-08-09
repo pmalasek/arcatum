@@ -197,11 +197,16 @@ runner: Agent.Tick                      internal/runner/loop.go
                                          │    identitu bere z CN certifikátu, ne z požadavku
                                          ├─ store.RecordCheckin      internal/server/store.go
                                          ├─ store.InstancesForRunner
-                                         ├─ sched.Due                internal/server/scheduler.go
-                                         └─ buildDispatch            internal/server/http.go:207
+                                         ├─ sched.DueFor             internal/server/scheduler.go
+                                         │    → id dozrálých rozvrhů + příznak ručního běhu;
+                                         │      víc dozrálých naráz dá pořád JEDEN běh, připsaný
+                                         │      tomu nejstaršímu, a posunou se všechny
+                                         └─ buildDispatch(in, scheduleID)  internal/server/http.go
                                               ├─ catalog.Get + readArtifact  (SHA-256 artefaktu)
-                                              ├─ store.CreateRun     → status "pending"
+                                              ├─ store.CreateRun     → status "pending", schedule_id
                                               └─ signer.Sign(d.SigningBytes())
+                                         (pak sched.MarkDispatched na každý rozvrh,
+                                          sched.ClearManual u „run now")
   ◄──── CheckinResponse{Due: […]} ─────┘
   ├─ verifyDispatch                     internal/runner/loop.go:56   podpis PŘED spuštěním
   ├─ Execute                            internal/runner/executor.go
@@ -268,6 +273,29 @@ tam, kde chybí, takže existující databáze se upgraduje na místě. **Nemě�
 v `schemaSQL` a dej sloupci default, který nechá starší data funkční (viz enrollment
 sloupce: default `approved`, aby ručně vydané certifikáty dál fungovaly).
 
+### Nový index a nová tabulka
+
+Index nad sloupcem, který přidal `addColumns`, patří do **`postMigrateSQL`**, nikdy do
+`schemaSQL`: schéma se aplikuje *před* migrací, takže takový index by spadl na každé databázi
+starší než ten sloupec. Celá nová tabulka jde do `schemaSQL` jako dřív — je to
+`CREATE TABLE IF NOT EXISTS`, což je bezpečné všude.
+
+### Přesun dat, ne jen schématu
+
+Když změna musí *přesunout* data — rozdělení rozvrhů bylo první taková — dej ji do vlastního
+souboru (viz [internal/server/migrate_schedules.go](../internal/server/migrate_schedules.go))
+a pusť z `Open` po `postMigrateSQL`.
+
+Dvě pravidla, která si ta migrace vysloužila:
+
+- **Pojistka per řádek, ne per databáze.** Globální příznak „hotovo" je správně přesně jednou.
+  Značka na migrovaném řádku je správně i pro řádek obnovený později ze staršího archivu — a
+  hlavně nikdy nevzkřísí něco, co operátor mezitím smazal. Každý zapisovatel značku nastavuje
+  rovnou při vkládání, takže sken čerstvý řádek nikdy neuvidí.
+- **Neshazuj start kvůli jednomu špatnému řádku.** Zaloguj ho, označ za vyřízený a jeď dál.
+  Server, který odmítne nastartovat kvůli jedné zdeformované hodnotě, s sebou vezme všechny
+  ostatní zálohy.
+
 ### Nová zpráva nebo pole v protokolu
 
 `pkg/proto/proto.go`. Pokud pole vstupuje do podpisu, přidej ho i do `SigningBytes()`
@@ -286,7 +314,7 @@ entrypointu (jako `restic`) musí dostat výjimku v `Validate()` i v `Catalog`.
 
 ## 5. Testy
 
-23 testovacích souborů, `go test ./...` dnes prochází. Testy jsou v témž balíku jako kód
+42 testovacích souborů, `go test ./...` dnes prochází. Testy jsou v témž balíku jako kód
 (`package server`), takže vidí i neexportované věci.
 
 Užitečné vzory, které v repozitáři už jsou — používej je, nevymýšlej nové:
@@ -320,7 +348,8 @@ testu snadno přehlédnou, protože „to funguje".
 
 ## 6. Ladění
 
-**Log serveru** je hlavní zdroj. Server hlásí každý dispatch (`dispatch: instance=… run=… -> runner=…`),
+**Log serveru** je hlavní zdroj. Server hlásí každý dispatch (`dispatch: instance=… run=… schedule=… -> runner=…`, u ručního
+běhu je `schedule=manual`),
 odmítnutí (`checkin denied: …`) i chyby instancí. Chybná instance nezastaví checkin — jen se
 přeskočí s logem, takže když se úloha „nespustila a nikdo nic neřekl", hledej tady.
 
@@ -328,7 +357,11 @@ přeskočí s logem, takže když se úloha „nespustila a nikdo nic neřekl", 
 
 ```sh
 sqlite3 local/data/arcatum.db 'SELECT id,instance_id,status,exit_code,bytes FROM runs ORDER BY id DESC LIMIT 10;'
-sqlite3 local/data/arcatum.db 'SELECT id,script,runner_id,schedule FROM instances;'
+sqlite3 local/data/arcatum.db 'SELECT id,script,runner_id FROM instances;'
+# kdy co běží — instances.schedule je pozůstatkový sloupec a u všeho vzniklého po rozdělení
+# je prázdný, takže číst ho tě jen svede z cesty
+sqlite3 local/data/arcatum.db 'SELECT id,instance_id,name,frequency,time,enabled FROM schedules;'
+sqlite3 local/data/arcatum.db 'SELECT id,instance_id,schedule_id,status FROM runs ORDER BY id DESC LIMIT 10;'
 sqlite3 local/data/arcatum.db 'SELECT id,status,last_seen,cert_not_after FROM runners;'
 ```
 
@@ -411,6 +444,31 @@ Důsledek pro vývoj: **po změně v `web/` je nutný restart serveru** (u `go r
 zabít a spustit znovu, `//go:embed` čte soubory při kompilaci). Nový soubor v `web/`
 přidej i do direktivy `//go:embed` a do seznamu obsluhovaných assetů ve `WebHandler()`.
 
+Views jsou sekce přepínané třídou `hidden`: `dashboard` (úvodní stránka), `instances`,
+`instance-form`, `schedules`, `schedule-form`, `history` (běhy jedné úlohy), `restore`,
+`runners`, `rotation`, `users`, `admin`, `account` a `detail` (běh se živým tailem). Které se
+obnovují pětisekundovým časovačem, rozhoduje mapa `loaders` — formuláře, stránka účtu a detail
+běhu v ní záměrně nejsou, jinak by refresh přepsal rozdělaný formulář pod rukama.
+
+**Každé `<td>`, které render vyrobí, nese `data-label`.** Pod 620 px tabulky přestanou být
+tabulkami: každý řádek je karta a `data-label` buňky se vykreslí vedle hodnoty — protože
+posouvat tabulku doprava, abys zjistil, jestli noční záloha dopadla, je přesně to, co udělá UI
+na telefonu nepoužitelným. Nová tabulka bez `data-label` vypadá na desktopu dobře a na telefonu
+se z ní stane nepopsaný sloupec hodnot, což je věc, které si nikdo nevšimne, dokud nesedí ve
+vlaku.
+
+Views jsou sekce přepínané třídou `hidden`: `dashboard` (úvodní stránka), `instances`,
+`instance-form`, `schedules`, `schedule-form`, `history` (běhy jedné úlohy), `restore`,
+`runners`, `rotation`, `users`, `admin`, `account` a `detail` (běh se živým tailem). Které se
+obnovují pětisekundovým časovačem, rozhoduje mapa `loaders` — formuláře, stránka účtu a detail
+běhu v ní záměrně nejsou, jinak by refresh přepsal rozdělaný formulář pod rukama.
+
+**Každé `<td>`, které render vyrobí, nese `data-label`.** Pod 620 px tabulky přestanou být
+tabulkami: každý řádek je karta a `data-label` buňky se vykreslí vedle hodnoty — protože
+posouvat tabulku doprava, abys zjistil, jestli noční záloha dopadla, je přesně to, co udělá UI
+na telefonu nepoužitelným. Nová tabulka bez `data-label` vypadá na desktopu dobře a na telefonu
+se z ní stane nepopsaný sloupec hodnot, čehož si nikdo nevšimne, dokud nesedí ve vlaku.
+
 Web běží na vlastním portu (`[web] listen`) a přihlašuje se jménem a heslem — assety samy
 jsou dostupné bez přihlášení (je to ta stránka, která o přihlášení *žádá*), všechna data
 jdou přes API za cookie sezení. Na 401 z API `app.js` ukáže přihlašovací obrazovku, takže
@@ -430,13 +488,20 @@ Texty ve webu jsou **jen anglicky**; dvojjazyčná je dokumentace, ne UI.
 
 ## 9. Pasti, které stojí čas
 
-- **Scheduler je v paměti.** `next_run` se po restartu přepočítá od aktuálního času, takže
-  běh, který měl padnout během restartu, se přeskočí. Není to chyba — persistence rozvrhu
-  je záměrně mimo, ale při testování rozvrhů to plete.
+- **Scheduler je v paměti.** `next_run` se po restartu přepočítá u každého rozvrhu od
+  aktuálního času, takže běh, který měl padnout během restartu, se přeskočí. Není to chyba —
+  persistence časů příštích běhů je záměrně mimo, ale při testování rozvrhů to plete.
+  Vypnutý rozvrh je trackovaný, ale nikdy nedozraje, takže zapnutí je přehození příznaku, ne
+  nové parsování, které by mohlo selhat v nejhorší chvíli.
+- **`instances.schedule` není zdroj pravdy.** Je to sloupec z doby před rozdělením, migrace ho
+  jednou přečte a u všeho novějšího je prázdný. Ptej se tabulky `schedules`.
 - **Katalog skriptů se načítá jen při startu.** Změna `scripts/*.toml` bez restartu se
   neprojeví; vadný manifest naopak start rovnou shodí.
 - **Seed instancí nepřepisuje existující.** Úprava `instances.json` bez `-import-force` se
-  „neděje" — a tak to má být, jinak by restart mazal změny z webu.
+  „neděje" — a tak to má být, jinak by restart mazal změny z webu. Totéž platí pro `schedules`
+  v něm: přidat rozvrh instanci, která už existuje, neudělá vůbec nic — záměrně, aby se rozvrh,
+  který operátor smazal, nevytvářel znovu při každém restartu. S `-import-force` se rozvrhy
+  instance **nahradí**, ne doplní.
 - **Identitu určuje certifikát, ne požadavek.** `req.RunnerID` z těla se zahodí a přepíše
   hodnotou z `CN`. Kód, který věří tělu, obchází autorizaci.
 - **Secrets nikdy do logu ani do odpovědi API.** Do env taky ne (env je čitelné

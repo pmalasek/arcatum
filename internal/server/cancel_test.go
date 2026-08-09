@@ -70,7 +70,7 @@ func TestCancelRunningRunIsCollectedByTheRunner(t *testing.T) {
 // A run that has not started has nothing to wait for; the operator sees the outcome now.
 func TestCancelPendingRunFinishesImmediately(t *testing.T) {
 	srv, _ := resticTestServer(t, false)
-	run, err := srv.store.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, 3600)
+	run, err := srv.store.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}

@@ -205,17 +205,19 @@ go run ./cmd/server -config local/server.toml -instances local/instances.json
 ```
 
 Create the instance from the web UI (**Instances → new instance** — the form is built from
-your declarations, so you see immediately whether the manifest makes sense), or over the API:
+your declarations, so you see immediately whether the manifest makes sense; it has no time
+fields, timing lives under **Schedules**), or over the API:
 
 ```sh
 curl -X POST -H 'Content-Type: application/json' http://127.0.0.1:8443/api/v1/instances -d '{
   "id": "myscript-test", "script": "my-script", "runner_id": "'"$(hostname -s)"'",
   "params": {"host": "127.0.0.1"}, "secrets": {"password": "secret"},
-  "timeout": "5m", "schedule": {"frequency": "daily", "time": "03:00"}
+  "timeout": "5m"
 }'
 ```
 
-Feel free to put the schedule at night — you will be testing with a manual trigger:
+Do not give it a schedule at all while you are developing. An instance without one runs only
+when you start it, which is precisely what you want here:
 
 ```sh
 curl -X POST http://127.0.0.1:8443/api/v1/instances/myscript-test/run
@@ -242,7 +244,8 @@ parameter and a secret) and `slow-demo` (prints a line per second — for the li
 
 ## 6. Debugging a run
 
-**The web route is the most convenient:** the **Instances** tab → **run now**, then click the
+**The web route is the most convenient:** the **Instances** tab → **run now**, which opens
+that task's history — then click the
 run. A detail with a **live tail** opens — for a job in progress the log keeps filling in as
 it arrives, with a `stdout`/`stderr` switch and a "follow" checkbox. For a script with
 `capture = "stream"` the `stdout` holds only a summary ("streamed N bytes…"); the data itself

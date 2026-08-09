@@ -3,10 +3,11 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
-// Persistence for the configuration archive: reading the three tables that make up a
+// Persistence for the configuration archive: reading the four tables that make up a
 // server's configuration, and replacing them wholesale. The archive format, the
 // validation and the handlers are in config_archive.go, the same split as
 // users.go / users_store.go.
@@ -32,9 +33,27 @@ type ConfigInstance struct {
 	Secrets  map[string]string `json:"secrets"` // ciphertext, as stored
 	Capture  string            `json:"capture"`
 	Timeout  string            `json:"timeout"`
-	Schedule ScheduleJSON      `json:"schedule"`
-	KeepLast int               `json:"keep_last"`
-	KeepDays int               `json:"keep_days"`
+	// Schedule is the inline timing instances carried before schedules became a table of
+	// their own. This version never writes it; it is read when importing a format 1
+	// archive, which is the only place it can still appear. A pointer rather than a value
+	// so that "the archive had no schedule" and "it had an empty one" stay distinguishable
+	// — omitempty does not drop a zero struct.
+	Schedule *ScheduleJSON `json:"schedule,omitempty"`
+	KeepLast int           `json:"keep_last"`
+	KeepDays int           `json:"keep_days"`
+}
+
+// ConfigSchedule is one schedule as it travels in an archive.
+type ConfigSchedule struct {
+	ID         string   `json:"id"`
+	InstanceID string   `json:"instance_id"`
+	Name       string   `json:"name,omitempty"`
+	Frequency  string   `json:"frequency"`
+	Time       string   `json:"time"`
+	Weekdays   []string `json:"weekdays,omitempty"`
+	Day        int      `json:"day,omitempty"`
+	Timezone   string   `json:"timezone,omitempty"`
+	Enabled    bool     `json:"enabled"`
 }
 
 // ConfigUser is one operator account. Unlike User it carries the password verifier:
@@ -77,6 +96,7 @@ type ConfigRunner struct {
 // import puts back.
 type ConfigSet struct {
 	Instances []ConfigInstance `json:"instances"`
+	Schedules []ConfigSchedule `json:"schedules"`
 	Users     []ConfigUser     `json:"users"`
 	Runners   []ConfigRunner   `json:"runners"`
 }
@@ -84,6 +104,10 @@ type ConfigSet struct {
 // ConfigSet reads the current configuration, secrets included but not decrypted.
 func (s *Store) ConfigSet() (*ConfigSet, error) {
 	instances, err := s.configInstances()
+	if err != nil {
+		return nil, err
+	}
+	schedules, err := s.configSchedules()
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +119,7 @@ func (s *Store) ConfigSet() (*ConfigSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ConfigSet{Instances: instances, Users: users, Runners: runners}, nil
+	return &ConfigSet{Instances: instances, Schedules: schedules, Users: users, Runners: runners}, nil
 }
 
 func (s *Store) configInstances() ([]ConfigInstance, error) {
@@ -107,9 +131,9 @@ func (s *Store) configInstances() ([]ConfigInstance, error) {
 	out := []ConfigInstance{}
 	for rows.Next() {
 		var in ConfigInstance
-		var params, secrets, sched string
+		var params, secrets string
 		if err := rows.Scan(&in.ID, &in.Script, &in.RunnerID, &params, &secrets, &in.Capture,
-			&in.Timeout, &sched, &in.KeepLast, &in.KeepDays); err != nil {
+			&in.Timeout, &in.KeepLast, &in.KeepDays); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(params), &in.Params); err != nil {
@@ -118,12 +142,25 @@ func (s *Store) configInstances() ([]ConfigInstance, error) {
 		if err := json.Unmarshal([]byte(secrets), &in.Secrets); err != nil {
 			return nil, fmt.Errorf("instance %q secrets: %w", in.ID, err)
 		}
-		if err := json.Unmarshal([]byte(sched), &in.Schedule); err != nil {
-			return nil, fmt.Errorf("instance %q schedule: %w", in.ID, err)
-		}
 		out = append(out, in)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) configSchedules() ([]ConfigSchedule, error) {
+	schedules, err := s.Schedules()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ConfigSchedule, 0, len(schedules))
+	for _, sc := range schedules {
+		out = append(out, ConfigSchedule{
+			ID: sc.ID, InstanceID: sc.InstanceID, Name: sc.Name,
+			Frequency: sc.Frequency, Time: sc.Time, Weekdays: sc.Weekdays,
+			Day: sc.Day, Timezone: sc.Timezone, Enabled: sc.Enabled,
+		})
+	}
+	return out, nil
 }
 
 func (s *Store) configUsers() ([]ConfigUser, error) {
@@ -197,7 +234,8 @@ func (s *Store) ReplaceConfig(set *ConfigSet) error {
 	}
 	defer tx.Rollback()
 
-	for _, table := range []string{"instances", "users", "runners", "sessions"} {
+	importedAt := time.Now().UnixMilli()
+	for _, table := range []string{"instances", "schedules", "users", "runners", "sessions"} {
 		if _, err := tx.Exec(`DELETE FROM ` + table); err != nil {
 			return fmt.Errorf("clear %s: %w", table, err)
 		}
@@ -212,17 +250,29 @@ func (s *Store) ReplaceConfig(set *ConfigSet) error {
 		if err != nil {
 			return err
 		}
-		sched, err := json.Marshal(in.Schedule)
-		if err != nil {
-			return err
-		}
+		// schedule_migrated is set outright: whatever inline schedule the archive carried has
+		// already been turned into schedule rows below, and the legacy column is left empty.
 		if _, err := tx.Exec(`
 			INSERT INTO instances (id, script, runner_id, params, secrets, capture, timeout,
-			                       schedule, keep_last, keep_days)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			                       keep_last, keep_days, schedule_migrated)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 			in.ID, in.Script, in.RunnerID, string(params), string(secrets), in.Capture,
-			in.Timeout, string(sched), in.KeepLast, in.KeepDays); err != nil {
+			in.Timeout, in.KeepLast, in.KeepDays); err != nil {
 			return fmt.Errorf("insert instance %q: %w", in.ID, err)
+		}
+	}
+
+	// Schedules are inserted without their archived id: the table hands out its own, and
+	// an id restored from an archive could collide with a row this server has since
+	// created. What a schedule *is* travels; which number it happened to have does not.
+	for _, sc := range set.Schedules {
+		if _, err := tx.Exec(`
+			INSERT INTO schedules (instance_id, name, frequency, time, weekdays, day, timezone,
+			                       enabled, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			sc.InstanceID, sc.Name, sc.Frequency, sc.Time, strings.Join(sc.Weekdays, ","),
+			sc.Day, sc.Timezone, boolToInt(sc.Enabled), importedAt, importedAt); err != nil {
+			return fmt.Errorf("insert schedule for instance %q: %w", sc.InstanceID, err)
 		}
 	}
 

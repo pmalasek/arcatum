@@ -269,10 +269,13 @@ curl "${A[@]}" https://172.24.0.60:8443/api/v1/runners   # status, platform, ver
 In the web UI, **Instances → new instance**, script `hello`. The form is assembled from the
 manifest parameters ([`scripts/example/hello.toml`](../scripts/example/hello.toml)), so it is
 enough to fill in `name`, `target` and `token` and pick `backup-central` as the runner.
-`hello` deliberately needs no external tool — it goes the whole way from the schedule to the
+`hello` deliberately needs no external tool — it goes the whole way from dispatch to the
 captured output, so when it finishes, it is the chain that works, not the script.
 
-Then **run now** and watch the live tail in the run detail. The same from a shell:
+A new instance has **no schedule** and runs only when you start it, which is exactly what you
+want here. Then **run now**, which drops you into that task's run history; click the run and
+watch the live tail. Once the chain works, give it a timetable under **Schedules → new
+schedule**. The same from a shell:
 
 ```sh
 curl "${A[@]}" -X POST https://172.24.0.60:8443/api/v1/instances/hello-demo/run
@@ -318,8 +321,11 @@ deploy/install-server.sh && systemctl restart arcatum-server
 A new or changed script does not take effect earlier. A broken manifest, by contrast, stops the
 startup, so always look into the log after a restart.
 
-**A change to an instance, its parameters or schedule** — nothing. It takes effect immediately,
-no restart needed.
+**A change to an instance or its parameters** — nothing. It takes effect immediately, no
+restart needed.
+
+**A change to a schedule** — nothing either. Adding, editing, pausing or deleting one under
+**Schedules** (or `PUT /api/v1/schedules/{id}`) recomputes the next run at once.
 
 **A change to `server.toml`** — a restart only, the installer does not touch the config:
 
@@ -383,7 +389,7 @@ enough — the server creates the database and the directories again at startup.
 /usr/local/bin/arcatum-ca         symlink into /opt/arcatum/bin/
 
 /central_backup/arcatum/          backup_dir — nothing but data
-  data/arcatum.db                 SQLite (instances, runs, runners, accounts)  server
+  data/arcatum.db                 SQLite (instances, schedules, runs, runners, accounts)  server
   runs/<run_id>/{stdout,stderr}.log   the captured output of runs             server
   restic/<instance>/              the restic repository of each instance       server
   config-backups/                 the configuration saved before every import  server
@@ -410,8 +416,8 @@ Two things, each differently:
    Without `secrets-master.key` the instance passwords are worthless, so **this is the part
    whose loss is irreversible**.
 2. **The configuration** — the web UI, the **Administration** tab → *download configuration*,
-   or `GET /api/v1/config/export`. A single zip with the instances, accounts and runners, with
-   no keys and no backup data. That same file can be uploaded back at any time to replace the
+   or `GET /api/v1/config/export`. A single zip with the instances, their schedules, accounts
+   and runners, with no keys and no backup data. That same file can be uploaded back at any time to replace the
    configuration; the details are in the
    [README](../README.md#config-backup-and-server-reset).
 

@@ -27,7 +27,7 @@ func uploadData(srv *Server, runID, body string, cert *x509.Certificate) *httpte
 // startedRun creates a run for the fixture instance and marks it running.
 func startedRun(t *testing.T, srv *Server) *Run {
 	t.Helper()
-	run, err := srv.store.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, 3600)
+	run, err := srv.store.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}

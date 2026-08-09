@@ -17,7 +17,7 @@ func reaperServer(t *testing.T) *Server {
 // runStartedAt creates a run that started at the given time with the given timeout.
 func runStartedAt(t *testing.T, st *Store, startedAt time.Time, timeoutSec int) *Run {
 	t.Helper()
-	run, err := st.CreateRun(&Instance{ID: "i", Script: "hello", RunnerID: "h"}, timeoutSec)
+	run, err := st.CreateRun(&Instance{ID: "i", Script: "hello", RunnerID: "h"}, "", timeoutSec)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestReaperWaitsOutTheGracePeriod(t *testing.T) {
 // to run from when it was dispatched or it would never be reaped at all.
 func TestReaperFinishesRunsThatNeverStarted(t *testing.T) {
 	srv := reaperServer(t)
-	run, err := srv.store.CreateRun(&Instance{ID: "i", Script: "hello", RunnerID: "h"}, 60)
+	run, err := srv.store.CreateRun(&Instance{ID: "i", Script: "hello", RunnerID: "h"}, "", 60)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}

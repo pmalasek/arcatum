@@ -249,6 +249,8 @@ fits into half an hour and gives a real answer:
 
 A checklist for a new database instance:
 
+- [ ] the instance has at least one enabled **schedule** — without one it runs only when
+      somebody presses "run now"
 - [ ] a trial restore was done, `exit = 0`, checksums / row counts match
 - [ ] the target database could be created with the **same encoding and collation**
 - [ ] with Postgres: the server also has a `postgres-globals-backup` instance and you

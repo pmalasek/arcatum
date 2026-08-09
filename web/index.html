@@ -41,8 +41,9 @@
 </header>
 
 <nav>
-  <button class="tab active" data-view="runs">Runs</button>
+  <button class="tab active" data-view="dashboard">Dashboard</button>
   <button class="tab" data-view="instances">Instances</button>
+  <button class="tab" data-view="schedules">Schedules</button>
   <button class="tab" data-view="restore">Restore</button>
   <button class="tab" data-view="runners">Runners</button>
   <button class="tab" data-view="rotation">Keys</button>
@@ -54,27 +55,93 @@
 <div id="warnings" class="warnings hidden"></div>
 
 <main>
-  <!-- List of runs -->
-  <section id="view-runs" class="view">
-    <table>
-      <thead>
-        <tr><th>Run</th><th>Instance</th><th>Status</th><th>Offsite</th><th>Code</th><th>Data</th><th>Started</th><th>Duration</th><th></th></tr>
-      </thead>
-      <tbody id="runs-body"><tr><td colspan="9" class="empty">loading…</td></tr></tbody>
-    </table>
+  <!-- Dashboard: what is happening now, what broke, what is next. The landing page,
+       because those are the three questions somebody opens Arcatum with. -->
+  <section id="view-dashboard" class="view">
+    <div id="dash-counts" class="counts"><span class="empty">loading…</span></div>
+    <div class="cards">
+      <div class="card">
+        <h3>Running now</h3>
+        <div id="dash-running"><p class="empty">loading…</p></div>
+      </div>
+      <div class="card">
+        <h3>Failed in the last 24 hours</h3>
+        <div id="dash-failures"><p class="empty">loading…</p></div>
+      </div>
+      <div class="card">
+        <h3>Next runs</h3>
+        <div id="dash-upcoming"><p class="empty">loading…</p></div>
+      </div>
+    </div>
   </section>
 
-  <!-- Instances -->
+  <!-- Instances: what gets backed up, with what, on which host. When it runs is the
+       Schedules tab — an instance says nothing about time. -->
   <section id="view-instances" class="view hidden">
     <table>
       <thead>
-        <tr><th>Instance</th><th>Script</th><th>Runner</th><th>Next run</th><th>Repository</th><th></th></tr>
+        <tr><th>Instance</th><th>Script</th><th>Runner</th><th>Schedules</th><th>Next run</th><th>Repository</th><th></th></tr>
       </thead>
-      <tbody id="instances-body"><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
+      <tbody id="instances-body"><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
     </table>
     <div class="section-foot admin-only">
       <button id="new-instance" class="action">new instance</button>
       <span class="hint">the form is assembled from the parameters the script declares</span>
+    </div>
+  </section>
+
+  <!-- Schedules: when each task runs, how it last went, when it goes again. One task may
+       have several — a nightly dump and a monthly full copy are two schedules of one. -->
+  <section id="view-schedules" class="view hidden">
+    <div id="schedules-head" class="detail-head hidden">
+      <button id="schedules-all" class="ghost">‹ all schedules</button>
+      <h2 id="schedules-filter-name"></h2>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Instance</th><th>Schedule</th><th>When</th><th>State</th><th>Last run</th><th>Next run</th><th></th></tr>
+      </thead>
+      <tbody id="schedules-body"><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
+    </table>
+    <div class="section-foot admin-only">
+      <button id="new-schedule" class="action">new schedule</button>
+      <span class="hint">a task may have several — pausing one leaves the others running</span>
+    </div>
+  </section>
+
+  <!-- Schedule form (both creating and editing) -->
+  <section id="view-schedule-form" class="view hidden">
+    <div class="detail-head">
+      <button id="sform-back" class="ghost">‹ back</button>
+      <h2 id="sform-title">Schedule</h2>
+      <span class="grow"></span>
+      <span id="sform-error" class="hint"></span>
+    </div>
+    <div id="sform-body"></div>
+    <div class="section-foot">
+      <button id="sform-save" class="action">save</button>
+      <button id="sform-delete" class="action danger hidden">delete</button>
+    </div>
+  </section>
+
+  <!-- The run history of one task -->
+  <section id="view-history" class="view hidden">
+    <div class="detail-head">
+      <button id="history-back" class="ghost">‹ back</button>
+      <h2 id="history-title">History</h2>
+      <span class="grow"></span>
+      <button id="history-schedules" class="action">schedules</button>
+      <button id="history-run-now" class="action admin-only">run now</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Run</th><th>Status</th><th>Offsite</th><th>Code</th><th>Data</th><th>Started</th><th>Duration</th><th></th></tr>
+      </thead>
+      <tbody id="history-body"><tr><td colspan="8" class="empty">loading…</td></tr></tbody>
+    </table>
+    <div class="section-foot">
+      <button id="history-more" class="action hidden">show more</button>
+      <span id="history-note" class="hint"></span>
     </div>
   </section>
 

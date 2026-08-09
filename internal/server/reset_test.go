@@ -35,7 +35,7 @@ func seedBackupData(t *testing.T, srv *Server) {
 	if err != nil || inst == nil {
 		t.Fatalf("Instance: %v", err)
 	}
-	run, err := srv.store.CreateRun(inst, 60)
+	run, err := srv.store.CreateRun(inst, "", 60)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestResetClearsDataAndKeepsConfiguration(t *testing.T) {
 	// The ids are directory names and every directory was just removed, so the next run
 	// starts from the top rather than beside gaps.
 	inst, _ := srv.store.Instance("mysql-web01")
-	next, err := srv.store.CreateRun(inst, 60)
+	next, err := srv.store.CreateRun(inst, "", 60)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestResetRefusesWhileAJobIsRunning(t *testing.T) {
 	if err != nil || inst == nil {
 		t.Fatalf("Instance: %v", err)
 	}
-	run, err := srv.store.CreateRun(inst, 60)
+	run, err := srv.store.CreateRun(inst, "", 60)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}

@@ -53,27 +53,32 @@ func (s *Store) SaveInstance(in *Instance, mustBeNew bool) error {
 	if err != nil {
 		return err
 	}
-	sched, err := json.Marshal(in.Schedule)
-	if err != nil {
-		return err
-	}
 	_, err = s.db.Exec(`
-		INSERT INTO instances (id, script, runner_id, params, secrets, capture, timeout, schedule,
-		  keep_last, keep_days)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO instances (id, script, runner_id, params, secrets, capture, timeout,
+		  keep_last, keep_days, schedule_migrated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 		ON CONFLICT(id) DO UPDATE SET
 		  script=excluded.script, runner_id=excluded.runner_id, params=excluded.params,
 		  secrets=excluded.secrets, capture=excluded.capture, timeout=excluded.timeout,
-		  schedule=excluded.schedule, keep_last=excluded.keep_last, keep_days=excluded.keep_days`,
+		  keep_last=excluded.keep_last, keep_days=excluded.keep_days`,
 		in.ID, in.Script, in.RunnerID, string(params), string(secrets),
-		in.Capture, in.Timeout, string(sched), in.KeepLast, in.KeepDays)
+		in.Capture, in.Timeout, in.KeepLast, in.KeepDays)
 	return err
 }
 
-// DeleteInstance removes an instance. Its backup repository is deliberately left on
-// disk: deleting a configuration entry must not throw away the backups it produced.
+// DeleteInstance removes an instance and its schedules. Its backup repository is
+// deliberately left on disk: deleting a configuration entry must not throw away the
+// backups it produced.
+//
+// The schedules go in the same transaction. A schedule outliving its task is a row that
+// can never run anything, and one the scheduler would go on treating as due.
 func (s *Store) DeleteInstance(id string) error {
-	res, err := s.db.Exec(`DELETE FROM instances WHERE id = ?`, id)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM instances WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -84,7 +89,10 @@ func (s *Store) DeleteInstance(id string) error {
 	if n == 0 {
 		return fmt.Errorf("%q: %w", id, ErrInstanceNotFound)
 	}
-	return nil
+	if _, err := tx.Exec(`DELETE FROM schedules WHERE instance_id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) instanceExists(id string) (bool, error) {
@@ -168,7 +176,6 @@ type instancePayload struct {
 	Secrets  map[string]string `json:"secrets"`
 	Capture  string            `json:"capture"`
 	Timeout  string            `json:"timeout"`
-	Schedule ScheduleJSON      `json:"schedule"`
 	KeepLast int               `json:"keep_last"`
 	KeepDays int               `json:"keep_days"`
 }
@@ -204,9 +211,8 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 		s.instanceStoreError(w, err)
 		return
 	}
-	if err := s.sched.Track(in, time.Now()); err != nil {
-		s.log.Printf("instance %q: schedule: %v", in.ID, err)
-	}
+	// No schedule is created alongside it: a new task starts runnable on demand, and when
+	// it runs is a separate decision made under Schedules.
 	if source != nil {
 		s.log.Printf("instance %q created as a copy of %q (script=%s runner=%s)",
 			in.ID, source.ID, in.Script, in.RunnerID)
@@ -243,11 +249,6 @@ func (s *Server) handleUpdateInstance(w http.ResponseWriter, r *http.Request) {
 		s.instanceStoreError(w, err)
 		return
 	}
-	// Re-tracking recomputes the next run, so a changed schedule takes effect at once
-	// rather than at the next restart.
-	if err := s.sched.Track(in, time.Now()); err != nil {
-		s.log.Printf("instance %q: schedule: %v", in.ID, err)
-	}
 	s.log.Printf("instance %q updated", in.ID)
 	writeJSON(w, in.Redacted())
 }
@@ -259,8 +260,10 @@ func (s *Server) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 		s.instanceStoreError(w, err)
 		return
 	}
-	s.sched.Untrack(id)
-	s.log.Printf("instance %q deleted (its backup repository is kept)", id)
+	// The store deleted its schedules; the scheduler has to forget them too, or it would
+	// keep firing for a task that no longer exists.
+	s.sched.UntrackInstance(id)
+	s.log.Printf("instance %q deleted (its schedules go with it; the backup repository is kept)", id)
 	writeJSON(w, map[string]string{"status": "deleted", "instance": id})
 }
 
@@ -334,7 +337,6 @@ func (s *Server) instanceFromPayload(p instancePayload, existing *Instance) (*In
 		Secrets:  secrets,
 		Capture:  p.Capture,
 		Timeout:  p.Timeout,
-		Schedule: p.Schedule,
 		KeepLast: p.KeepLast,
 		KeepDays: p.KeepDays,
 	}
@@ -344,10 +346,6 @@ func (s *Server) instanceFromPayload(p instancePayload, existing *Instance) (*In
 	applyDefaults(entry.Manifest, in.Params, in.Secrets)
 	// The manifest is the contract: check the values against it before storing.
 	if err := entry.Manifest.ValidateParams(in.Params, in.Secrets); err != nil {
-		return nil, err
-	}
-	// A schedule that cannot be parsed would leave the instance never running.
-	if _, err := in.Schedule.Spec(s.sched.loc); err != nil {
 		return nil, err
 	}
 	return in, nil

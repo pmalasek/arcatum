@@ -83,12 +83,12 @@ func validInstance() map[string]any {
 		"runner_id": "web-01",
 		"params":    map[string]string{"host": "127.0.0.1", "database": "shop"},
 		"secrets":   map[string]string{"password": "hunter2"},
-		"schedule":  map[string]any{"frequency": "daily", "time": "02:30"},
 	}
 }
 
 // Creating an instance through the API is what replaces editing JSON on the server: the
-// secret is encrypted from the moment it is stored, and the schedule takes effect at once.
+// secret is encrypted from the moment it is stored. When it runs is a separate decision,
+// made under Schedules — a new task is runnable on demand and on no timetable.
 func TestCreateInstance(t *testing.T) {
 	srv := instanceAPIServer(t)
 
@@ -108,9 +108,14 @@ func TestCreateInstance(t *testing.T) {
 	if stored.Secrets["password"] != "hunter2" {
 		t.Errorf("secret round-trip failed: %q", stored.Secrets["password"])
 	}
-	// Scheduled immediately, without a restart.
-	if _, ok := srv.sched.NextRun("mysql-web01"); !ok {
-		t.Error("a new instance must be scheduled straight away")
+	// No schedule comes with it: the two are created separately now.
+	schedules, err := srv.store.SchedulesForInstance("mysql-web01")
+	if err != nil || len(schedules) != 0 {
+		t.Errorf("SchedulesForInstance = %v, %v; a new instance starts with none", schedules, err)
+	}
+	// It can still be run by hand, which is the whole point of an instance with no timetable.
+	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances/mysql-web01/run", nil); rec.Code != http.StatusOK {
+		t.Errorf("run now = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -126,7 +131,6 @@ func TestCreateInstanceAppliesDefaults(t *testing.T) {
 		"runner_id": "web-01",
 		"params":    map[string]string{"paths": "/etc"},
 		"secrets":   map[string]string{}, // restic_password left out entirely
-		"schedule":  map[string]any{"frequency": "daily", "time": "01:30"},
 	}
 	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload); rec.Code != http.StatusCreated {
 		t.Fatalf("create = %d, want 201 (%s)", rec.Code, rec.Body.String())
@@ -170,7 +174,6 @@ func TestCreateInstanceKeepsSuppliedValueOverDefault(t *testing.T) {
 		"runner_id": "web-01",
 		"params":    map[string]string{"paths": "/etc"},
 		"secrets":   map[string]string{"restic_password": "a-real-one"},
-		"schedule":  map[string]any{"frequency": "daily", "time": "01:30"},
 	}
 	if rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload); rec.Code != http.StatusCreated {
 		t.Fatalf("create = %d, want 201 (%s)", rec.Code, rec.Body.String())
@@ -225,9 +228,6 @@ func TestCreateInstanceValidation(t *testing.T) {
 		{"unknown script", func(m map[string]any) { m["script"] = "nope" }, "unknown script"},
 		{"no runner", func(m map[string]any) { m["runner_id"] = "" }, "runner_id"},
 		{"bad id", func(m map[string]any) { m["id"] = "../etc/passwd" }, "invalid instance id"},
-		{"bad schedule time", func(m map[string]any) {
-			m["schedule"] = map[string]any{"frequency": "daily", "time": "25:00"}
-		}, "time"},
 		{"bad timeout", func(m map[string]any) { m["timeout"] = "later" }, "timeout"},
 		{"bad capture", func(m map[string]any) { m["capture"] = "maybe" }, "capture"},
 	}
@@ -344,13 +344,10 @@ func TestCreateInstanceCopyFrom(t *testing.T) {
 	if copied.Params["database"] != "orders" {
 		t.Errorf("database = %q, want the value the copy was given", copied.Params["database"])
 	}
-	// The source is untouched and both are scheduled.
+	// The source is untouched.
 	source, _ := srv.store.Instance("mysql-web01")
 	if source.Params["database"] != "shop" {
 		t.Errorf("source database = %q, want it left alone", source.Params["database"])
-	}
-	if _, ok := srv.sched.NextRun("mysql-web01-orders"); !ok {
-		t.Error("a copied instance must be scheduled straight away")
 	}
 }
 
@@ -370,7 +367,6 @@ func TestCreateInstanceCopyToOtherScript(t *testing.T) {
 		"runner_id": "web-01",
 		"params":    map[string]string{"paths": "/etc"},
 		"secrets":   map[string]string{"restic_password": "a-real-one"},
-		"schedule":  map[string]any{"frequency": "daily", "time": "02:30"},
 	}
 	rec := apiCall(t, srv, http.MethodPost, "/api/v1/instances", payload)
 	if rec.Code != http.StatusCreated {
@@ -403,26 +399,6 @@ func TestCreateInstanceCopyFromUnknown(t *testing.T) {
 	}
 }
 
-// A changed schedule must apply without a restart.
-func TestUpdateInstanceRetracksSchedule(t *testing.T) {
-	srv := instanceAPIServer(t)
-	apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance())
-	before, _ := srv.sched.NextRun("mysql-web01")
-
-	payload := validInstance()
-	payload["schedule"] = map[string]any{"frequency": "daily", "time": "23:45"}
-	if rec := apiCall(t, srv, http.MethodPut, "/api/v1/instances/mysql-web01", payload); rec.Code != http.StatusOK {
-		t.Fatalf("update = %d", rec.Code)
-	}
-	after, ok := srv.sched.NextRun("mysql-web01")
-	if !ok {
-		t.Fatal("instance lost its schedule")
-	}
-	if after.Equal(before) || after.Hour() != 23 || after.Minute() != 45 {
-		t.Errorf("next run = %s, want it moved to 23:45", after)
-	}
-}
-
 func TestUpdateUnknownInstance(t *testing.T) {
 	srv := instanceAPIServer(t)
 	rec := apiCall(t, srv, http.MethodPut, "/api/v1/instances/nope", validInstance())
@@ -431,10 +407,13 @@ func TestUpdateUnknownInstance(t *testing.T) {
 	}
 }
 
-// Deleting a configuration entry must not throw away the backups it produced.
+// Deleting a configuration entry must not throw away the backups it produced — but it
+// must take the schedules with it, or the scheduler would keep firing for a task that is
+// no longer there.
 func TestDeleteInstanceKeepsRepository(t *testing.T) {
 	srv := instanceAPIServer(t)
 	apiCall(t, srv, http.MethodPost, "/api/v1/instances", validInstance())
+	seedSchedule(t, srv, "mysql-web01", "02:30")
 
 	if rec := apiCall(t, srv, http.MethodDelete, "/api/v1/instances/mysql-web01", nil); rec.Code != http.StatusOK {
 		t.Fatalf("delete = %d", rec.Code)
@@ -443,8 +422,12 @@ func TestDeleteInstanceKeepsRepository(t *testing.T) {
 	if err != nil || got != nil {
 		t.Errorf("instance still present: %v", err)
 	}
+	schedules, err := srv.store.SchedulesForInstance("mysql-web01")
+	if err != nil || len(schedules) != 0 {
+		t.Errorf("SchedulesForInstance = %v, %v; the schedules must go with the instance", schedules, err)
+	}
 	// And it stops being scheduled.
-	if _, ok := srv.sched.NextRun("mysql-web01"); ok {
+	if _, ok := srv.sched.NextRunForInstance("mysql-web01"); ok {
 		t.Error("a deleted instance must stop being scheduled")
 	}
 	if rec := apiCall(t, srv, http.MethodDelete, "/api/v1/instances/mysql-web01", nil); rec.Code != http.StatusNotFound {
@@ -499,11 +482,13 @@ func TestImportDoesNotClobberManagedInstances(t *testing.T) {
 
 	// The seed file still describes the original state.
 	dir := t.TempDir()
-	path := writeInstances(t, dir, []*Instance{{
-		ID: "mysql-web01", Script: "mysql-backup", RunnerID: "SEEDED-RUNNER",
-		Params:   map[string]string{"host": "seed", "database": "seed"},
-		Secrets:  map[string]string{"password": "seed"},
-		Schedule: ScheduleJSON{Frequency: "daily", Time: "01:00"},
+	path := writeInstances(t, dir, []*seedInstance{{
+		Instance: Instance{
+			ID: "mysql-web01", Script: "mysql-backup", RunnerID: "SEEDED-RUNNER",
+			Params:  map[string]string{"host": "seed", "database": "seed"},
+			Secrets: map[string]string{"password": "seed"},
+		},
+		Schedules: []ScheduleJSON{{Frequency: "daily", Time: "01:00"}},
 	}})
 
 	n, err := srv.store.ImportInstances(path, false)

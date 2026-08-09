@@ -169,7 +169,14 @@ td.mono, .mono { font-family: var(--mono); font-size: .85em; }
    width. The spare space therefore goes to that very column — the others keep their width
    from their content and the buttons on the right stay where people aim at them across a
    refresh. */
-#view-instances th:nth-child(5) { width: 100%; }
+/* The spare width goes to the repository column, whose figure arrives after the rest of
+   the row and changes its width. The others keep their width from their content, so the
+   buttons on the right stay where people aim at them across a refresh. Both selectors are
+   tied to column order — move them if a column is inserted before them. */
+#view-instances th:nth-child(6) { width: 100%; }
+/* The Schedules table has no late-arriving column, so the spare width goes to the label:
+   it is the free-text one and the only one that benefits from room. */
+#view-schedules th:nth-child(2) { width: 100%; }
 
 .badge {
   display: inline-block;
@@ -187,6 +194,10 @@ td.mono, .mono { font-family: var(--mono); font-size: .85em; }
 .badge.cancelled { color: var(--muted); }
 .badge.approved { color: var(--ok); }
 .badge.rejected { color: var(--fail); }
+/* A paused schedule and one that has never run are both "nothing to see here" rather than
+   states to act on, so neither gets a colour that asks for attention. */
+.badge.paused, .badge.never { color: var(--muted); }
+.badge.ok { color: var(--ok); }
 
 /* The listing of items failing to reach the off-site server. A nested table inside the
    card — smaller than the main lists, because it is a detail of the figure above it, not
@@ -406,4 +417,147 @@ select {
   overflow-x: auto;
   white-space: pre;
   user-select: all;
+}
+
+/* --- dashboard --------------------------------------------------------------- */
+
+/* The figures across the top: a glance, before the three lists below. */
+.counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem .75rem;
+  padding: .7rem .8rem;
+  border-bottom: 1px solid var(--border);
+  font-size: .85rem;
+}
+.count { color: var(--muted); }
+.count b { color: var(--text); font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+.count.fail b { color: var(--fail); }
+.count.warn b { color: var(--warn); }
+
+/* Three cards side by side while there is room, stacked once there is not. They borrow
+   the border and heading treatment of .rot, so the dashboard reads as part of the same
+   application rather than as a second design. */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+}
+.card { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.card:last-child { border-right: none; }
+.card h3 { margin: 0; padding: .7rem .8rem .2rem; font-size: .9rem; }
+.card .empty { text-align: left; padding: .6rem .8rem 1rem; }
+
+/* One entry in a card. Not a table row, but it navigates like one. */
+.dash-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: .5rem;
+  padding: .4rem .8rem;
+  font-size: .85rem;
+  border-top: 1px solid var(--border);
+}
+.dash-row .hint { color: var(--muted); font-size: .78rem; }
+.dash-row .mono { font-family: var(--mono); font-size: .85em; }
+
+/* A cell that is itself a link to a run — used for "last run" in the schedules table. */
+.rowlink { color: var(--accent); cursor: pointer; }
+.rowlink:hover { text-decoration: underline; }
+
+/* --- narrow screens ----------------------------------------------------------
+   The UI is used from a phone often enough to matter: an operator checking on a night's
+   backups is rarely at a desk. Two steps — first the page furniture stops assuming a wide
+   window, then the tables stop being tables. */
+
+@media (max-width: 900px) {
+  header, nav, main { padding-left: .75rem; padding-right: .75rem; }
+  header { flex-wrap: wrap; }
+  /* The account block drops onto its own line instead of squeezing the title out. */
+  .account { margin-left: 0; width: 100%; justify-content: flex-end; }
+  .conn:not(:empty) + .account { margin-left: 0; }
+
+  /* Eight tabs wrapped over three lines would eat a third of the screen. A scrolling
+     strip keeps them on one, and the active tab is scrolled into view by the browser. */
+  nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    scroll-snap-type: x proximity;
+  }
+  nav::-webkit-scrollbar { display: none; }
+  .tab { flex: 0 0 auto; scroll-snap-align: start; }
+
+  /* Label above input rather than beside it: 10rem of label leaves nothing for a value. */
+  .field { grid-template-columns: 1fr; }
+  .field > label { padding-top: 0; }
+  .meta { grid-template-columns: 1fr; gap: 0 0; }
+  .meta dt { margin-top: .4rem; }
+
+  /* The controls on the right of a header get their own line instead of being crushed. */
+  .detail-head .grow { flex-basis: 100%; height: 0; }
+
+  .cards { grid-template-columns: 1fr; }
+  .card { border-right: none; }
+  .log { max-height: 50vh; }
+}
+
+@media (max-width: 620px) {
+  /* Tables become cards. Scrolling a table sideways to find out whether last night
+     succeeded is the one thing that makes the UI useless on a phone, so each row is
+     stacked and every cell carries the heading it lost with the thead.
+
+     Cells that render an empty value are hidden outright — a card of "Code:" and
+     "Data:" with nothing after them is noise. */
+  #view-instances table, #view-schedules table, #view-history table,
+  #view-runners table, #view-users table, #view-restore table {
+    display: block;
+  }
+  #view-instances thead, #view-schedules thead, #view-history thead,
+  #view-runners thead, #view-users thead, #view-restore thead {
+    display: none;
+  }
+  #view-instances tbody, #view-schedules tbody, #view-history tbody,
+  #view-runners tbody, #view-users tbody, #view-restore tbody {
+    display: block;
+  }
+  #view-instances tbody tr, #view-schedules tbody tr, #view-history tbody tr,
+  #view-runners tbody tr, #view-users tbody tr, #view-restore tbody tr {
+    display: block;
+    padding: .35rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  #view-instances tbody td, #view-schedules tbody td, #view-history tbody td,
+  #view-runners tbody td, #view-users tbody td, #view-restore tbody td {
+    display: flex;
+    gap: .5rem;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: .2rem .8rem;
+    border-bottom: none;
+    white-space: normal;
+    text-align: left;
+  }
+  #view-instances tbody td[data-label]::before,
+  #view-schedules tbody td[data-label]::before,
+  #view-history tbody td[data-label]::before,
+  #view-runners tbody td[data-label]::before,
+  #view-users tbody td[data-label]::before,
+  #view-restore tbody td[data-label]::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    flex: 0 0 auto;
+  }
+  /* The actions cell has no heading and wants the full width for its buttons. */
+  #view-instances tbody td.actions, #view-schedules tbody td.actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    padding-top: .4rem;
+  }
+  td.num { text-align: left; }
+  /* An "empty" row spans the whole card list rather than pretending to be a cell. */
+  tbody td.empty { display: block; text-align: center; }
+  tbody td.empty::before { content: none; }
 }

@@ -62,6 +62,15 @@ func Open(dbPath, backupDir string, box *crypto.Keyring) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	// Only now: postMigrateSQL indexes columns that migrate() has just added.
+	if _, err := db.Exec(postMigrateSQL); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply indexes: %w", err)
+	}
+	if err := migrateInlineSchedules(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schedules: %w", err)
+	}
 	return &Store{
 		db:         db,
 		backupDir:  backupDir,
@@ -132,12 +141,35 @@ func (s *Store) Close() error {
 
 // --- instances ---------------------------------------------------------------
 
+// seedInstance is what one entry of a seed file may contain: an instance plus the
+// schedules it starts with. The singular "schedule" is the shape seed files had before
+// timing moved out of the instance, and is still accepted — a file sitting on an
+// existing server must not have to be rewritten for that server to start.
+type seedInstance struct {
+	Instance
+	Schedules []ScheduleJSON `json:"schedules"`
+	Schedule  *ScheduleJSON  `json:"schedule"` // legacy, singular
+}
+
+// schedules returns the timings this entry asks for, whichever form it used.
+func (s seedInstance) schedules() []ScheduleJSON {
+	if len(s.Schedules) > 0 {
+		return s.Schedules
+	}
+	if s.Schedule != nil && s.Schedule.Frequency != "" {
+		return []ScheduleJSON{*s.Schedule}
+	}
+	return nil
+}
+
 // ImportInstances seeds instances from a JSON array file and returns how many were
 // created. A missing or empty file is not an error.
 //
 // Existing instances are left alone unless overwrite is set. Instances are editable
 // through the API now, and re-importing on every start would silently undo those edits —
-// the seed file describes the initial state, not the authoritative one.
+// the seed file describes the initial state, not the authoritative one. Schedules follow
+// the same rule and for a sharper reason: adding them to an instance that already exists
+// would re-create, on every restart, a schedule an operator had deliberately deleted.
 func (s *Store) ImportInstances(path string, overwrite bool) (int, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -151,7 +183,7 @@ func (s *Store) ImportInstances(path string, overwrite bool) (int, error) {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return 0, nil
 	}
-	var list []*Instance
+	var list []*seedInstance
 	if err := json.Unmarshal(data, &list); err != nil {
 		return 0, fmt.Errorf("parse instances %s: %w", path, err)
 	}
@@ -160,8 +192,10 @@ func (s *Store) ImportInstances(path string, overwrite bool) (int, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	now := time.Now().UnixMilli()
 	imported := 0
-	for _, in := range list {
+	for _, seed := range list {
+		in := &seed.Instance
 		if in.ID == "" {
 			return 0, fmt.Errorf("instances %s: an instance is missing id", path)
 		}
@@ -186,22 +220,39 @@ func (s *Store) ImportInstances(path string, overwrite bool) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		sched, err := json.Marshal(in.Schedule)
-		if err != nil {
-			return 0, err
-		}
 		_, err = tx.Exec(`
-			INSERT INTO instances (id, script, runner_id, params, secrets, capture, timeout, schedule,
-			  keep_last, keep_days)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO instances (id, script, runner_id, params, secrets, capture, timeout,
+			  keep_last, keep_days, schedule_migrated)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 			ON CONFLICT(id) DO UPDATE SET
 			  script=excluded.script, runner_id=excluded.runner_id, params=excluded.params,
 			  secrets=excluded.secrets, capture=excluded.capture, timeout=excluded.timeout,
-			  schedule=excluded.schedule, keep_last=excluded.keep_last, keep_days=excluded.keep_days`,
-			in.ID, in.Script, in.RunnerID, string(params), string(secrets), in.Capture, in.Timeout, string(sched),
+			  keep_last=excluded.keep_last, keep_days=excluded.keep_days`,
+			in.ID, in.Script, in.RunnerID, string(params), string(secrets), in.Capture, in.Timeout,
 			in.KeepLast, in.KeepDays)
 		if err != nil {
 			return 0, fmt.Errorf("upsert instance %q: %w", in.ID, err)
+		}
+		// Only an instance this call actually created (or was told to overwrite) gets the
+		// seed's schedules; on overwrite they replace what is there rather than pile up.
+		if overwrite {
+			if _, err := tx.Exec(`DELETE FROM schedules WHERE instance_id = ?`, in.ID); err != nil {
+				return 0, err
+			}
+		}
+		for _, sc := range seed.schedules() {
+			if sc.Frequency == "" || sc.Time == "" {
+				return 0, fmt.Errorf("instances %s: instance %q has a schedule without a frequency or time",
+					path, in.ID)
+			}
+			_, err := tx.Exec(`
+				INSERT INTO schedules (instance_id, name, frequency, time, weekdays, day, timezone,
+				  enabled, created_at, updated_at)
+				VALUES (?, 'default', ?, ?, ?, ?, ?, 1, ?, ?)`,
+				in.ID, sc.Frequency, sc.Time, strings.Join(sc.Weekdays, ","), sc.Day, sc.Timezone, now, now)
+			if err != nil {
+				return 0, fmt.Errorf("instance %q schedule: %w", in.ID, err)
+			}
 		}
 		imported++
 	}
@@ -211,7 +262,9 @@ func (s *Store) ImportInstances(path string, overwrite bool) (int, error) {
 	return imported, nil
 }
 
-const instanceCols = `id, script, runner_id, params, secrets, capture, timeout, schedule, keep_last, keep_days`
+// The legacy `schedule` column is deliberately absent: it is read once, by
+// migrateInlineSchedules, and never again. Timing lives in the schedules table.
+const instanceCols = `id, script, runner_id, params, secrets, capture, timeout, keep_last, keep_days`
 
 // sealValue encrypts one secret value with the primary master key. Without a keyring the
 // value is stored as-is (development mode).
@@ -363,8 +416,8 @@ func (s *Store) openSecrets(instanceID string, stored map[string]string) (map[st
 
 func (s *Store) scanInstance(sc interface{ Scan(...any) error }) (*Instance, error) {
 	var in Instance
-	var params, secrets, sched string
-	if err := sc.Scan(&in.ID, &in.Script, &in.RunnerID, &params, &secrets, &in.Capture, &in.Timeout, &sched,
+	var params, secrets string
+	if err := sc.Scan(&in.ID, &in.Script, &in.RunnerID, &params, &secrets, &in.Capture, &in.Timeout,
 		&in.KeepLast, &in.KeepDays); err != nil {
 		return nil, err
 	}
@@ -380,9 +433,6 @@ func (s *Store) scanInstance(sc interface{ Scan(...any) error }) (*Instance, err
 		return nil, err
 	}
 	in.Secrets = opened
-	if err := json.Unmarshal([]byte(sched), &in.Schedule); err != nil {
-		return nil, fmt.Errorf("instance %q schedule: %w", in.ID, err)
-	}
 	return &in, nil
 }
 
@@ -516,15 +566,16 @@ func (s *Store) Runners() ([]*Runner, error) {
 
 // --- runs -------------------------------------------------------------------
 
-// CreateRun records a new pending run for an instance. timeoutSec is the timeout the
-// run is being dispatched with; the server keeps it so it can later tell a run that is
-// merely slow from one whose runner is never going to report back (reaper.go).
-func (s *Store) CreateRun(inst *Instance, timeoutSec int) (*Run, error) {
+// CreateRun records a new pending run for an instance. scheduleID is the schedule that
+// brought it about, empty for a manual "run now". timeoutSec is the timeout the run is
+// being dispatched with; the server keeps it so it can later tell a run that is merely
+// slow from one whose runner is never going to report back (reaper.go).
+func (s *Store) CreateRun(inst *Instance, scheduleID string, timeoutSec int) (*Run, error) {
 	now := time.Now()
 	res, err := s.db.Exec(`
-		INSERT INTO runs (instance_id, runner_id, script, status, created_at, timeout_sec)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		inst.ID, inst.RunnerID, inst.Script, string(StatusPending), toMillis(now), timeoutSec)
+		INSERT INTO runs (instance_id, runner_id, script, schedule_id, status, created_at, timeout_sec)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		inst.ID, inst.RunnerID, inst.Script, scheduleID, string(StatusPending), toMillis(now), timeoutSec)
 	if err != nil {
 		return nil, err
 	}
@@ -537,6 +588,7 @@ func (s *Store) CreateRun(inst *Instance, timeoutSec int) (*Run, error) {
 		InstanceID: inst.ID,
 		RunnerID:   inst.RunnerID,
 		Script:     inst.Script,
+		ScheduleID: scheduleID,
 		Status:     StatusPending,
 		TimeoutSec: timeoutSec,
 	}, nil
@@ -641,7 +693,7 @@ func (s *Store) FinishRun(runID string, at time.Time, exitCode int, execErr stri
 // to be edited together. The last entry is a sub-select rather than a column — a run's
 // off-site state lives in the replication queue, and joining it here is what puts it in
 // front of an operator without a second request per row (replica_store.go).
-const runCols = `id, instance_id, runner_id, script, status, exit_code, bytes, data_bytes, ` +
+const runCols = `id, instance_id, runner_id, script, schedule_id, status, exit_code, bytes, data_bytes, ` +
 	`created_at, started_at, ended_at, err, timeout_sec, cancel_requested, data_pruned, ` +
 	replicaStatusFor
 
@@ -652,7 +704,7 @@ func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	var status string
 	var cancelRequested, dataPruned int
 	var replicaStatus sql.NullString
-	if err := sc.Scan(&id, &r.InstanceID, &r.RunnerID, &r.Script, &status,
+	if err := sc.Scan(&id, &r.InstanceID, &r.RunnerID, &r.Script, &r.ScheduleID, &status,
 		&r.ExitCode, &r.Bytes, &r.DataBytes, &created, &started, &ended, &r.Err,
 		&r.TimeoutSec, &cancelRequested, &dataPruned, &replicaStatus); err != nil {
 		return nil, err
@@ -687,6 +739,43 @@ func (s *Store) UnfinishedRuns() ([]*Run, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// RunsForInstance returns one task's history, newest first. It is how a run is reached
+// now that there is no flat global list in front of an operator: history is only useful
+// beside the task it belongs to.
+//
+// One more row than asked for is fetched and trimmed, so the caller can say whether
+// there is another page without paying for a COUNT over the whole table.
+func (s *Store) RunsForInstance(instanceID string, limit, offset int) (runs []*Run, hasMore bool, err error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.Query(`SELECT `+runCols+`
+		FROM runs WHERE instance_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+		instanceID, limit+1, offset)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	var out []*Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
 }
 
 // Run returns one run by id, or nil if it does not exist.

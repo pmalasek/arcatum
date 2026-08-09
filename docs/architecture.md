@@ -44,7 +44,7 @@ approves it — see §11.
 | 3 | Restore | **Phase 2** (after backup MVP) | A usable first version sooner. Done: browsing and downloading from the web UI, runs on the server — §13 |
 | 4 | Server language | **Go** (not Python) | Code shared with the runner in a monorepo, a single static binary, an embedded web UI, concurrency |
 | 5 | Authorization | **mTLS + job signing** | Mutual authentication server↔runner; a runner only runs signed jobs. Not a per-script certificate |
-| 6 | Configuration | **Two levels: script definition + instance** | A script = a template (git, no secrets); an instance = a deployment onto a specific target with parameters and a schedule (DB). See §5 |
+| 6 | Configuration | **Three levels: script definition + instance + schedule** | A script = a template (git, no secrets); an instance = a deployment onto a specific target with parameters (DB); a schedule = when that deployment runs, N per instance (DB). See §5 |
 | 7 | Script types | **bash / python / binary / restic** | Binaries are accounted for too (artifact selected by the runner's arch, an emphasis on signing) |
 
 ---
@@ -111,10 +111,12 @@ arcatum/
 
 ---
 
-## 5. Two-level configuration: script definition vs. instance
+## 5. Three-level configuration: script definition, instance, schedule
 
-The **template + deployment** pattern. One script (e.g. a MySQL backup) runs against several
-servers; each server is a separate **instance** with its own parameters and schedule.
+The **template + deployment** pattern, with timing split off from the deployment. One script
+(e.g. a MySQL backup) runs against several servers; each server is a separate **instance**
+with its own parameters; each instance carries any number of **schedules** saying when it
+runs.
 
 ### 5.1 The script (definition) — `scripts/<name>/<name>.toml`
 
@@ -146,8 +148,8 @@ name = "password"; type = "string"; required = true; secret = true
 ### 5.2 The instance — in the DB, managed through the web UI
 
 A concrete binding of a script to a target. This is where the parameter values live (secrets
-encrypted at rest) and **the schedule** (which belongs here, not in the definition — every
-MySQL server may back up at a different time).
+encrypted at rest). It says **what** to back up and with what, and deliberately nothing about
+when.
 
 ```jsonc
 // conceptually (in the DB, not a file):
@@ -157,14 +159,51 @@ MySQL server may back up at a different time).
   "target":   "web-01",            // which runner
   "params":   { "host": "127.0.0.1", "port": 3306, "database": "shop", "user": "backup" },
   "secrets":  { "password": "<enc:age...>" },   // encrypted with the master key
-  "schedule": { "frequency": "weekly", "time": "02:30", "weekdays": ["mon","thu"],
-                "timezone": "Europe/Prague" },
   "run":      { "timeout": "1h", "on_failure": "notify", "capture": "stream" }
 }
 ```
 
-**More databases → more instances.** That gives each DB an independent schedule, status, retry
-and restore granularity. Do not use one script with a list of databases.
+**More databases → more instances.** That gives each DB an independent status, retry and
+restore granularity. Do not use one script with a list of databases.
+
+### 5.2b The schedule — a table of its own, N per instance
+
+Timing belongs neither in the definition nor in the instance. It was in the instance until it
+became clear that one task routinely wants **more than one** timetable — a nightly dump *and*
+a full copy on the first of the month — and that pausing the night run for a week must not
+mean editing the backup itself. Both are impossible with a single schedule embedded in the
+task, so a schedule became a row of its own.
+
+```jsonc
+// conceptually, one row per schedule:
+{
+  "id":          "sch-3",
+  "instance_id": "mysql-web01",
+  "name":        "nightly",       // a label, so several can be told apart
+  "frequency":   "weekly",        // daily | weekly | monthly
+  "time":        "02:30",
+  "weekdays":    ["mon","thu"],   // weekly
+  "day":         0,               // monthly, 1-28 — never above, or February is skipped
+  "timezone":    "Europe/Prague", // empty falls back to the server default
+  "enabled":     true             // false = paused: the definition stays, it stops coming due
+}
+```
+
+Three consequences worth stating outright:
+
+- **An instance with no schedule is legal.** It runs when somebody presses "run now", which is
+  exactly what a task under development wants.
+- **Pausing is not deleting.** A paused schedule keeps its timing; deleting one to skip a week
+  and typing it in again is how a schedule comes back subtly different from the one that was
+  working.
+- **Two schedules due at once produce one run.** They describe the same work, and dispatching
+  both would put two processes into one repository. The run is attributed to the schedule that
+  came due first; the others are advanced all the same, so none fires again a minute later.
+
+A run records which schedule caused it (`runs.schedule_id`, empty for a manual one), so a
+task's history can say whether it was the nightly or the monthly arrangement — and a manual
+run is never reported as a schedule's outcome, which would say the night went fine when it
+never ran.
 
 ### 5.3 Passing parameters to the script
 
@@ -229,14 +268,25 @@ data_dir      = "/var/lib/arcatum-runner"
 Go, **without CGO**, so the binary stays static. The schema is in
 `internal/server/schema.go` and is applied idempotently at every start.
 
+Startup applies it in four steps, and the order matters: `schemaSQL` (the tables) →
+`addColumns` (columns added after the initial schema) → `postMigrateSQL` → the schedule data
+migration. `postMigrateSQL` exists because an index over a column that `addColumns` has just
+added cannot live in `schemaSQL`: that runs first and would fail on every database created
+before the column.
+
 Implemented tables:
 
 - `runners` — id, hostname, os, arch, first_seen, last_seen *(the cert fingerprint and the
   pending/approved state are added with enrollment)*
 - `instances` — script, runner_id, params (JSON), secrets (JSON), capture, timeout,
-  schedule (JSON)
-- `runs` — id (rowid → `run-<n>`), instance_id, runner_id, script, status, exit_code,
-  bytes, started_at, ended_at, err, created_at
+  keep_last, keep_days. The `schedule` column is **legacy**: it held the inline timing before
+  schedules became a table, is read once by the migration and never again. It is kept rather
+  than dropped, because dropping a column in SQLite means rebuilding the table and losing the
+  record of what an operator had before the split
+- `schedules` — id (rowid → `sch-<n>`), instance_id, name, frequency, time, weekdays (comma
+  list), day, timezone, enabled, created_at, updated_at. **N rows per instance** — see §5.2b
+- `runs` — id (rowid → `run-<n>`), instance_id, runner_id, script, **schedule_id** (empty for
+  a manual run), status, exit_code, bytes, started_at, ended_at, err, created_at
 - `users` — web UI accounts: username, PBKDF2 password verifier, role (`admin`/`viewer`),
   disabled, created_at, updated_at, last_login
 - `sessions` — web logins: **the SHA‑256 of the token** from the cookie (not the token
@@ -260,6 +310,23 @@ Logs are capped at **4 MiB per stream and run** (an overflow is marked with a ma
 **retention**: `[storage] log_retention_success` / `log_retention_failed`. Data is not deleted
 by retention — deleting a backup is not a default behaviour anyone should inherit without
 deciding on it themselves.
+
+### The first data migration
+
+Splitting the schedule out of the instance is the first change in this project that had to
+move *data*, not merely add a column. It runs at every open (`migrate_schedules.go`) and does
+nothing on a database that has already been through it.
+
+The guard is `instances.schedule_migrated`, set **per row**. The obvious alternative — "does
+this instance already have a schedule?" — is wrong in the one case that matters: an operator
+who deletes a schedule would get it back on the next restart, silently, and the task would go
+on running at a time they had removed. A per-row marker cannot do that, because what it
+records is "this instance's legacy blob has been dealt with", not "this instance has a
+schedule". It also stays correct for an instance restored later from an older archive.
+
+An instance whose inline schedule is empty or unreadable is logged and marked migrated all the
+same. A server that refuses to start over one malformed blob is worse than one that starts
+with a task somebody has to reschedule by hand: the second keeps every other backup running.
 
 Times are unix millis (0 = not set). **Secrets in `instances.secrets` are encrypted** (see
 §7). Moving to Postgres remains an open option.
@@ -469,7 +536,8 @@ Vanilla JS with no build step — the goal is for the server to remain a single 
 file.
 New endpoints: `GET /api/v1/runs/{id}` and `GET /api/v1/runs/{id}/tail?offset=`.
 
-Contents: the Runs / Instances / Runners tabs, a run detail with a **live tail**, a
+Contents: the Dashboard / Instances / Schedules / Restore / Runners / Keys / Users /
+Administration tabs, a per-task **run history**, a run detail with a **live tail**, a
 stdout/stderr switch, "follow" (autoscroll) and a **run now** button (§8).
 
 **Verified end to end:** the UI and its assets are served (HTTP 200), without a certificate the
@@ -485,6 +553,25 @@ under them works.
 
 ### Phase H — one-command installation and enrollment ✓
 See §11.
+
+### Phase I — schedules as an entity, dashboard-first UI ✓
+
+**What:** timing moved out of the instance into a `schedules` table, N per instance and
+individually pausable (§5.2b). Runs record which schedule caused them. The flat Runs tab was
+replaced by a **Dashboard** (running now / failed in the last 24 h / next runs, assembled by
+the server in one request) and run history is read **per task**. Archive format 2, with
+format 1 still importable. The UI became responsive.
+
+**Why:** one task routinely wants more than one timetable — a nightly dump and a monthly full
+copy — which a schedule embedded in the instance cannot express; and a single mixed list of
+every run ever never answered "how has *this* backup been doing".
+
+**Verified end to end:** an existing database migrates its inline schedules on first open and
+does not do it again on the next restart; a schedule deleted by hand stays deleted across a
+restart; two schedules due in the same check-in produce one run, attributed to the earlier one,
+with both advanced; a paused schedule reports no next run and does not fire; "run now" works on
+an instance with no schedules at all and records an empty `schedule_id`; a format 1 archive
+imports with its schedules lifted out and tracked without a restart.
 
 **Knowingly missing for now (later phases):** restore through the API/web UI (today directly
 with restic and an admin certificate), notifications, dry-run, instance management through the
@@ -826,9 +913,15 @@ as `***`, empty, or is not in the payload at all therefore **keeps what is store
 does not exist. Previously it upserted at every start, so a server restart would revert every
 change made from the web UI. The old behaviour can be forced with `-import-force`.
 
-The scheduler is updated at runtime (`Track` again, `Untrack` on deletion), so a schedule change
-takes effect immediately. Deleting an instance **does not delete the restic repository**:
-throwing away the configuration must not throw away the backups.
+The scheduler is updated at runtime — `TrackSchedule` on a saved schedule, `UntrackSchedule`
+on a deleted one, `UntrackInstance` when a whole task goes — so a change takes effect
+immediately rather than at the next restart. Editing an *instance* no longer touches the
+scheduler at all: an instance carries no timing to re-track.
+
+Deleting an instance deletes its schedules in the same transaction — a schedule outliving its
+task is a row that can never run anything, and one the scheduler would go on treating as due.
+It **does not delete the restic repository**: throwing away the configuration must not throw
+away the backups.
 
 ### Auto-update: the riskiest feature in the system
 
@@ -1148,7 +1241,7 @@ have no business travelling, and it nails the archive to one schema version. JSO
 readable and diffable — for a file whose only purpose is to be restored under pressure, that is
 not cosmetic.
 
-`instances`, `users` and `runners` are carried. Runs are history, not configuration, and the
+`instances`, `schedules`, `users` and `runners` are carried. Runs are history, not configuration, and the
 files they point at are on disk anyway. Sessions are discarded, not transferred: a session
 belongs to the browser that opened it, not to the configuration it was created against.
 
@@ -1170,7 +1263,7 @@ password is one more thing that can be forgotten at precisely the moment the arc
 
 ### The import replaces, and asks first
 
-The semantics are **replace-all**: the three tables are emptied and filled from the archive, so
+The semantics are **replace-all**: the four tables are emptied and filled from the archive, so
 after the import there is exactly what was exported, with no leftovers. All in one transaction —
 a half-imported configuration is the state there is no way out of through the web UI.
 
@@ -1191,12 +1284,32 @@ afterwards.
 
 Anything that would leave behind an irreversible state is refused: an archive without an
 enabled admin, an instance with a script that is not here (the server would not come up after a
-restart — see `New`), a schedule the scheduler does not understand, unreadable secrets, a
-checksum that does not match.
+restart — see `New`), a schedule the scheduler does not understand or one that parses but never
+comes due, a schedule belonging to an instance the archive does not contain, unreadable
+secrets, a checksum that does not match.
 
-After the write, a `Reset` is performed on the scheduler — without it, removed instances would
-hold their place in the schedule and new ones would never get their turn. No restart is needed;
-precisely because no keys are transferred, the import is a purely database operation.
+After the write, a `Reset` is performed on the scheduler — without it, removed schedules would
+hold their place and new ones would never get their turn. The schedules it is given are
+**re-read from the store** rather than rebuilt from the archive: ids only exist once the table
+has assigned them, and reading back what was actually written cannot drift from it. No restart
+is needed; precisely because no keys are transferred, the import is a purely database
+operation.
+
+### Format 2, and why format 1 still opens
+
+Splitting schedules out of the instance changed what an archive holds, so `configArchiveFormat`
+went to 2 and `schedules.json` joined the other three tables. The reader accepts **1 to 2**:
+the archive somebody reaches for is the one exported before the server was lost, and refusing
+to read it because the layout has moved on would defeat the entire feature. A format 1 archive
+has its inline schedules lifted into standalone ones on the way in, named `default` and
+enabled.
+
+Imported schedules are inserted **without their archived id** — the table hands out its own,
+and an id restored from an archive could collide with a row this server has since created. What
+a schedule *is* travels; which number it happened to have does not. For the same reason the
+import plan diffs schedules **by what they say** (instance plus timing), not by id: keying on
+an id that is re-assigned on insert would report every unchanged schedule as removed and added
+again.
 
 ### `server.toml` travels along but is not applied
 

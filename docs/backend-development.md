@@ -201,11 +201,16 @@ runner: Agent.Tick                      internal/runner/loop.go
                                          │    identity comes from the certificate CN, not the request
                                          ├─ store.RecordCheckin      internal/server/store.go
                                          ├─ store.InstancesForRunner
-                                         ├─ sched.Due                internal/server/scheduler.go
-                                         └─ buildDispatch            internal/server/http.go:207
+                                         ├─ sched.DueFor             internal/server/scheduler.go
+                                         │    → the ids of the due schedules + a manual flag;
+                                         │      several due at once still produce ONE run,
+                                         │      attributed to the earliest, all of them advanced
+                                         └─ buildDispatch(in, scheduleID)  internal/server/http.go
                                               ├─ catalog.Get + readArtifact  (artifact SHA-256)
-                                              ├─ store.CreateRun     → status "pending"
+                                              ├─ store.CreateRun     → status "pending", schedule_id
                                               └─ signer.Sign(d.SigningBytes())
+                                         (then sched.MarkDispatched per schedule,
+                                          sched.ClearManual for a "run now")
   ◄──── CheckinResponse{Due: […]} ─────┘
   ├─ verifyDispatch                     internal/runner/loop.go:56   the signature BEFORE running
   ├─ Execute                            internal/runner/executor.go
@@ -278,6 +283,28 @@ added where missing, so an existing database is upgraded in place. **Do not chan
 in `schemaSQL`, and give the column a default that keeps older data working (see the
 enrollment columns: default `approved`, so manually issued certificates keep working).
 
+### A new index, and a new table
+
+An index over a column that `addColumns` added belongs in **`postMigrateSQL`**, never in
+`schemaSQL`: the schema is applied *before* the migration, so such an index would fail on every
+database that predates the column. A whole new table goes into `schemaSQL` as usual — it is
+`CREATE TABLE IF NOT EXISTS`, which is safe everywhere.
+
+### Moving data, not just schema
+
+If a change has to *move* data — the schedule split is the first one that did — put it in its
+own file (see [internal/server/migrate_schedules.go](../internal/server/migrate_schedules.go))
+and run it from `Open` after `postMigrateSQL`.
+
+Two rules that migration paid for:
+
+- **Guard per row, not per database.** A global "done" flag is right exactly once. A marker
+  column on the row being migrated is also right for a row restored later from an older
+  archive — and, the case that matters, it never resurrects something the operator has since
+  deleted. Every writer sets the marker as it inserts, so the scan never revisits a fresh row.
+- **Do not fail the open over one bad row.** Log it, mark it handled and carry on. A server
+  that refuses to start over one malformed value takes every other backup down with it.
+
 ### A new protocol message or field
 
 `pkg/proto/proto.go`. If the field takes part in the signature, add it to `SigningBytes()` in
@@ -296,7 +323,7 @@ an entrypoint (like `restic`) needs an exception in `Validate()` and in `Catalog
 
 ## 5. Tests
 
-23 test files; `go test ./...` currently passes. The tests are in the same package as the code
+42 test files; `go test ./...` currently passes. The tests are in the same package as the code
 (`package server`), so they see unexported things too.
 
 Useful patterns already in the repository — use them, do not invent new ones:
@@ -331,7 +358,8 @@ These are easy to miss in a manual test, because "it works".
 ## 6. Debugging
 
 **The server log** is the main source. The server reports every dispatch
-(`dispatch: instance=… run=… -> runner=…`), rejections (`checkin denied: …`) and instance
+(`dispatch: instance=… run=… schedule=… -> runner=…`, where a manual run logs `schedule=manual`),
+rejections (`checkin denied: …`) and instance
 errors. A broken instance does not stop the checkin — it is only skipped with a log entry, so
 when a job "did not run and nobody said anything", look here.
 
@@ -339,7 +367,11 @@ when a job "did not run and nobody said anything", look here.
 
 ```sh
 sqlite3 local/data/arcatum.db 'SELECT id,instance_id,status,exit_code,bytes FROM runs ORDER BY id DESC LIMIT 10;'
-sqlite3 local/data/arcatum.db 'SELECT id,script,runner_id,schedule FROM instances;'
+sqlite3 local/data/arcatum.db 'SELECT id,script,runner_id FROM instances;'
+# when a task runs — instances.schedule is the legacy column and is empty for anything
+# created after the split, so reading it will mislead you
+sqlite3 local/data/arcatum.db 'SELECT id,instance_id,name,frequency,time,enabled FROM schedules;'
+sqlite3 local/data/arcatum.db 'SELECT id,instance_id,schedule_id,status FROM runs ORDER BY id DESC LIMIT 10;'
 sqlite3 local/data/arcatum.db 'SELECT id,status,last_seen,cert_not_after FROM runners;'
 ```
 
@@ -426,6 +458,20 @@ The consequence for development: **after a change in `web/` the server must be r
 compile time). Add a new file in `web/` to the `//go:embed` directive and to the list of
 served assets in `WebHandler()` as well.
 
+The views are section elements toggled by a `hidden` class: `dashboard` (the landing page),
+`instances`, `instance-form`, `schedules`, `schedule-form`, `history` (one task's runs),
+`restore`, `runners`, `rotation`, `users`, `admin`, `account` and `detail` (a run with its live
+tail). Which of them refresh on the five-second timer is decided by the `loaders` map — the
+forms, the account page and the run detail are deliberately absent from it, or a refresh would
+overwrite a half-filled form under the operator's hands.
+
+**Every `<td>` a render produces carries a `data-label`.** Below 620 px the tables stop being
+tables: each row becomes a card and the cell's `data-label` is drawn beside its value, because
+scrolling a table sideways to find out whether last night succeeded is what makes a UI useless
+on a phone. A new table without `data-label` looks fine on a desktop and turns into an unlabelled
+column of values on a phone, which is exactly the sort of thing nobody notices until they are
+on a train.
+
 The web UI runs on its own port (`[web] listen`) and logs in with a username and password —
 the assets themselves are available without a login (it is the page that *asks* for the
 login), all data goes through the API behind a session cookie. On a 401 from the API, `app.js`
@@ -446,15 +492,22 @@ The UI is **English-only**; the documentation is the bilingual part of the proje
 
 ## 9. Traps that cost time
 
-- **The scheduler is in memory.** `next_run` is recomputed from the current time after a
-  restart, so a run that was due during the restart is skipped. It is not a bug — schedule
-  persistence is deliberately out of scope, but it is confusing when testing schedules.
+- **The scheduler is in memory.** `next_run` is recomputed per schedule from the current time
+  after a restart, so a run that was due during the restart is skipped. It is not a bug —
+  persisting next-run times is deliberately out of scope, but it is confusing when testing
+  schedules. A disabled schedule is tracked but never due, so enabling it is a flag rather than
+  a re-parse that could fail at the worst moment.
+- **`instances.schedule` is not the source of truth.** It is the pre-split column, read once by
+  the migration and empty for anything created since. Query the `schedules` table.
 - **The script catalogue is loaded at startup only.** A change to `scripts/*.toml` without a
   restart has no effect; a broken manifest, on the other hand, takes the startup down straight
   away.
 - **The instance seed does not overwrite existing ones.** Editing `instances.json` without
   `-import-force` "does not happen" — and that is how it should be, otherwise a restart would
-  erase changes made from the web UI.
+  erase changes made from the web UI. The same goes for the `schedules` in it: adding one for an
+  instance that already exists does nothing at all, deliberately, so that a schedule an operator
+  deleted is not re-created on every restart. With `-import-force` the instance's schedules are
+  **replaced**, not appended to.
 - **Identity is determined by the certificate, not the request.** `req.RunnerID` from the body
   is discarded and overwritten with the value from `CN`. Code that trusts the body circumvents
   authorization.

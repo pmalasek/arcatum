@@ -90,7 +90,7 @@ func TestReplicaTransfersAFinishedDump(t *testing.T) {
 
 func TestReplicaNeverCopiesAnUploadInProgress(t *testing.T) {
 	srv, dir, dest := replicaTestServer(t, true)
-	run, err := srv.store.CreateRun(&Instance{ID: "mysql-web01", Script: "mysql-backup", RunnerID: "db-01"}, 60)
+	run, err := srv.store.CreateRun(&Instance{ID: "mysql-web01", Script: "mysql-backup", RunnerID: "db-01"}, "", 60)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestReplicaDefersARepositoryWhileItsInstanceIsBackingUp(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, "data"), 0o750); err != nil {
 		t.Fatalf("mkdir repo: %v", err)
 	}
-	if _, err := srv.store.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, 3600); err != nil {
+	if _, err := srv.store.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, "", 3600); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 

@@ -244,6 +244,8 @@ do půl hodiny a dá skutečnou odpověď:
 
 Checklist pro novou databázovou instanci:
 
+- [ ] instance má aspoň jeden povolený **rozvrh** — bez něj se spustí, jen když někdo zmáčkne
+      „run now"
 - [ ] zkušební obnova proběhla, `exit = 0`, kontrolní součty / počty řádků sedí
 - [ ] cílová databáze šla založit se **stejným kódováním a collation**
 - [ ] u Postgresu: server má i instanci `postgres-globals-backup` a její dump jsi obnovil

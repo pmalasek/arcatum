@@ -200,17 +200,19 @@ go run ./cmd/server -config local/server.toml -instances local/instances.json
 ```
 
 Instanci založ z webu (**Instances → new instance** — formulář vznikne z tvých deklarací,
-takže hned uvidíš, jestli manifest dává smysl), nebo přes API:
+takže hned uvidíš, jestli manifest dává smysl; časová pole nemá, čas se řeší v záložce
+**Schedules**), nebo přes API:
 
 ```sh
 curl -X POST -H 'Content-Type: application/json' http://127.0.0.1:8443/api/v1/instances -d '{
   "id": "mujskript-test", "script": "muj-skript", "runner_id": "'"$(hostname -s)"'",
   "params": {"host": "127.0.0.1"}, "secrets": {"password": "tajne"},
-  "timeout": "5m", "schedule": {"frequency": "daily", "time": "03:00"}
+  "timeout": "5m"
 }'
 ```
 
-Rozvrh dej klidně na noc — testovat budeš ručním spuštěním:
+Během vývoje jí rozvrh vůbec nedávej. Instance bez rozvrhu se spustí, jen když ji spustíš —
+přesně to, co tady chceš:
 
 ```sh
 curl -X POST http://127.0.0.1:8443/api/v1/instances/mujskript-test/run
@@ -237,7 +239,8 @@ parametrů a secretu) a `slow-demo` (píše řádek za sekundu — pro živý ta
 
 ## 6. Ladění běhu
 
-**Cesta z webu je nejpohodlnější:** záložka **Instances** → **run now**, pak klik na běh.
+**Cesta z webu je nejpohodlnější:** záložka **Instances** → **run now**, což otevře historii
+téhle úlohy — a pak klik na běh.
 Otevře se detail s **živým tailem** — u probíhající úlohy se log dosypává, jak přichází,
 s přepínačem `stdout`/`stderr` a zaškrtávátkem „follow". U skriptu s
 `capture = "stream"` je ve `stdout` jen shrnutí („streamed N bytes…"); samotná data se

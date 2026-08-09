@@ -228,7 +228,7 @@ func TestReplicaQueueCounts(t *testing.T) {
 
 func TestHasActiveRun(t *testing.T) {
 	st, _ := openTestStore(t)
-	run, err := st.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, 3600)
+	run, err := st.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestRunCarriesItsReplicaStatus(t *testing.T) {
 	st, _ := openTestStore(t)
 	now := time.Now()
 	dump := storeDump(t, st, "mysql-web01", now, 16)
-	repoRun, err := st.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, 3600)
+	repoRun, err := st.CreateRun(&Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"}, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestReplicableRunsSkipsRotatedAndUnsuccessful(t *testing.T) {
 	if _, err := st.DeleteRunPayload(rotated.ID); err != nil {
 		t.Fatalf("DeleteRunPayload: %v", err)
 	}
-	failed, err := st.CreateRun(&Instance{ID: "mysql-web01", Script: "mysql-backup", RunnerID: "db-01"}, 3600)
+	failed, err := st.CreateRun(&Instance{ID: "mysql-web01", Script: "mysql-backup", RunnerID: "db-01"}, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestReplicableRunsSkipsRotatedAndUnsuccessful(t *testing.T) {
 
 func TestSnapshotDatabaseIsReadable(t *testing.T) {
 	st, dir := openTestStore(t)
-	if _, err := st.CreateRun(&Instance{ID: "mysql-web01", Script: "mysql-backup", RunnerID: "db-01"}, 60); err != nil {
+	if _, err := st.CreateRun(&Instance{ID: "mysql-web01", Script: "mysql-backup", RunnerID: "db-01"}, "", 60); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	path := dir + "/snapshot.db"

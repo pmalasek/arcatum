@@ -41,7 +41,7 @@ vlastní identitu (klíč + CSR); certifikát dostane po schválení operátorem
 | 3 | Restore | **2. fáze** (po MVP zálohování) | Rychlejší první použitelná verze. Hotovo: procházení a stažení z webu, běží na serveru — §13 |
 | 4 | Jazyk serveru | **Go** (ne Python) | Sdílený kód s runnerem v monorepu, jeden statický binár, embed web UI, concurrency |
 | 5 | Autorizace | **mTLS + podpis úloh** | Vzájemná autentizace server↔runner; runner spustí jen podepsané úlohy. Ne per-script certifikát |
-| 6 | Konfigurace | **Dvojí: definice skriptu + instance** | Skript = šablona (git, bez secrets); instance = nasazení na konkrétní cíl s parametry a rozvrhem (DB). Viz §5 |
+| 6 | Konfigurace | **Trojí: definice skriptu + instance + rozvrh** | Skript = šablona (git, bez secrets); instance = nasazení na konkrétní cíl s parametry (DB); rozvrh = kdy se to nasazení spouští, N na instanci (DB). Viz §5 |
 | 7 | Typy skriptů | **bash / python / binary / restic** | Počítat i s binárkami (výběr dle archu runneru, důraz na podpis) |
 
 ---
@@ -108,10 +108,11 @@ arcatum/
 
 ---
 
-## 5. Dvojí konfigurace: definice skriptu vs. instance
+## 5. Trojí konfigurace: definice skriptu, instance, rozvrh
 
-Vzor **šablona + nasazení**. Jeden skript (např. záloha MySQL) se spouští proti více
-serverům; každý server je samostatná **instance** s vlastními parametry a rozvrhem.
+Vzor **šablona + nasazení**, s časem odděleným od nasazení. Jeden skript (např. záloha MySQL)
+se spouští proti více serverům; každý server je samostatná **instance** s vlastními parametry;
+každá instance nese libovolný počet **rozvrhů**, které říkají, kdy běží.
 
 ### 5.1 Skript (definice) — `scripts/<name>/<name>.toml`
 
@@ -142,8 +143,8 @@ name = "password"; type = "string"; required = true; secret = true
 
 ### 5.2 Instance — v DB, spravováno přes web UI
 
-Konkrétní vázání skriptu na cíl. Tady žijí hodnoty parametrů (secrets šifrované at-rest)
-a **rozvrh** (ten patří sem, ne do definice — každý MySQL server může zálohovat v jiný čas).
+Konkrétní vázání skriptu na cíl. Tady žijí hodnoty parametrů (secrets šifrované at-rest).
+Instance říká **co** zálohovat a čím, a záměrně nic o tom kdy.
 
 ```jsonc
 // koncepčně (v DB, ne soubor):
@@ -153,14 +154,49 @@ a **rozvrh** (ten patří sem, ne do definice — každý MySQL server může z�
   "target":   "web-01",            // který runner
   "params":   { "host": "127.0.0.1", "port": 3306, "database": "shop", "user": "backup" },
   "secrets":  { "password": "<enc:age...>" },   // šifrováno master klíčem
-  "schedule": { "frequency": "weekly", "time": "02:30", "weekdays": ["mon","thu"],
-                "timezone": "Europe/Prague" },
   "run":      { "timeout": "1h", "on_failure": "notify", "capture": "stream" }
 }
 ```
 
-**Víc databází → víc instancí.** Dá to nezávislý rozvrh, status, retry a granularitu
-restoru na každou DB. Nepoužívat jeden skript s listem databází.
+**Víc databází → víc instancí.** Dá to nezávislý status, retry a granularitu restoru na
+každou DB. Nepoužívat jeden skript s listem databází.
+
+### 5.2b Rozvrh — vlastní tabulka, N na instanci
+
+Čas nepatří ani do definice, ani do instance. V instanci byl do chvíle, než se ukázalo, že
+jedna úloha běžně chce **víc než jeden** časový plán — noční dump *a* plnou kopii prvního
+v měsíci — a že pozastavení nočního běhu na týden nesmí znamenat editaci samotné zálohy. Obojí
+je s jedním rozvrhem zapuštěným v úloze nemožné, a tak se z rozvrhu stal samostatný řádek.
+
+```jsonc
+// koncepčně, jeden řádek na rozvrh:
+{
+  "id":          "sch-3",
+  "instance_id": "mysql-web01",
+  "name":        "nightly",       // popisek, aby šlo víc rozvrhů rozlišit
+  "frequency":   "weekly",        // daily | weekly | monthly
+  "time":        "02:30",
+  "weekdays":    ["mon","thu"],   // weekly
+  "day":         0,               // monthly, 1-28 — nikdy víc, jinak se přeskočí únor
+  "timezone":    "Europe/Prague", // prázdné = výchozí TZ serveru
+  "enabled":     true             // false = pozastaveno: definice zůstane, přestane dozrávat
+}
+```
+
+Tři důsledky, které stojí za vyslovení:
+
+- **Instance bez rozvrhu je legitimní.** Spustí se, když někdo zmáčkne „run now" — přesně to,
+  co chce rozdělaná úloha ve vývoji.
+- **Pozastavit není smazat.** Pozastavený rozvrh si drží svůj čas; smazat ho kvůli vynechání
+  jednoho týdne a napsat ho znovu je způsob, jak se rozvrh vrátí nenápadně jiný, než jaký
+  fungoval.
+- **Dva rozvrhy dozrálé naráz dají jeden běh.** Popisují tutéž práci a odeslat oba by pustilo
+  dva procesy do jednoho repozitáře. Běh se připíše rozvrhu, který dozrál první; ostatní se
+  posunou také, takže ani jeden nevystřelí znovu za minutu.
+
+Běh si pamatuje, který rozvrh ho způsobil (`runs.schedule_id`, prázdné u ručního), takže
+historie úlohy umí říct, jestli šlo o noční nebo měsíční plán — a ruční běh se nikdy nevydává
+za výsledek rozvrhu, což by tvrdilo, že noc dopadla dobře, i když vůbec neproběhla.
 
 ### 5.3 Předání parametrů skriptu
 
@@ -221,14 +257,25 @@ data_dir      = "/var/lib/arcatum-runner"
 v Go, **bez CGO**, takže binárka zůstává statická. Schéma v `internal/server/schema.go`,
 aplikuje se idempotentně při každém startu.
 
+Start ho aplikuje ve čtyřech krocích a na pořadí záleží: `schemaSQL` (tabulky) → `addColumns`
+(sloupce přidané po původním schématu) → `postMigrateSQL` → datová migrace rozvrhů.
+`postMigrateSQL` existuje proto, že index nad sloupcem, který `addColumns` právě přidal, nemůže
+být v `schemaSQL`: to běží první a na každé databázi vzniklé před tím sloupcem by spadlo.
+
 Implementované tabulky:
 
 - `runners` — id, hostname, os, arch, first_seen, last_seen *(cert fingerprint a stav
   pending/approved přidáme s enrollmentem)*
 - `instances` — script, runner_id, params (JSON), secrets (JSON), capture, timeout,
-  schedule (JSON)
-- `runs` — id (rowid → `run-<n>`), instance_id, runner_id, script, status, exit_code,
-  bytes, started_at, ended_at, err, created_at
+  keep_last, keep_days. Sloupec `schedule` je **pozůstatek**: držel inline čas, než se z
+  rozvrhů stala tabulka, migrace ho jednou přečte a víc nikdy. Zůstává místo zahození, protože
+  zahodit sloupec v SQLite znamená přestavět tabulku a přijít o záznam toho, co operátor měl
+  před rozdělením
+- `schedules` — id (rowid → `sch-<n>`), instance_id, name, frequency, time, weekdays (seznam
+  oddělený čárkou), day, timezone, enabled, created_at, updated_at. **N řádků na instanci** —
+  viz §5.2b
+- `runs` — id (rowid → `run-<n>`), instance_id, runner_id, script, **schedule_id** (prázdné
+  u ručního běhu), status, exit_code, bytes, started_at, ended_at, err, created_at
 - `users` — účty web UI: username, PBKDF2 verifikátor hesla, role (`admin`/`viewer`),
   disabled, created_at, updated_at, last_login
 - `sessions` — přihlášení do webu: **SHA‑256 tokenu** z cookie (ne token sám), username,
@@ -251,6 +298,24 @@ SQL dump. Podrobněji v §17.
 Logy mají strop **4 MiB na stream a běh** (přetečení se označí markerem) a **retenci**:
 `[storage] log_retention_success` / `log_retention_failed`. Data se retencí nemažou —
 smazat zálohu není výchozí chování, které by měl kdokoli zdědit bez vlastního rozhodnutí.
+
+### První datová migrace
+
+Oddělení rozvrhu od instance je první změna v tomhle projektu, která musela přesunout *data*,
+ne jen přidat sloupec. Běží při každém otevření (`migrate_schedules.go`) a na databázi, která
+už tím prošla, nedělá nic.
+
+Pojistkou je `instances.schedule_migrated`, nastavovaná **per řádek**. Nabízející se
+alternativa — „má už tahle instance rozvrh?" — je špatně přesně v tom případě, na kterém
+záleží: operátorovi, který rozvrh smaže, by se při dalším restartu potichu vrátil a úloha by
+dál běžela v čase, který odstranil. Značka per řádek to udělat nemůže, protože zaznamenává
+„starý blob téhle instance je vyřízený", ne „tahle instance má rozvrh". A zůstane správná i
+pro instanci obnovenou později ze staršího archivu.
+
+Instance s prázdným nebo nečitelným inline rozvrhem se zaloguje a označí jako migrovaná
+stejně. Server, který odmítne nastartovat kvůli jednomu zdeformovanému blobu, je horší než
+server, který nastartuje s úlohou, kterou musí někdo přerozvrhnout ručně: ten druhý drží
+všechny ostatní zálohy v chodu.
 
 Časy jsou unix millis (0 = nenastaveno). **Secrets jsou v `instances.secrets` šifrované**
 (viz §7). Přechod na Postgres zůstává otevřený.
@@ -450,7 +515,8 @@ jménem a heslem (§16). Textový přehled se přesunul na `/status`.
 Vanilla JS bez build stepu — cílem je, aby server zůstal jeden samostatný soubor.
 Nové endpointy: `GET /api/v1/runs/{id}` a `GET /api/v1/runs/{id}/tail?offset=`.
 
-Obsah: záložky Runs / Instances / Runners, detail běhu se **živým tailem**, přepínač
+Obsah: záložky Dashboard / Instances / Schedules / Restore / Runners / Keys / Users /
+Administration, **historie běhů** po úlohách, detail běhu se **živým tailem**, přepínač
 stdout/stderr, „follow" (autoscroll) a tlačítko **run now** (§8).
 
 **Ověřeno E2E:** UI i assety se servírují (HTTP 200), bez certifikátu spojení neprojde,
@@ -465,6 +531,25 @@ UI ověřen nebyl, jen že se soubory servírují a API pod nimi funguje.
 
 ### Fáze H — instalace jedním příkazem a enrollment ✓
 Viz §11.
+
+### Fáze I — rozvrhy jako entita, UI s dashboardem ✓
+
+**Co:** čas se odstěhoval z instance do tabulky `schedules`, N na instanci a každý zvlášť
+pozastavitelný (§5.2b). Běhy si pamatují, který rozvrh je způsobil. Plochou záložku Runs
+nahradil **Dashboard** (co běží / co selhalo za 24 h / nejbližší běhy, poskládané serverem
+v jednom požadavku) a historie běhů se čte **po úlohách**. Formát archivu 2, formát 1 se pořád
+naimportuje. Web se stal responzivním.
+
+**Proč:** jedna úloha běžně chce víc než jeden časový plán — noční dump a měsíční plnou kopii —
+což rozvrh zapuštěný v instanci neumí vyjádřit; a jeden promíchaný seznam všech běhů nikdy
+neodpověděl na otázku „jak se vede *téhle* záloze".
+
+**Ověřeno E2E:** existující databáze si při prvním otevření zmigruje inline rozvrhy a při
+dalším restartu už to neudělá; ručně smazaný rozvrh zůstane smazaný i přes restart; dva rozvrhy
+dozrálé v témže check-inu dají jeden běh připsaný tomu dřívějšímu a oba se posunou; pozastavený
+rozvrh nehlásí příští běh a nevystřelí; „run now" funguje na instanci úplně bez rozvrhů a
+zapíše prázdné `schedule_id`; archiv formátu 1 se naimportuje s vytaženými rozvrhy a je
+zatrackovaný bez restartu.
 
 **Zatím vědomě chybí (další fáze):** restore přes API/web (dnes přímo resticem s admin
 certifikátem), notifikace, dry-run, správa instancí přes API (dnes seed z JSON),
@@ -788,9 +873,14 @@ přijde jako `***`, prázdná, nebo v payloadu vůbec není, proto **zachová ul
 neexistuje. Předtím upsertoval při každém startu, takže restart serveru by vrátil zpět
 každou změnu udělanou z webu. Vynutit staré chování jde `-import-force`.
 
-Scheduler se aktualizuje za běhu (`Track` znovu, `Untrack` při smazání), takže změna
-rozvrhu platí okamžitě. Smazání instance **nemaže restic repozitář**: zahodit
-konfiguraci nesmí zahodit zálohy.
+Scheduler se aktualizuje za běhu — `TrackSchedule` u uloženého rozvrhu, `UntrackSchedule`
+u smazaného, `UntrackInstance`, když jde pryč celá úloha — takže změna platí okamžitě, ne až
+při dalším restartu. Úprava *instance* se scheduleru netýká vůbec: instance žádný čas
+k přetrackování nenese.
+
+Smazání instance smaže v téže transakci i její rozvrhy — rozvrh, který přežije svou úlohu, je
+řádek, co nikdy nic nespustí a kterému by scheduler dál nechal dozrávat. **Nemaže restic
+repozitář**: zahodit konfiguraci nesmí zahodit zálohy.
 
 ### Auto-update: nejrizikovější funkce v systému
 
@@ -1091,7 +1181,7 @@ nejde zkopírovat konzistentně za běhu, táhne s sebou historii běhů a živ�
 nemají co cestovat, a přibije archiv na jednu verzi schématu. JSON po tabulkách je čitelný
 a diffovatelný — u souboru, jehož jediný smysl je být obnoven pod tlakem, to není kosmetika.
 
-Nese se `instances`, `users` a `runners`. Běhy jsou historie, ne konfigurace, a soubory,
+Nese se `instances`, `schedules`, `users` a `runners`. Běhy jsou historie, ne konfigurace, a soubory,
 na které ukazují, leží stejně na disku. Sezení se zahazují, ne přenášejí: sezení patří
 prohlížeči, který ho otevřel, ne konfiguraci, proti které vzniklo.
 
@@ -1113,7 +1203,7 @@ zapomenout přesně ve chvíli, kdy se archiv potřebuje.
 
 ### Import nahrazuje, a napřed se ptá
 
-Sémantika je **replace-all**: tři tabulky se vyprázdní a naplní archivem, takže po importu
+Sémantika je **replace-all**: čtyři tabulky se vyprázdní a naplní archivem, takže po importu
 je přesně to, co bylo exportováno, bez zbytků. Celé v jedné transakci — polovičně
 naimportovaná konfigurace je ten stav, ze kterého se nelze dostat webem ven.
 
@@ -1132,11 +1222,28 @@ je poslední chvíle, kdy se to má zjistit až potom.
 
 Odmítá se všechno, co by po sobě nechalo nevratný stav: archiv bez povoleného admina,
 instance se skriptem, který tu není (server by po restartu nenaběhl — viz `New`), rozvrh,
-kterému scheduler nerozumí, nečitelné secrets, nesedící kontrolní součet.
+kterému scheduler nerozumí nebo který se sice rozparsuje, ale nikdy nedozraje, rozvrh patřící
+instanci, kterou archiv neobsahuje, nečitelné secrets, nesedící kontrolní součet.
 
-Po zápisu se schedulerem provede `Reset` — bez něj by odebrané instance držely místo
-v rozvrhu a nové by se nikdy nedočkaly. Restart potřeba není; právě proto, že se
-nepřenášejí klíče, je import čistě databázová operace.
+Po zápisu se schedulerem provede `Reset` — bez něj by odebrané rozvrhy držely místo a nové by
+se nikdy nedočkaly. Rozvrhy, které dostane, se **načtou znovu ze store**, ne poskládají
+z archivu: id vzniknou teprve tím, že je tabulka přidělí, a zpětné načtení toho, co se
+opravdu zapsalo, se s tím nemůže rozejít. Restart potřeba není; právě proto, že se nepřenášejí
+klíče, je import čistě databázová operace.
+
+### Formát 2 a proč se formát 1 pořád otevře
+
+Oddělením rozvrhů od instance se změnilo, co archiv nese, takže `configArchiveFormat` šel na 2
+a ke třem tabulkám přibyl `schedules.json`. Čtečka přijímá **1 až 2**: archiv, po kterém člověk
+sáhne, je ten vyexportovaný předtím, než server zmizel, a odmítnout ho číst kvůli posunutému
+rozvržení by celou tuhle funkci připravilo o smysl. Archivu formátu 1 se inline rozvrhy cestou
+dovnitř přesypou do samostatných, pojmenovaných `default` a povolených.
+
+Naimportované rozvrhy se vkládají **bez svého archivovaného id** — tabulka přidělí vlastní a id
+obnovené z archivu by mohlo kolidovat s řádkem, který tenhle server mezitím založil. Veze se to,
+co rozvrh *je*, ne jaké měl zrovna číslo. Ze stejného důvodu plán importu porovnává rozvrhy
+**podle toho, co říkají** (instance plus čas), ne podle id: klíčovat podle id, které se při
+vložení přiděluje znovu, by hlásilo každý nezměněný rozvrh jako odebraný a znovu přidaný.
 
 ### `server.toml` se veze, ale neaplikuje
 

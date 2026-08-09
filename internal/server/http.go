@@ -91,8 +91,8 @@ type Options struct {
 	Replica ReplicaOptions
 }
 
-// New builds a Server over an open Store: loads the script catalog and starts
-// tracking the schedule of every instance currently in the database.
+// New builds a Server over an open Store: loads the script catalog and starts tracking
+// every schedule currently in the database.
 func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger, opts Options) (*Server, error) {
 	cat, err := LoadCatalog(scriptsDir)
 	if err != nil {
@@ -102,14 +102,28 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 	if err != nil {
 		return nil, fmt.Errorf("load instances: %w", err)
 	}
-	sched := NewScheduler(loc)
-	now := time.Now()
+	known := make(map[string]bool, len(instances))
 	for _, in := range instances {
 		if _, ok := cat.Get(in.Script); !ok {
 			return nil, fmt.Errorf("instance %q references unknown script %q", in.ID, in.Script)
 		}
-		if err := sched.Track(in, now); err != nil {
-			return nil, fmt.Errorf("instance %q schedule: %w", in.ID, err)
+		known[in.ID] = true
+	}
+	schedules, err := store.Schedules()
+	if err != nil {
+		return nil, fmt.Errorf("load schedules: %w", err)
+	}
+	sched := NewScheduler(loc)
+	now := time.Now()
+	for _, sc := range schedules {
+		// A schedule whose instance is gone is a leftover, not a reason to refuse to start:
+		// every other backup would stop over one orphaned row.
+		if !known[sc.InstanceID] {
+			logger.Printf("schedule %s: unknown instance %q, ignoring", sc.ID, sc.InstanceID)
+			continue
+		}
+		if err := sched.TrackSchedule(sc, now); err != nil {
+			return nil, fmt.Errorf("schedule %s (instance %q): %w", sc.ID, sc.InstanceID, err)
 		}
 	}
 	srv := &Server{
@@ -233,6 +247,19 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux, read, write guard) {
 	mux.HandleFunc("PUT /api/v1/instances/{id}", write(s.handleUpdateInstance))
 	mux.HandleFunc("DELETE /api/v1/instances/{id}", write(s.handleDeleteInstance))
 	mux.HandleFunc("POST /api/v1/instances/{id}/run", write(s.handleTrigger))
+	// Schedules: when an instance runs, kept apart from the instance itself because
+	// pausing a nightly run and changing what gets backed up are different decisions.
+	mux.HandleFunc("GET /api/v1/schedules", read(s.handleListSchedules))
+	mux.HandleFunc("POST /api/v1/schedules", write(s.handleCreateSchedule))
+	mux.HandleFunc("GET /api/v1/schedules/{id}", read(s.handleScheduleDetail))
+	mux.HandleFunc("PUT /api/v1/schedules/{id}", write(s.handleUpdateSchedule))
+	mux.HandleFunc("DELETE /api/v1/schedules/{id}", write(s.handleDeleteSchedule))
+	mux.HandleFunc("GET /api/v1/instances/{id}/schedules", read(s.handleInstanceSchedules))
+	// A task's own history. The flat list below stays for the shell; the UI reaches a run
+	// through the task it belongs to.
+	mux.HandleFunc("GET /api/v1/instances/{id}/runs", read(s.handleInstanceRuns))
+	// The landing page, assembled in one request (dashboard.go).
+	mux.HandleFunc("GET /api/v1/dashboard", read(s.handleDashboard))
 	mux.HandleFunc("GET /api/v1/scripts", read(s.handleListScripts))
 	mux.HandleFunc("GET /api/v1/runs", read(s.handleListRuns))
 	mux.HandleFunc("GET /api/v1/runs/{id}", read(s.handleRunDetail))
@@ -313,25 +340,54 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	var due []proto.JobDispatch
 	for _, in := range instances {
-		if !s.sched.Due(in.ID, now) {
+		dueSchedules, manual := s.sched.DueFor(in.ID, now)
+		if len(dueSchedules) == 0 && !manual {
 			continue
 		}
-		d, err := s.buildDispatch(in)
+		// One run per instance per check-in. Two schedules landing in the same minute
+		// describe the same work, and dispatching both would put two processes into one
+		// repository — the very thing a single run per instance exists to prevent. The run
+		// is attributed to the schedule that came due first; the others are advanced all
+		// the same, so none of them fires again a moment later.
+		scheduleID := ""
+		if len(dueSchedules) > 0 {
+			scheduleID = dueSchedules[0]
+		}
+		d, err := s.buildDispatch(in, scheduleID)
 		if err != nil {
 			s.log.Printf("checkin: instance %q: %v", in.ID, err)
 			continue
 		}
-		s.sched.MarkDispatched(in.ID, now)
+		for _, id := range dueSchedules {
+			s.sched.MarkDispatched(id, now)
+		}
+		if manual {
+			s.sched.ClearManual(in.ID)
+		}
 		due = append(due, d)
-		s.log.Printf("dispatch: instance=%s run=%s -> runner=%s", in.ID, d.RunID, runnerID)
+		s.log.Printf("dispatch: instance=%s run=%s schedule=%s -> runner=%s",
+			in.ID, d.RunID, orManual(scheduleID), runnerID)
 	}
 	writeJSON(w, proto.CheckinResponse{Due: due})
 }
 
-// buildDispatch turns an instance into a JobDispatch and records a pending Run. When
-// a signer is configured the dispatch is signed, which is what lets the runner prove
-// the job really came from Arcatum before executing anything.
-func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
+// orManual labels a dispatch in the log: a run with no schedule behind it was asked for
+// by a person, and saying so is more useful than an empty field.
+func orManual(scheduleID string) string {
+	if scheduleID == "" {
+		return "manual"
+	}
+	return scheduleID
+}
+
+// buildDispatch turns an instance into a JobDispatch and records a pending Run.
+// scheduleID says which schedule brought the run about, empty for a manual one; the
+// dispatch itself does not carry it, because the runner has no use for it and the
+// signed bytes are a compatibility contract with every deployed runner.
+//
+// When a signer is configured the dispatch is signed, which is what lets the runner
+// prove the job really came from Arcatum before executing anything.
+func (s *Server) buildDispatch(in *Instance, scheduleID string) (proto.JobDispatch, error) {
 	entry, ok := s.catalog.Get(in.Script)
 	if !ok {
 		return proto.JobDispatch{}, fmt.Errorf("unknown script %q", in.Script)
@@ -343,7 +399,7 @@ func (s *Server) buildDispatch(in *Instance) (proto.JobDispatch, error) {
 	timeoutSec := timeoutSeconds(in.Timeout, entry.Manifest.Timeout)
 	// The run carries the timeout it was dispatched with, so the server can later decide
 	// a silent run is never coming back rather than leaving it "running" forever.
-	run, err := s.store.CreateRun(in, timeoutSec)
+	run, err := s.store.CreateRun(in, scheduleID, timeoutSec)
 	if err != nil {
 		return proto.JobDispatch{}, fmt.Errorf("create run: %w", err)
 	}
@@ -443,33 +499,61 @@ func (s *Server) applyUpdate(u proto.RunUpdate) {
 }
 
 // handleTrigger marks an instance for an immediate run (web "run now").
+//
+// Whether the instance exists is the store's question, not the scheduler's: an instance
+// with no schedules at all is perfectly legal and must still be runnable by hand.
 func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.sched.Trigger(id) {
+	in, err := s.store.Instance(id)
+	if err != nil {
+		s.log.Printf("trigger: instance %q: %v", id, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if in == nil {
 		http.Error(w, "unknown instance", http.StatusNotFound)
 		return
 	}
+	s.sched.Trigger(id)
 	s.log.Printf("trigger: instance=%s queued for next check-in", id)
 	writeJSON(w, map[string]string{"status": "queued", "instance": id})
 }
 
-// handleListInstances returns instances with their next scheduled run.
+// handleListInstances returns instances with their next scheduled run and how many
+// schedules they have. The counts travel with the list so the table can say "2
+// schedules" without a request per row.
 func (s *Server) handleListInstances(w http.ResponseWriter, r *http.Request) {
 	instances, err := s.store.Instances()
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	schedules, err := s.store.Schedules()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	total := map[string]int{}
+	enabled := map[string]int{}
+	for _, sc := range schedules {
+		total[sc.InstanceID]++
+		if sc.Enabled {
+			enabled[sc.InstanceID]++
+		}
+	}
 	type item struct {
 		*Instance
-		NextRun *time.Time `json:"next_run,omitempty"`
+		NextRun          *time.Time `json:"next_run,omitempty"`
+		Schedules        int        `json:"schedules"`
+		SchedulesEnabled int        `json:"schedules_enabled"`
 	}
 	out := make([]item, 0, len(instances))
 	for _, in := range instances {
 		it := item{Instance: in.Redacted()} // never expose secret values over the API
-		if next, ok := s.sched.NextRun(in.ID); ok {
+		if next, ok := s.sched.NextRunForInstance(in.ID); ok {
 			it.NextRun = &next
 		}
+		it.Schedules, it.SchedulesEnabled = total[in.ID], enabled[in.ID]
 		out = append(out, it)
 	}
 	writeJSON(w, out)
@@ -603,7 +687,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "\ninstances:\n")
 		for _, in := range instances {
 			next := "-"
-			if t, ok := s.sched.NextRun(in.ID); ok {
+			if t, ok := s.sched.NextRunForInstance(in.ID); ok {
 				next = t.Format(time.RFC3339)
 			}
 			fmt.Fprintf(w, "  %-20s script=%-14s runner=%-16s next_run=%s\n",

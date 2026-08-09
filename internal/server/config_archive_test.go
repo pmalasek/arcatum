@@ -3,6 +3,8 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -49,21 +51,36 @@ func configServer(t *testing.T, keyPath string) *Server {
 	}
 }
 
+// seedSchedule gives an instance a daily schedule and tracks it, the way the API would.
+func seedSchedule(t *testing.T, srv *Server, instanceID, at string) *Schedule {
+	t.Helper()
+	sc, err := srv.store.CreateSchedule(&Schedule{
+		InstanceID:   instanceID,
+		Name:         "nightly",
+		ScheduleJSON: ScheduleJSON{Frequency: "daily", Time: at},
+		Enabled:      true,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+	if err := srv.sched.TrackSchedule(sc, time.Now()); err != nil {
+		t.Fatalf("TrackSchedule: %v", err)
+	}
+	return sc
+}
+
 // seedConfig fills a server with one of everything an archive carries.
 func seedConfig(t *testing.T, srv *Server) {
 	t.Helper()
 	inst := &Instance{
 		ID: "mysql-web01", Script: "mysql-backup", RunnerID: "web-01",
-		Params:   map[string]string{"host": "127.0.0.1"},
-		Secrets:  map[string]string{"password": "hunter2"},
-		Schedule: ScheduleJSON{Frequency: "daily", Time: "02:30"},
+		Params:  map[string]string{"host": "127.0.0.1"},
+		Secrets: map[string]string{"password": "hunter2"},
 	}
 	if err := srv.store.SaveInstance(inst, true); err != nil {
 		t.Fatalf("SaveInstance: %v", err)
 	}
-	if err := srv.sched.Track(inst, time.Now()); err != nil {
-		t.Fatalf("Track: %v", err)
-	}
+	seedSchedule(t, srv, inst.ID, "02:30")
 	if _, err := srv.store.CreateUser("petr", "adminpassword", UserRoleAdmin); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -138,8 +155,16 @@ func TestConfigArchiveRoundTrip(t *testing.T) {
 	if inst.Secrets["password"] != "hunter2" {
 		t.Errorf("secret = %q, want hunter2", inst.Secrets["password"])
 	}
-	if inst.Params["host"] != "127.0.0.1" || inst.Schedule.Time != "02:30" {
+	if inst.Params["host"] != "127.0.0.1" {
 		t.Errorf("instance did not survive the round trip: %+v", inst)
+	}
+	// The schedule travelled as a row of its own and belongs to the same task.
+	schedules, err := target.store.SchedulesForInstance("mysql-web01")
+	if err != nil || len(schedules) != 1 {
+		t.Fatalf("SchedulesForInstance = %v, %v; want one schedule", schedules, err)
+	}
+	if schedules[0].Time != "02:30" || !schedules[0].Enabled {
+		t.Errorf("schedule did not survive the round trip: %+v", schedules[0])
 	}
 
 	// The account keeps working, which means the password verifier travelled intact.
@@ -153,8 +178,8 @@ func TestConfigArchiveRoundTrip(t *testing.T) {
 	if runners[0].Status != EnrollApproved {
 		t.Errorf("runner status = %q, want approved", runners[0].Status)
 	}
-	// A restored instance is scheduled without a restart.
-	if _, ok := target.sched.NextRun("mysql-web01"); !ok {
+	// A restored schedule is tracked without a restart.
+	if _, ok := target.sched.NextRunForInstance("mysql-web01"); !ok {
 		t.Error("the imported instance is not on the schedule")
 	}
 }
@@ -170,18 +195,15 @@ func TestConfigImportRemovesWhatIsNotInTheArchive(t *testing.T) {
 	// A second instance and account exist only on the target.
 	extra := &Instance{
 		ID: "mysql-web02", Script: "mysql-backup", RunnerID: "web-02",
-		Params:   map[string]string{"host": "10.0.0.9"},
-		Secrets:  map[string]string{"password": "other"},
-		Schedule: ScheduleJSON{Frequency: "daily", Time: "04:00"},
+		Params:  map[string]string{"host": "10.0.0.9"},
+		Secrets: map[string]string{"password": "other"},
 	}
 	target := configServer(t, keyPath)
 	seedConfig(t, target)
 	if err := target.store.SaveInstance(extra, true); err != nil {
 		t.Fatalf("SaveInstance: %v", err)
 	}
-	if err := target.sched.Track(extra, time.Now()); err != nil {
-		t.Fatalf("Track: %v", err)
-	}
+	seedSchedule(t, target, extra.ID, "04:00")
 	if _, err := target.store.CreateUser("navic", "somepassword", UserRoleViewer); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -206,7 +228,7 @@ func TestConfigImportRemovesWhatIsNotInTheArchive(t *testing.T) {
 	}
 	// Left on the schedule it would keep dispatching jobs for an instance that no longer
 	// exists — the failure this is here to catch.
-	if _, ok := target.sched.NextRun("mysql-web02"); ok {
+	if _, ok := target.sched.NextRunForInstance("mysql-web02"); ok {
 		t.Error("a removed instance is still scheduled")
 	}
 }
@@ -263,7 +285,9 @@ func TestConfigImportRefusesUnknownScript(t *testing.T) {
 	set := &ConfigSet{
 		Instances: []ConfigInstance{{
 			ID: "pg-web01", Script: "postgres-backup", RunnerID: "web-01",
-			Schedule: ScheduleJSON{Frequency: "daily", Time: "02:00"},
+		}},
+		Schedules: []ConfigSchedule{{
+			InstanceID: "pg-web01", Frequency: "daily", Time: "02:00", Enabled: true,
 		}},
 		Users: []ConfigUser{{
 			Username: "petr", PassHash: passwordHash(t, "adminpassword"), Role: UserRoleAdmin,
@@ -374,7 +398,7 @@ func TestConfigImportKeepsRunHistory(t *testing.T) {
 	if err != nil || inst == nil {
 		t.Fatalf("Instance: %v", err)
 	}
-	if _, err := target.store.CreateRun(inst, 60); err != nil {
+	if _, err := target.store.CreateRun(inst, "", 60); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -553,4 +577,182 @@ func rewriteArchiveEntry(t *testing.T, archive []byte, name string, edit func([]
 		t.Fatalf("close archive: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// legacyArchive hand-builds a format 1 archive: no schedules.json, timing inline in each
+// instance, exactly as every archive exported before the split looks.
+func legacyArchive(t *testing.T, instances []ConfigInstance, users []ConfigUser) []byte {
+	t.Helper()
+	entries := []archiveEntry{}
+	for _, section := range []struct {
+		name  string
+		value any
+	}{
+		{configInstancesName, instances},
+		{configUsersName, users},
+		{configRunnersName, []ConfigRunner{}},
+	} {
+		data, err := json.MarshalIndent(section.value, "", "  ")
+		if err != nil {
+			t.Fatalf("%s: %v", section.name, err)
+		}
+		entries = append(entries, archiveEntry{section.name, append(data, '\n')})
+	}
+	manifest := ConfigManifest{
+		Format:    1,
+		Arcatum:   "test",
+		CreatedAt: time.Now().UTC(),
+		Host:      "old-server",
+		Counts:    ConfigCounts{Instances: len(instances), Users: len(users)},
+		Files:     map[string]string{},
+	}
+	for _, e := range entries {
+		sum := sha256.Sum256(e.data)
+		manifest.Files[e.name] = hex.EncodeToString(sum[:])
+	}
+	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range append([]archiveEntry{{configManifestName, append(manifestJSON, '\n')}}, entries...) {
+		w, err := zw.Create(e.name)
+		if err != nil {
+			t.Fatalf("create %s: %v", e.name, err)
+		}
+		if _, err := w.Write(e.data); err != nil {
+			t.Fatalf("write %s: %v", e.name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close archive: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// The archive somebody reaches for is the one exported before the server was lost, which
+// may well predate the split. Refusing to read it because the layout has moved on would
+// defeat the entire feature, so an older archive is migrated on the way in.
+func TestConfigImportAcceptsLegacyArchive(t *testing.T) {
+	keyPath := masterKeyFile(t, t.TempDir(), "master.key")
+	srv := configServer(t, keyPath)
+
+	archive := legacyArchive(t,
+		[]ConfigInstance{{
+			ID: "mysql-web01", Script: "mysql-backup", RunnerID: "web-01",
+			Params:   map[string]string{"host": "127.0.0.1"},
+			Schedule: &ScheduleJSON{Frequency: "weekly", Time: "02:30", Weekdays: []string{"mon"}},
+		}},
+		[]ConfigUser{{
+			Username: "petr", PassHash: passwordHash(t, "adminpassword"), Role: UserRoleAdmin,
+		}})
+
+	rec := importArchive(t, srv, archive, "?confirm="+configImportConfirm)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	schedules, err := srv.store.SchedulesForInstance("mysql-web01")
+	if err != nil || len(schedules) != 1 {
+		t.Fatalf("SchedulesForInstance = %v, %v; want the inline schedule lifted out", schedules, err)
+	}
+	if schedules[0].Time != "02:30" || schedules[0].Frequency != "weekly" || !schedules[0].Enabled {
+		t.Errorf("migrated schedule = %+v, want the archive's timing, enabled", schedules[0])
+	}
+	// And it is on the timetable straight away, without a restart.
+	if _, ok := srv.sched.NextRunForInstance("mysql-web01"); !ok {
+		t.Error("the restored schedule is not tracked")
+	}
+}
+
+// An instance with no inline schedule is legal in an old archive too — it simply becomes
+// a task that runs on demand, not a reason to refuse the import.
+func TestConfigImportLegacyArchiveWithoutSchedule(t *testing.T) {
+	keyPath := masterKeyFile(t, t.TempDir(), "master.key")
+	srv := configServer(t, keyPath)
+
+	archive := legacyArchive(t,
+		[]ConfigInstance{{ID: "mysql-web01", Script: "mysql-backup", RunnerID: "web-01"}},
+		[]ConfigUser{{
+			Username: "petr", PassHash: passwordHash(t, "adminpassword"), Role: UserRoleAdmin,
+		}})
+	rec := importArchive(t, srv, archive, "?confirm="+configImportConfirm)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if n := len(mustSchedules(t, srv.store)); n != 0 {
+		t.Errorf("%d schedule(s) were invented for an instance that had none", n)
+	}
+	if inst, err := srv.store.Instance("mysql-web01"); err != nil || inst == nil {
+		t.Errorf("the instance itself did not arrive: %v, %v", inst, err)
+	}
+}
+
+// A schedule pointing at an instance the archive does not contain is a row that could
+// never run anything, so it is refused while that is still recoverable.
+func TestConfigImportRefusesOrphanSchedule(t *testing.T) {
+	keyPath := masterKeyFile(t, t.TempDir(), "master.key")
+	srv := configServer(t, keyPath)
+	set := &ConfigSet{
+		Instances: []ConfigInstance{{ID: "mysql-web01", Script: "mysql-backup", RunnerID: "web-01"}},
+		Schedules: []ConfigSchedule{{
+			InstanceID: "somebody-else", Frequency: "daily", Time: "02:00", Enabled: true,
+		}},
+		Users: []ConfigUser{{
+			Username: "petr", PassHash: passwordHash(t, "adminpassword"), Role: UserRoleAdmin,
+		}},
+	}
+	rec := importArchive(t, srv, archiveOf(t, set), "?confirm="+configImportConfirm)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("import = %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "somebody-else") {
+		t.Errorf("the refusal does not name the missing instance: %s", rec.Body.String())
+	}
+}
+
+// Two schedules of one task have to survive the round trip, or the export is a lossy
+// backup of the configuration.
+func TestConfigArchiveCarriesSeveralSchedules(t *testing.T) {
+	keyPath := masterKeyFile(t, t.TempDir(), "master.key")
+	source := configServer(t, keyPath)
+	seedConfig(t, source)
+	if _, err := source.store.CreateSchedule(&Schedule{
+		InstanceID:   "mysql-web01",
+		Name:         "monthly full",
+		ScheduleJSON: ScheduleJSON{Frequency: "monthly", Time: "23:00", Day: 1},
+		Enabled:      false,
+	}, time.Now()); err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+
+	target := configServer(t, keyPath)
+	rec := importArchive(t, target, exportArchive(t, source), "?confirm="+configImportConfirm)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	got, err := target.store.SchedulesForInstance("mysql-web01")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("SchedulesForInstance = %v, %v; want both", got, err)
+	}
+	// The paused one arrives paused: a schedule somebody switched off must not come back
+	// running after a restore.
+	var paused *Schedule
+	for _, sc := range got {
+		if sc.Frequency == "monthly" {
+			paused = sc
+		}
+	}
+	if paused == nil || paused.Enabled || paused.Day != 1 || paused.Name != "monthly full" {
+		t.Errorf("monthly schedule = %+v, want it restored paused and intact", paused)
+	}
+}
+
+func mustSchedules(t *testing.T, st *Store) []*Schedule {
+	t.Helper()
+	list, err := st.Schedules()
+	if err != nil {
+		t.Fatalf("Schedules: %v", err)
+	}
+	return list
 }

@@ -11,10 +11,19 @@ const conn = el('conn');
 
 let listTimer = null;
 let tailTimer = null;
-let currentView = 'runs';
+let currentView = 'dashboard';
 let currentRun = null;
 let tailOffset = 0;
 let me = null; // identity from /whoami: who I am and what I may do
+
+// Which task's history is open, how much of it is shown, and where ‹ back leads from a
+// run detail — a run is reached from three places now and has to return to the one it
+// came from.
+let historyInstance = null;
+let historyLimit = 50;
+let detailReturn = 'dashboard';
+// Which instance the Schedules tab is filtered to; empty means all of them.
+let scheduleFilter = '';
 
 // --- helpers ----------------------------------------------------------------
 
@@ -135,28 +144,213 @@ function replicaBadge(status) {
 
 // --- views ------------------------------------------------------------------
 
-async function loadRuns() {
-  const runs = await api('/runs?limit=100');
-  const body = el('runs-body');
-  if (!runs || runs.length === 0) {
-    body.innerHTML = '<tr><td colspan="9" class="empty">no runs</td></tr>';
+// --- dashboard ---------------------------------------------------------------
+
+// The whole page comes from one request. Assembling it here out of four would cost four
+// requests per open browser every five seconds, on a server whose runners are already
+// checking in — so the server aggregates and this only draws.
+async function loadDashboard() {
+  const d = await api('/dashboard');
+  const c = d.counts || {};
+  el('dash-counts').innerHTML = [
+    countTile('instances', c.instances),
+    countTile('schedules', c.schedules, c.schedules_disabled ? `${c.schedules_disabled} paused` : ''),
+    countTile('running', c.running),
+    countTile('failed 24h', c.failed_24h, '', c.failed_24h ? 'fail' : ''),
+    countTile('runners offline', c.runners_offline, '', c.runners_offline ? 'warn' : ''),
+  ].join('');
+
+  renderDashList('dash-running', d.running, 'nothing is running', (r) => `
+    <span class="mono">${esc(r.instance_id)}</span>
+    ${badge(r.status)}
+    <span class="hint">${fmtDuration(r.started_at, '')}</span>`,
+    (r) => ({ run: r.id }));
+
+  renderDashList('dash-failures', d.failures_24h, 'nothing failed in the last 24 hours', (r) => `
+    <span class="mono">${esc(r.instance_id)}</span>
+    ${badge(r.status)}
+    <span class="hint">${fmtTime(r.ended_at)}</span>`,
+    (r) => ({ run: r.id }));
+
+  renderDashList('dash-upcoming', d.upcoming, 'nothing is scheduled', (u) => `
+    <span class="mono">${esc(u.instance_id)}</span>
+    ${u.name ? `<span class="hint">${esc(u.name)}</span>` : ''}
+    <span>${fmtTime(u.next_run)}</span>`,
+    (u) => ({ history: u.instance_id }));
+}
+
+function countTile(label, value, note, tone) {
+  return `<span class="count${tone ? ' ' + tone : ''}">
+    <b>${value ?? 0}</b> ${esc(label)}${note ? ` <span class="hint">(${esc(note)})</span>` : ''}
+  </span>`;
+}
+
+// renderDashList draws one card. Every row leads somewhere — to the run that is failing,
+// or to the history of the task that is about to run — because a dashboard nobody can
+// click through from is just a wall of numbers.
+function renderDashList(id, items, emptyText, htmlOf, targetOf) {
+  const box = el(id);
+  if (!items || items.length === 0) {
+    box.innerHTML = `<p class="empty">${esc(emptyText)}</p>`;
     return;
   }
-  body.innerHTML = runs.map((r) => `
-    <tr class="clickable" data-run="${esc(r.id)}">
-      <td class="mono">${esc(r.id)}</td>
-      <td>${esc(r.instance_id)}</td>
-      <td>${badge(r.status)}</td>
-      <td>${replicaBadge(r.replica_status)}</td>
-      <td class="num">${r.exit_code}</td>
-      <td class="num">${fmtBytes(r.data_bytes || r.bytes)}</td>
-      <td>${fmtTime(r.started_at)}</td>
-      <td class="num">${fmtDuration(r.started_at, r.ended_at)}</td>
-      <td>
-        <button class="action" data-open="${esc(r.id)}">output</button>
-        ${stopButton(r)}
-      </td>
-    </tr>`).join('');
+  box.innerHTML = items.map((item) => {
+    const target = targetOf(item);
+    const attr = target.run
+      ? `data-run="${esc(target.run)}"`
+      : `data-history="${esc(target.history)}"`;
+    return `<div class="dash-row clickable" ${attr}>${htmlOf(item)}</div>`;
+  }).join('');
+}
+
+// --- schedules ----------------------------------------------------------------
+
+// whenText renders a schedule the way an operator reads it aloud.
+function whenText(sc) {
+  let out;
+  if (sc.frequency === 'weekly') {
+    out = `${(sc.weekdays && sc.weekdays.length) ? sc.weekdays.join(',') : 'every day'} ${sc.time}`;
+  } else if (sc.frequency === 'monthly') {
+    out = `day ${sc.day} · ${sc.time}`;
+  } else {
+    out = `daily ${sc.time}`;
+  }
+  return out + (sc.timezone ? ` (${sc.timezone})` : '');
+}
+
+async function loadSchedules() {
+  const path = scheduleFilter
+    ? `/instances/${encodeURIComponent(scheduleFilter)}/schedules`
+    : '/schedules';
+  const list = (await api(path)) || [];
+  el('schedules-head').classList.toggle('hidden', !scheduleFilter);
+  el('schedules-filter-name').textContent = scheduleFilter || '';
+
+  const body = el('schedules-body');
+  if (list.length === 0) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">${
+      scheduleFilter ? 'this task has no schedule — it runs only when you start it'
+        : 'no schedules yet'}</td></tr>`;
+    return;
+  }
+  syncRows(body, list, (sc) => sc.id, (sc) => {
+    const last = sc.last_run;
+    return `
+      <td class="mono" data-label="Instance">${esc(sc.instance_id)}</td>
+      <td data-label="Schedule">${esc(sc.name || '—')}</td>
+      <td data-label="When">${esc(whenText(sc))}</td>
+      <td data-label="State">${badge(sc.state)}</td>
+      <td data-label="Last run">${last
+        ? `<a class="rowlink" data-open="${esc(last.id)}">${fmtTime(last.ended_at || last.started_at)}</a>`
+        : '<span class="muted">—</span>'}</td>
+      <td data-label="Next run">${sc.enabled ? fmtTime(sc.next_run) : '<span class="muted">paused</span>'}</td>
+      <td class="actions" data-label="">
+        <button class="action admin-only" data-sched-toggle="${esc(sc.id)}" data-enabled="${sc.enabled}">
+          ${sc.enabled ? 'pause' : 'resume'}</button>
+        <button class="action" data-history="${esc(sc.instance_id)}">history</button>
+      </td>`;
+  }, (tr, sc) => {
+    tr.className = 'clickable';
+    tr.dataset.schedule = sc.id;
+  });
+}
+
+// openScheduleForm opens the form over schedule id, or an empty one for instanceID.
+async function openScheduleForm(id, instanceID) {
+  editingSchedule = id || null;
+  el('sform-error').textContent = '';
+  el('sform-title').textContent = id ? `Schedule ${id}` : 'New schedule';
+  el('sform-delete').classList.toggle('hidden', !id);
+  showView('schedule-form');
+
+  let sc = null;
+  if (id) {
+    sc = await api('/schedules/' + encodeURIComponent(id));
+  }
+  const instances = (await api('/instances')) || [];
+  const owner = sc ? sc.instance_id : (instanceID || (instances[0] && instances[0].id) || '');
+  const freq = sc ? sc.frequency : 'daily';
+
+  el('sform-body').innerHTML =
+    fieldRow('instance', sc
+      ? `<input id="s-instance" value="${esc(owner)}" disabled>`
+      : `<select id="s-instance">${instances.map((i) =>
+          `<option value="${esc(i.id)}"${i.id === owner ? ' selected' : ''}>${esc(i.id)}</option>`).join('')}</select>`,
+      sc ? 'a schedule stays with the task it was created for — delete it and make a new one to move it'
+        : 'which task this schedule runs')
+    + fieldRow('name', `<input id="s-name" value="${esc(sc ? sc.name : '')}" placeholder="nightly" size="20">`,
+      'a label, so several schedules of one task can be told apart')
+    + fieldRow('frequency', `<select id="s-freq">${['daily', 'weekly', 'monthly'].map((f) =>
+        `<option value="${f}"${f === freq ? ' selected' : ''}>${f}</option>`).join('')}</select>`)
+    + fieldRow('time', `<input id="s-time" value="${esc(sc ? sc.time : '02:00')}" placeholder="02:00" size="6">`,
+      'HH:MM')
+    + fieldRow('weekdays', `<input id="s-weekdays" value="${esc(sc && sc.weekdays ? sc.weekdays.join(',') : '')}" placeholder="mon,thu" size="16">`,
+      'weekly only; empty means every day')
+    + fieldRow('day of month', `<input id="s-day" type="number" min="1" max="28" value="${sc && sc.day ? sc.day : ''}" size="4">`,
+      'monthly only; 1–28, so no month is ever skipped')
+    + fieldRow('timezone', `<input id="s-tz" value="${esc(sc ? sc.timezone || '' : '')}" placeholder="Europe/Prague" size="20">`,
+      'empty uses the server default')
+    + fieldRow('enabled', `<label class="follow"><input type="checkbox" id="s-enabled"${
+        !sc || sc.enabled ? ' checked' : ''}> run on this schedule</label>`,
+      'unchecked pauses it without losing the settings');
+}
+
+function collectSchedule() {
+  const weekdays = el('s-weekdays').value.split(',').map((s) => s.trim()).filter(Boolean);
+  const day = parseInt(el('s-day').value, 10);
+  return {
+    instance_id: el('s-instance').value.trim(),
+    name: el('s-name').value.trim(),
+    frequency: el('s-freq').value,
+    time: el('s-time').value.trim(),
+    weekdays: weekdays.length ? weekdays : null,
+    day: Number.isFinite(day) ? day : 0,
+    timezone: el('s-tz').value.trim(),
+    enabled: el('s-enabled').checked,
+  };
+}
+
+// --- run history of one task ---------------------------------------------------
+
+// openHistory shows one task's runs. This is where a run is found now: beside the task it
+// belongs to, rather than in one flat list of everything the server has ever done.
+function openHistory(instanceID) {
+  historyInstance = instanceID;
+  historyLimit = 50;
+  el('history-title').textContent = instanceID;
+  el('history-body').innerHTML = '<tr><td colspan="8" class="empty">loading…</td></tr>';
+  showView('history');
+}
+
+async function loadHistory() {
+  if (!historyInstance) return;
+  const res = await api(`/instances/${encodeURIComponent(historyInstance)}/runs?limit=${historyLimit}`);
+  const runs = res.runs || [];
+  const body = el('history-body');
+  if (runs.length === 0) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">this task has not run yet</td></tr>';
+    el('history-more').classList.add('hidden');
+    el('history-note').textContent = '';
+    return;
+  }
+  syncRows(body, runs, (r) => r.id, (r) => `
+    <td class="mono" data-label="Run">${esc(r.id)}</td>
+    <td data-label="Status">${badge(r.status)}</td>
+    <td data-label="Offsite">${replicaBadge(r.replica_status)}</td>
+    <td class="num" data-label="Code">${r.exit_code}</td>
+    <td class="num" data-label="Data">${fmtBytes(r.data_bytes || r.bytes)}</td>
+    <td data-label="Started">${fmtTime(r.started_at)}</td>
+    <td class="num" data-label="Duration">${fmtDuration(r.started_at, r.ended_at)}</td>
+    <td data-label="">
+      <button class="action" data-open="${esc(r.id)}">output</button>
+      ${stopButton(r)}
+    </td>`, (tr, r) => {
+    tr.className = 'clickable';
+    tr.dataset.run = r.id;
+  });
+  el('history-more').classList.toggle('hidden', !res.has_more);
+  el('history-note').textContent = res.has_more
+    ? `showing the latest ${runs.length} runs` : `${runs.length} run${runs.length === 1 ? '' : 's'} in total`;
 }
 
 // stopButton is offered only for an unfinished run and only to an admin. After being
@@ -251,18 +445,19 @@ async function loadInstances() {
 function renderInstances() {
   const body = el('instances-body');
   if (instanceList.length === 0) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">no instances</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty">no instances</td></tr>';
     return;
   }
   syncRows(body, instanceList, (i) => i.id, (i) => {
     const repo = repoCache.get(i.id);
     return `
-      <td class="mono">${esc(i.id)}</td>
-      <td>${esc(i.script)}</td>
-      <td>${esc(i.runner_id)}</td>
-      <td>${fmtTime(i.next_run)}</td>
-      <td class="mono repo">${esc(repo ? repo.text : '…')}</td>
-      <td class="actions">
+      <td class="mono" data-label="Instance">${esc(i.id)}</td>
+      <td data-label="Script">${esc(i.script)}</td>
+      <td data-label="Runner">${esc(i.runner_id)}</td>
+      <td data-label="Schedules">${scheduleCount(i)}</td>
+      <td data-label="Next run">${fmtTime(i.next_run)}</td>
+      <td class="mono repo" data-label="Repository">${esc(repo ? repo.text : '…')}</td>
+      <td class="actions" data-label="">
         <button class="action" data-trigger="${esc(i.id)}">run now</button>
         <button class="action admin-only" data-copy="${esc(i.id)}">copy</button>
       </td>`;
@@ -270,6 +465,16 @@ function renderInstances() {
     tr.className = 'clickable';
     tr.dataset.instance = i.id;
   });
+}
+
+// scheduleCount says how many schedules a task has. "none" rather than "0" because it is
+// a legitimate state — such a task simply runs when somebody starts it — and a zero in a
+// column of dates reads like something is broken.
+function scheduleCount(inst) {
+  const n = inst.schedules || 0;
+  if (n === 0) return '<span class="muted">on demand</span>';
+  const paused = n - (inst.schedules_enabled || 0);
+  return `${n}${paused ? ` <span class="muted">(${paused} paused)</span>` : ''}`;
 }
 
 function refreshRepoInfo() {
@@ -412,13 +617,13 @@ async function loadRunners() {
       : (r.version ? esc(r.version) : '<span class="muted">—</span>');
     return `
     <tr>
-      <td class="mono" title="${esc(r.cert_fingerprint || '')}">${esc(r.id)}</td>
-      <td>${badge(r.status)}</td>
-      <td>${esc(r.os)}/${esc(r.arch)}</td>
-      <td class="mono">${ident}</td>
-      <td>${fmtExpiry(r.cert_not_after)}</td>
-      <td>${fmtTime(r.last_seen)}</td>
-      <td>${actions}</td>
+      <td class="mono" data-label="Runner" title="${esc(r.cert_fingerprint || '')}">${esc(r.id)}</td>
+      <td data-label="Status">${badge(r.status)}</td>
+      <td data-label="Platform">${esc(r.os)}/${esc(r.arch)}</td>
+      <td class="mono" data-label="Version">${ident}</td>
+      <td data-label="Certificate valid until">${fmtExpiry(r.cert_not_after)}</td>
+      <td data-label="Last seen">${fmtTime(r.last_seen)}</td>
+      <td data-label="">${actions}</td>
     </tr>`;
   }).join('');
 
@@ -522,7 +727,9 @@ async function startSession() {
   applyIdentity(id);
   showApp();
   certWarnings(id);
-  showView('runs');
+  // The dashboard is where a session starts: what is running, what broke overnight and what
+  // is coming are the three questions somebody opens Arcatum with.
+  showView('dashboard');
   startPolling();
 }
 
@@ -608,12 +815,12 @@ async function loadUsers() {
     const toRole = u.role === 'admin' ? 'viewer' : 'admin';
     return `
     <tr>
-      <td class="mono">${esc(u.username)}${self ? ' <span class="muted">(that is you)</span>' : ''}</td>
-      <td>${badge(u.role)}</td>
-      <td>${u.disabled ? '<span class="expiry alert">disabled</span>' : '<span class="expiry">active</span>'}</td>
-      <td>${fmtTime(u.created_at)}</td>
-      <td>${fmtTime(u.last_login)}</td>
-      <td>
+      <td class="mono" data-label="User">${esc(u.username)}${self ? ' <span class="muted">(that is you)</span>' : ''}</td>
+      <td data-label="Role">${badge(u.role)}</td>
+      <td data-label="Status">${u.disabled ? '<span class="expiry alert">disabled</span>' : '<span class="expiry">active</span>'}</td>
+      <td data-label="Created">${fmtTime(u.created_at)}</td>
+      <td data-label="Last login">${fmtTime(u.last_login)}</td>
+      <td data-label="">
         <button class="action" data-reset="${esc(u.username)}">new password</button>
         <button class="action" data-role="${esc(u.username)}" data-to="${toRole}">to ${toRole}</button>
         ${u.disabled
@@ -800,11 +1007,11 @@ async function loadDumps() {
     `${dumps.length} dump${dumps.length === 1 ? '' : 's'} · ${fmtBytes(total)}`;
   body.innerHTML = dumps.map((d) => `
     <tr>
-      <td class="mono">${esc(d.run_id)}</td>
-      <td>dump</td>
-      <td class="num">${fmtBytes(d.bytes)}</td>
-      <td>${fmtTime(d.ended_at)}</td>
-      <td><a class="action" href="${API}/runs/${encodeURIComponent(d.run_id)}/data" download>download</a></td>
+      <td class="mono" data-label="Name">${esc(d.run_id)}</td>
+      <td data-label="Type">dump</td>
+      <td class="num" data-label="Size">${fmtBytes(d.bytes)}</td>
+      <td data-label="Modified">${fmtTime(d.ended_at)}</td>
+      <td data-label=""><a class="action" href="${API}/runs/${encodeURIComponent(d.run_id)}/data" download>download</a></td>
     </tr>`).join('');
 }
 
@@ -841,18 +1048,18 @@ async function loadRestoreDir() {
   // Offer the current directory as a tar, which is how you get a whole tree back.
   if (restore.path && restore.path !== '/') {
     rows.push(`<tr>
-      <td class="mono">.</td><td>directory</td><td></td><td></td>
-      <td><a class="action" href="${esc(dl(restore.path, true))}">download as .tar</a></td>
+      <td class="mono" data-label="Name">.</td><td data-label="Type">directory</td><td></td><td></td>
+      <td data-label=""><a class="action" href="${esc(dl(restore.path, true))}">download as .tar</a></td>
     </tr>`);
   }
   for (const e of res.entries) {
     const isDir = e.type === 'dir';
     rows.push(`<tr${isDir ? ' class="clickable" data-dir="' + esc(e.path) + '"' : ''}>
-      <td class="mono">${isDir ? '📁 ' : ''}${esc(e.name)}</td>
-      <td>${isDir ? 'directory' : esc(e.type)}</td>
-      <td class="num">${isDir ? '' : fmtBytes(e.size)}</td>
-      <td>${isDir ? '' : fmtTime(e.mtime)}</td>
-      <td><a class="action" href="${esc(dl(e.path, isDir))}">${isDir ? 'download .tar' : 'download'}</a></td>
+      <td class="mono" data-label="Name">${isDir ? '📁 ' : ''}${esc(e.name)}</td>
+      <td data-label="Type">${isDir ? 'directory' : esc(e.type)}</td>
+      <td class="num" data-label="Size">${isDir ? '' : fmtBytes(e.size)}</td>
+      <td data-label="Modified">${isDir ? '' : fmtTime(e.mtime)}</td>
+      <td data-label=""><a class="action" href="${esc(dl(e.path, isDir))}">${isDir ? 'download .tar' : 'download'}</a></td>
     </tr>`);
   }
   if (rows.length === 0) {
@@ -891,8 +1098,9 @@ el('restore-crumbs').addEventListener('click', async (e) => {
 // from the parameters the script declares, so a missing password or a mistyped name is
 // caught on save, and secrets are encrypted from the moment they are stored.
 let scriptsCache = null;
-let editing = null;     // instance id being edited, null when creating
-let copyingFrom = null; // instance the form was seeded from, null when not copying
+let editing = null;         // instance id being edited, null when creating
+let copyingFrom = null;     // instance the form was seeded from, null when not copying
+let editingSchedule = null; // schedule id being edited, null when creating one
 
 async function scripts() {
   if (!scriptsCache) scriptsCache = await api('/scripts');
@@ -977,16 +1185,7 @@ async function openInstanceForm(id, opts) {
     + fieldRow('script', `<select id="f-script">${list.map((sc) =>
         `<option value="${esc(sc.name)}"${sc.name === chosen ? ' selected' : ''}>${esc(sc.name)} (${esc(sc.type)})</option>`).join('')}</select>`)
     + fieldRow('runner', runner.html, runner.hint)
-    + fieldRow('schedule', `
-        <select id="f-freq">
-          ${['daily', 'weekly', 'monthly'].map((f) =>
-            `<option value="${f}"${inst && inst.schedule.frequency === f ? ' selected' : ''}>${f}</option>`).join('')}
-        </select>
-        <input id="f-time" value="${esc(inst ? inst.schedule.time : '02:00')}" placeholder="02:00" size="6">
-        <input id="f-weekdays" value="${esc(inst && inst.schedule.weekdays ? inst.schedule.weekdays.join(',') : '')}" placeholder="mon,thu" size="12">
-        <input id="f-day" value="${inst && inst.schedule.day ? inst.schedule.day : ''}" placeholder="day 1-28" size="8">
-        <input id="f-tz" value="${esc(inst ? inst.schedule.timezone || '' : '')}" placeholder="Europe/Prague" size="16">`,
-        'weekdays applies to weekly, day to monthly')
+    + scheduleRow(editing, inst)
     + fieldRow('timeout', `<input id="f-timeout" value="${esc(inst ? inst.timeout : '')}" placeholder="1h" size="8">`)
     + fieldRow('backup retention', `
         <input id="f-keep-last" type="number" min="0" value="${keepDefault(inst, 'keep_last', 7)}" size="4">
@@ -1001,6 +1200,24 @@ async function openInstanceForm(id, opts) {
   renderParams(inst);
   toggleRetention();
   if (copy) el('f-id').focus(); // the only thing a copy is still missing
+}
+
+// scheduleRow points at the Schedules tab instead of editing timing here. An instance
+// says what to back up; when it runs is a separate decision, and one task may carry
+// several answers to it.
+function scheduleRow(id, inst) {
+  if (!id) {
+    return fieldRow('schedules', '<span class="hint">added under Schedules once the instance is saved</span>',
+      'until then the task can still be run by hand');
+  }
+  const n = inst ? (inst.schedules || 0) : 0;
+  const paused = inst ? n - (inst.schedules_enabled || 0) : 0;
+  const summary = n === 0
+    ? 'none — this task runs only when you start it'
+    : `${n} schedule${n === 1 ? '' : 's'}${paused ? `, ${paused} paused` : ''}`;
+  return fieldRow('schedules',
+    `<span>${esc(summary)}</span> <button class="action" data-schedules="${esc(id)}">manage</button>`,
+    'when this task runs is set under Schedules');
 }
 
 // keepDefault prefills the retention for a new instance. For an existing one the stored
@@ -1071,8 +1288,6 @@ function collectInstance() {
       params[name] = value;
     }
   }
-  const weekdays = el('f-weekdays').value.split(',').map((s) => s.trim()).filter(Boolean);
-  const day = parseInt(el('f-day').value, 10);
   return {
     id: el('f-id').value.trim(),
     // Given a template, the server fills in the secrets that only reached the form as a mask.
@@ -1083,13 +1298,6 @@ function collectInstance() {
     keep_last: keepValue('f-keep-last'),
     keep_days: keepValue('f-keep-days'),
     params, secrets,
-    schedule: {
-      frequency: el('f-freq').value,
-      time: el('f-time').value.trim(),
-      weekdays: weekdays.length ? weekdays : null,
-      day: Number.isFinite(day) ? day : 0,
-      timezone: el('f-tz').value.trim(),
-    },
   };
 }
 
@@ -1486,9 +1694,13 @@ async function replicaAction(path, btn, doing) {
   }
 }
 
+// The forms, the account page and the run detail are deliberately absent: refresh() would
+// overwrite a half-filled form under the operator's hands.
 const loaders = {
-  runs: loadRuns,
+  dashboard: loadDashboard,
   instances: loadInstances,
+  schedules: loadSchedules,
+  history: loadHistory,
   restore: loadRestore,
   runners: loadRunners,
   rotation: loadRotation,
@@ -1496,8 +1708,8 @@ const loaders = {
   admin: loadAdmin,
 };
 
-const VIEWS = ['runs', 'instances', 'instance-form', 'restore', 'runners', 'rotation',
-  'users', 'admin', 'account', 'detail'];
+const VIEWS = ['dashboard', 'instances', 'instance-form', 'schedules', 'schedule-form',
+  'history', 'restore', 'runners', 'rotation', 'users', 'admin', 'account', 'detail'];
 
 async function refresh() {
   if (!me) return; // signed out: nothing to fetch for
@@ -1546,8 +1758,12 @@ function stopTail() {
   currentRun = null;
 }
 
-async function openRun(runID) {
+// openRun shows one run's metadata and live output. `from` is the view ‹ back returns to,
+// so a run opened from the dashboard does not dump the operator into a task's history.
+async function openRun(runID, from) {
   stopTail();
+  detailReturn = from || currentView;
+  if (detailReturn === 'detail') detailReturn = 'dashboard';
   currentRun = runID;
   tailOffset = 0;
   el('detail-title').textContent = runID;
@@ -1661,11 +1877,38 @@ async function pollTail() {
   tailTimer = setTimeout(pollTail, TAIL_POLL_MS);
 }
 
+// triggerInstance asks for a run now and then opens that task's history, which is where
+// the run will appear. btn is the button that was pressed, when there was one.
+async function triggerInstance(id, btn) {
+  if (!id) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'queued…';
+    markRowStale(btn); // so the row is rebuilt from scratch on the next refresh
+  }
+  try {
+    await api(`/instances/${encodeURIComponent(id)}/run`, { method: 'POST' });
+    // The job starts at the runner's next check-in, and the task's history is where it
+    // shows up.
+    setTimeout(() => openHistory(id), 400);
+  } catch (err) {
+    showError(err);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'run now';
+    }
+  }
+}
+
 // --- events -----------------------------------------------------------------
 
 document.querySelector('nav').addEventListener('click', (e) => {
   const tab = e.target.closest('.tab');
-  if (tab) showView(tab.dataset.view);
+  if (!tab) return;
+  // Reaching a tab from the navigation means "show me all of it": a filter left over from
+  // a drill-down into one task would otherwise look like an empty system.
+  if (tab.dataset.view === 'schedules') scheduleFilter = '';
+  showView(tab.dataset.view);
 });
 
 el('login-form').addEventListener('submit', submitLogin);
@@ -1674,7 +1917,7 @@ el('open-account').addEventListener('click', () => {
   el('account-error').textContent = '';
   showView('account');
 });
-el('account-back').addEventListener('click', () => showView('runs'));
+el('account-back').addEventListener('click', () => showView('dashboard'));
 el('pw-save').addEventListener('click', changeOwnPassword);
 el('new-user').addEventListener('click', createUser);
 el('pw-reset-save').addEventListener('click', () => submitPasswordReset(false));
@@ -1695,8 +1938,23 @@ el('replica-retry').addEventListener('click', (e) =>
 // A new file means a new plan: the previous one belonged to a different archive.
 el('config-file').addEventListener('change', clearConfigPlan);
 
-el('back').addEventListener('click', () => showView('runs'));
+el('back').addEventListener('click', () => showView(detailReturn));
 el('detail-stop').addEventListener('click', (e) => cancelRun(e.currentTarget.dataset.run));
+
+el('history-back').addEventListener('click', () => showView('instances'));
+el('history-schedules').addEventListener('click', () => {
+  scheduleFilter = historyInstance;
+  showView('schedules');
+});
+el('history-run-now').addEventListener('click', () => triggerInstance(historyInstance));
+el('history-more').addEventListener('click', () => {
+  historyLimit += 50;
+  refresh();
+});
+el('schedules-all').addEventListener('click', () => {
+  scheduleFilter = '';
+  refresh();
+});
 
 el('stream').addEventListener('change', () => {
   // Switching stream restarts the tail from the beginning of that stream.
@@ -1716,6 +1974,37 @@ document.addEventListener('click', async (e) => {
     openRun(open.dataset.open);
     return;
   }
+  const history = e.target.closest('[data-history]');
+  if (history) {
+    e.stopPropagation();
+    openHistory(history.dataset.history);
+    return;
+  }
+  const manage = e.target.closest('[data-schedules]');
+  if (manage) {
+    e.stopPropagation();
+    scheduleFilter = manage.dataset.schedules;
+    showView('schedules');
+    return;
+  }
+  // Pausing a schedule is a one-field update: the timing stays exactly as it is, which is
+  // the difference between pausing and deleting-and-retyping.
+  const toggle = e.target.closest('[data-sched-toggle]');
+  if (toggle) {
+    e.stopPropagation();
+    const id = toggle.dataset.schedToggle;
+    const enabled = toggle.dataset.enabled !== 'true';
+    toggle.disabled = true;
+    markRowStale(toggle);
+    try {
+      await apiSend('/schedules/' + encodeURIComponent(id), 'PUT', { enabled });
+      await loadSchedules();
+    } catch (err) {
+      showError(err);
+      toggle.disabled = false;
+    }
+    return;
+  }
   const stop = e.target.closest('[data-cancel]');
   if (stop) {
     e.stopPropagation(); // so the click does not open the run detail as well
@@ -1730,19 +2019,8 @@ document.addEventListener('click', async (e) => {
   }
   const trigger = e.target.closest('[data-trigger]');
   if (trigger) {
-    const id = trigger.dataset.trigger;
-    trigger.disabled = true;
-    trigger.textContent = 'queued…';
-    markRowStale(trigger); // so the row is rebuilt from scratch on the next refresh
-    try {
-      await api(`/instances/${encodeURIComponent(id)}/run`, { method: 'POST' });
-      // The job starts at the runner's next check-in; the Runs tab will show it.
-      setTimeout(() => showView('runs'), 400);
-    } catch (err) {
-      showError(err);
-      trigger.disabled = false;
-      trigger.textContent = 'run now';
-    }
+    e.stopPropagation(); // so the click does not also open the instance for editing
+    await triggerInstance(trigger.dataset.trigger, trigger);
     return;
   }
   // Approving a runner signs its certificate request; rejecting discards it; revoking
@@ -1803,6 +2081,42 @@ document.addEventListener('click', async (e) => {
   }
   if (e.target.closest('#new-instance')) {
     await openInstanceForm(null);
+    return;
+  }
+  if (e.target.closest('#new-schedule')) {
+    await openScheduleForm(null, scheduleFilter);
+    return;
+  }
+  if (e.target.closest('#sform-back')) {
+    showView('schedules');
+    return;
+  }
+  if (e.target.closest('#sform-save')) {
+    const btn = e.target.closest('#sform-save');
+    const payload = collectSchedule();
+    btn.disabled = true;
+    try {
+      if (editingSchedule) {
+        await apiSend('/schedules/' + encodeURIComponent(editingSchedule), 'PUT', payload);
+      } else {
+        await apiSend('/schedules', 'POST', payload);
+      }
+      showView('schedules');
+    } catch (err) {
+      el('sform-error').textContent = err.message;
+    }
+    btn.disabled = false;
+    return;
+  }
+  if (e.target.closest('#sform-delete')) {
+    if (!editingSchedule || !confirm('Delete this schedule?\n\n'
+      + 'The task and its backups stay — it just stops running on its own.')) return;
+    try {
+      await api('/schedules/' + encodeURIComponent(editingSchedule), { method: 'DELETE' });
+      showView('schedules');
+    } catch (err) {
+      el('sform-error').textContent = err.message;
+    }
     return;
   }
   if (e.target.closest('#form-back')) {
@@ -1879,10 +2193,22 @@ document.addEventListener('click', async (e) => {
   // A download link must not also trigger the row's navigation.
   if (e.target.closest('a.action')) return;
 
+  // The dashboard's cards are divs, not table rows, but they navigate the same way.
+  const dashRow = e.target.closest('.dash-row');
+  if (dashRow) {
+    if (dashRow.dataset.run) openRun(dashRow.dataset.run, 'dashboard');
+    else if (dashRow.dataset.history) openHistory(dashRow.dataset.history);
+    return;
+  }
+
   const row = e.target.closest('tr.clickable');
   if (!row) return;
   if (row.dataset.instance) {
     await openInstanceForm(row.dataset.instance);
+    return;
+  }
+  if (row.dataset.schedule) {
+    await openScheduleForm(row.dataset.schedule);
     return;
   }
   if (row.dataset.dir) {

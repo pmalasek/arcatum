@@ -8,7 +8,10 @@
       "Bash(just check *)",
       "Bash(go run *)",
       "Bash(sed -n '40,80p' internal/server/replica_rsync.go; echo \"=== unit ===\"; cat /etc/systemd/system/arcatum-server.service 2>/dev/null || grep -n 'ProtectHome\\\\|ProtectSystem\\\\|ReadWritePaths\\\\|ReadOnlyPaths\\\\|User=' deploy/install-server.sh)",
-      "Read(//etc/systemd/system/**)"
+      "Read(//etc/systemd/system/**)",
+      "Bash(go vet *)",
+      "Bash(gofmt -l .)",
+      "Bash(python3 -)"
     ]
   }
 }

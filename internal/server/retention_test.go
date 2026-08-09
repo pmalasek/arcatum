@@ -80,7 +80,7 @@ func retentionServer(t *testing.T, opts RetentionOptions) *Server {
 // finishedRun creates a run that ended at the given time with the given status.
 func finishedRun(t *testing.T, st *Store, endedAt time.Time, exitCode int, execErr string) *Run {
 	t.Helper()
-	run, err := st.CreateRun(&Instance{ID: "i", Script: "hello", RunnerID: "h"}, 3600)
+	run, err := st.CreateRun(&Instance{ID: "i", Script: "hello", RunnerID: "h"}, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestSweepLogsKeepsThePayload(t *testing.T) {
 // startedRunFor creates a running run directly on a store.
 func startedRunFor(t *testing.T, st *Store) *Run {
 	t.Helper()
-	run, err := st.CreateRun(&Instance{ID: "i", Script: "hello", RunnerID: "h"}, 3600)
+	run, err := st.CreateRun(&Instance{ID: "i", Script: "hello", RunnerID: "h"}, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}

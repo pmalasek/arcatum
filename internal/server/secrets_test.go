@@ -40,13 +40,14 @@ func openEncryptedStore(t *testing.T) (st *Store, dir, dbPath, keyPath string) {
 
 func importOneSecret(t *testing.T, st *Store, dir string) {
 	t.Helper()
-	path := writeInstances(t, dir, []*Instance{{
-		ID:       "mysql-web01",
-		Script:   "mysql-backup",
-		RunnerID: "web-01",
-		Params:   map[string]string{"host": "127.0.0.1"},
-		Secrets:  map[string]string{"password": testSecret},
-		Schedule: ScheduleJSON{Frequency: "daily", Time: "02:30"},
+	path := writeInstances(t, dir, []*seedInstance{{
+		Instance: Instance{
+			ID:       "mysql-web01",
+			Script:   "mysql-backup",
+			RunnerID: "web-01",
+			Params:   map[string]string{"host": "127.0.0.1"},
+			Secrets:  map[string]string{"password": testSecret},
+		},
 	}})
 	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("ImportInstances: %v", err)

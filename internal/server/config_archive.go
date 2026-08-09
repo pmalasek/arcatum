@@ -63,10 +63,18 @@ import (
 const (
 	// configArchiveFormat versions the layout below. An importer refuses what it does
 	// not recognise instead of guessing.
-	configArchiveFormat = 1
+	//
+	// 2 added schedules.json, when timing moved out of the instance.
+	configArchiveFormat = 2
+	// configArchiveMinFormat is the oldest layout still readable. Older archives are
+	// migrated on the way in (see readConfigArchive): the file somebody reaches for is the
+	// one exported before the server was lost, and refusing to read it because the layout
+	// has moved on would defeat the entire feature.
+	configArchiveMinFormat = 1
 
 	configManifestName  = "manifest.json"
 	configInstancesName = "instances.json"
+	configSchedulesName = "schedules.json"
 	configUsersName     = "users.json"
 	configRunnersName   = "runners.json"
 	configServerTOML    = "server.toml"
@@ -118,6 +126,7 @@ type ConfigManifest struct {
 // ConfigCounts is what the archive holds, for a glance at the file without unpacking it.
 type ConfigCounts struct {
 	Instances int `json:"instances"`
+	Schedules int `json:"schedules"`
 	Users     int `json:"users"`
 	Runners   int `json:"runners"`
 }
@@ -137,6 +146,7 @@ type ConfigTableDiff struct {
 type ConfigImportPlan struct {
 	Manifest  *ConfigManifest `json:"manifest"`
 	Instances ConfigTableDiff `json:"instances"`
+	Schedules ConfigTableDiff `json:"schedules"`
 	Users     ConfigTableDiff `json:"users"`
 	Runners   ConfigTableDiff `json:"runners"`
 	// Warnings are consequences worth reading before confirming. They do not stop an
@@ -176,6 +186,7 @@ func buildConfigArchive(set *ConfigSet, host, configPath string, now time.Time) 
 		value any
 	}{
 		{configInstancesName, set.Instances},
+		{configSchedulesName, set.Schedules},
 		{configUsersName, set.Users},
 		{configRunnersName, set.Runners},
 	} {
@@ -198,6 +209,7 @@ func buildConfigArchive(set *ConfigSet, host, configPath string, now time.Time) 
 		Host:      host,
 		Counts: ConfigCounts{
 			Instances: len(set.Instances),
+			Schedules: len(set.Schedules),
 			Users:     len(set.Users),
 			Runners:   len(set.Runners),
 		},
@@ -309,9 +321,9 @@ func readConfigArchive(data []byte) (*configArchive, error) {
 	if err := json.Unmarshal(manifestJSON, &arc.Manifest); err != nil {
 		return nil, fmt.Errorf("manifest.json: %w", err)
 	}
-	if arc.Manifest.Format != configArchiveFormat {
-		return nil, fmt.Errorf("archive format %d, this server understands %d",
-			arc.Manifest.Format, configArchiveFormat)
+	if arc.Manifest.Format < configArchiveMinFormat || arc.Manifest.Format > configArchiveFormat {
+		return nil, fmt.Errorf("archive format %d, this server understands %d to %d",
+			arc.Manifest.Format, configArchiveMinFormat, configArchiveFormat)
 	}
 
 	for name, want := range arc.Manifest.Files {
@@ -341,8 +353,44 @@ func readConfigArchive(data []byte) (*configArchive, error) {
 			return nil, fmt.Errorf("%s: %w", section.name, err)
 		}
 	}
+	// Schedules became a file of their own in format 2. Before that they sat inside each
+	// instance, so an older archive is read forward into the current shape rather than
+	// rejected — the schedules are in the file either way.
+	if arc.Manifest.Format >= 2 {
+		content, ok := files[configSchedulesName]
+		if !ok {
+			return nil, fmt.Errorf("archive is missing %s", configSchedulesName)
+		}
+		if err := json.Unmarshal(content, &arc.Set.Schedules); err != nil {
+			return nil, fmt.Errorf("%s: %w", configSchedulesName, err)
+		}
+	} else {
+		arc.Set.Schedules = schedulesFromInlineInstances(arc.Set.Instances)
+	}
 	arc.ServerTOML = files[configServerTOML]
 	return arc, nil
+}
+
+// schedulesFromInlineInstances lifts the pre-split inline schedules of a format 1 archive
+// into standalone ones. Ids are left empty: the table hands out its own on insert.
+func schedulesFromInlineInstances(instances []ConfigInstance) []ConfigSchedule {
+	out := []ConfigSchedule{}
+	for _, in := range instances {
+		if in.Schedule == nil || in.Schedule.Frequency == "" || in.Schedule.Time == "" {
+			continue
+		}
+		out = append(out, ConfigSchedule{
+			InstanceID: in.ID,
+			Name:       "default",
+			Frequency:  in.Schedule.Frequency,
+			Time:       in.Schedule.Time,
+			Weekdays:   in.Schedule.Weekdays,
+			Day:        in.Schedule.Day,
+			Timezone:   in.Schedule.Timezone,
+			Enabled:    true,
+		})
+	}
+	return out
 }
 
 // --- validation ---------------------------------------------------------------
@@ -368,10 +416,27 @@ func (s *Server) validateConfigSet(set *ConfigSet) error {
 			return fmt.Errorf("instance %q needs script %q, which this server does not have "+
 				"— deploy it into the scripts directory first", in.ID, in.Script)
 		}
+	}
+
+	now := time.Now()
+	for _, sc := range set.Schedules {
+		// A schedule pointing at no instance is a row that can never run anything.
+		if !seenInstance[sc.InstanceID] {
+			return fmt.Errorf("a schedule refers to instance %q, which is not in the archive",
+				sc.InstanceID)
+		}
 		// A schedule the scheduler cannot parse would be accepted into the database and
 		// then stop the server from starting again (see New).
-		if _, err := in.Schedule.Spec(s.sched.Location()); err != nil {
-			return fmt.Errorf("instance %q: %w", in.ID, err)
+		timing := ScheduleJSON{
+			Frequency: sc.Frequency, Time: sc.Time, Weekdays: sc.Weekdays,
+			Day: sc.Day, Timezone: sc.Timezone,
+		}
+		spec, err := timing.Spec(s.sched.Location())
+		if err != nil {
+			return fmt.Errorf("schedule of instance %q: %w", sc.InstanceID, err)
+		}
+		if _, err := spec.Next(now); err != nil {
+			return fmt.Errorf("schedule of instance %q never comes due: %w", sc.InstanceID, err)
 		}
 	}
 
@@ -470,6 +535,11 @@ func (s *Server) planConfigImport(arc *configArchive) (*ConfigImportPlan, error)
 		Manifest: &arc.Manifest,
 		Instances: diffConfigTable(current.Instances, arc.Set.Instances,
 			func(in ConfigInstance) string { return in.ID }, fingerprintJSON[ConfigInstance]),
+		// Schedules are keyed by what they say, not by their id: ids are assigned by the
+		// table and an imported schedule gets a new one, so comparing by id would report
+		// every schedule as removed-and-added even when nothing about it changed.
+		Schedules: diffConfigTable(current.Schedules, arc.Set.Schedules,
+			scheduleDiffKey, fingerprintSchedule),
 		Users: diffConfigTable(current.Users, arc.Set.Users,
 			func(u ConfigUser) string { return NormalizeUsername(u.Username) }, fingerprintUser),
 		Runners: diffConfigTable(current.Runners, arc.Set.Runners,
@@ -652,6 +722,25 @@ func fingerprintRunner(r ConfigRunner) string {
 		r.CertFingerprint, r.CSR}, "\x00")
 }
 
+// scheduleDiffKey identifies a schedule by which task it runs and when, never by its id.
+// Ids are assigned by the table, so an imported schedule gets a new one; keying on it
+// would report every unchanged schedule as removed and re-added.
+func scheduleDiffKey(sc ConfigSchedule) string {
+	when := sc.Frequency + " " + sc.Time
+	if len(sc.Weekdays) > 0 {
+		when += " " + strings.Join(sc.Weekdays, ",")
+	}
+	if sc.Day > 0 {
+		when += fmt.Sprintf(" day %d", sc.Day)
+	}
+	return sc.InstanceID + "\x00" + when
+}
+
+// fingerprintSchedule is what a schedule *is*, minus the id the key already excludes.
+func fingerprintSchedule(sc ConfigSchedule) string {
+	return fmt.Sprintf("%s\x00%s\x00%v", scheduleDiffKey(sc), sc.Timezone, sc.Enabled)
+}
+
 // --- applying -----------------------------------------------------------------
 
 // applyConfigImport replaces the configuration, having first saved what it is about to
@@ -667,13 +756,17 @@ func (s *Server) applyConfigImport(arc *configArchive, now time.Time) (string, e
 	if err := s.store.ReplaceConfig(&arc.Set); err != nil {
 		return backup, err
 	}
-	// The scheduler holds the old set in memory; without this, removed instances would
+	// The scheduler holds the old set in memory; without this, removed schedules would
 	// keep their slot and new ones would never come due.
-	instances := make([]*Instance, 0, len(arc.Set.Instances))
-	for _, in := range arc.Set.Instances {
-		instances = append(instances, &Instance{ID: in.ID, Schedule: in.Schedule})
+	//
+	// The stored rows are re-read rather than rebuilt from the archive: the ids only exist
+	// once the table has assigned them, and reading them back cannot drift from what was
+	// actually written.
+	schedules, err := s.store.Schedules()
+	if err != nil {
+		return backup, fmt.Errorf("configuration imported, but reloading schedules failed: %w", err)
 	}
-	if err := s.sched.Reset(instances, now); err != nil {
+	if err := s.sched.Reset(schedules, now); err != nil {
 		// Validation already parsed every schedule, so this cannot normally happen — but
 		// the database is written, and saying so is better than a silent half-applied state.
 		return backup, fmt.Errorf("configuration imported, but rescheduling failed: %w", err)

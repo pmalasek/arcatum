@@ -112,9 +112,8 @@ func resticTestServer(t *testing.T, requireClientCert bool) (*Server, string) {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	path := writeInstances(t, dir, []*Instance{{
-		ID: "files-web01", Script: "files-backup", RunnerID: "web-01",
-		Schedule: ScheduleJSON{Frequency: "daily", Time: "01:30"},
+	path := writeInstances(t, dir, []*seedInstance{{
+		Instance: Instance{ID: "files-web01", Script: "files-backup", RunnerID: "web-01"},
 	}})
 	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("ImportInstances: %v", err)
@@ -127,9 +126,13 @@ func resticTestServer(t *testing.T, requireClientCert bool) (*Server, string) {
 		sched:             NewScheduler(time.UTC),
 		catalog:           &Catalog{byName: map[string]*ScriptEntry{}},
 	}
-	for _, in := range mustInstances(t, st) {
-		if err := srv.sched.Track(in, time.Now()); err != nil {
-			t.Fatalf("Track: %v", err)
+	schedules, err := st.Schedules()
+	if err != nil {
+		t.Fatalf("Schedules: %v", err)
+	}
+	for _, sc := range schedules {
+		if err := srv.sched.TrackSchedule(sc, time.Now()); err != nil {
+			t.Fatalf("TrackSchedule: %v", err)
 		}
 	}
 	return srv, backupDir

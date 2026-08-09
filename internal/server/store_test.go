@@ -22,7 +22,7 @@ func openTestStore(t *testing.T) (*Store, string) {
 	return st, dir
 }
 
-func writeInstances(t *testing.T, dir string, list []*Instance) string {
+func writeInstances(t *testing.T, dir string, list []*seedInstance) string {
 	t.Helper()
 	path := filepath.Join(dir, "instances.json")
 	data, err := json.Marshal(list)
@@ -38,13 +38,18 @@ func writeInstances(t *testing.T, dir string, list []*Instance) string {
 func TestImportInstancesUpserts(t *testing.T) {
 	st, dir := openTestStore(t)
 
-	path := writeInstances(t, dir, []*Instance{{
-		ID:       "mysql-web01",
-		Script:   "mysql-backup",
-		RunnerID: "web-01",
-		Params:   map[string]string{"host": "127.0.0.1", "database": "shop"},
-		Secrets:  map[string]string{"password": "p1"},
-		Schedule: ScheduleJSON{Frequency: "weekly", Time: "02:30", Weekdays: []string{"mon", "thu"}},
+	path := writeInstances(t, dir, []*seedInstance{{
+		Instance: Instance{
+			ID:       "mysql-web01",
+			Script:   "mysql-backup",
+			RunnerID: "web-01",
+			Params:   map[string]string{"host": "127.0.0.1", "database": "shop"},
+			Secrets:  map[string]string{"password": "p1"},
+		},
+		Schedules: []ScheduleJSON{
+			{Frequency: "weekly", Time: "02:30", Weekdays: []string{"mon", "thu"}},
+			{Frequency: "monthly", Time: "23:00", Day: 1},
+		},
 	}})
 	if n, err := st.ImportInstances(path, true); err != nil || n != 1 {
 		t.Fatalf("ImportInstances = %d, %v; want 1, nil", n, err)
@@ -57,15 +62,26 @@ func TestImportInstancesUpserts(t *testing.T) {
 	if got.Params["database"] != "shop" || got.Secrets["password"] != "p1" {
 		t.Errorf("params/secrets round-trip failed: %+v / %+v", got.Params, got.Secrets)
 	}
-	if got.Schedule.Frequency != "weekly" || len(got.Schedule.Weekdays) != 2 {
-		t.Errorf("schedule round-trip failed: %+v", got.Schedule)
+	// Both schedules land, which is the point of the split: one task, a weekly run and a
+	// monthly one.
+	schedules, err := st.SchedulesForInstance("mysql-web01")
+	if err != nil || len(schedules) != 2 {
+		t.Fatalf("SchedulesForInstance = %v, %v; want two", schedules, err)
+	}
+	if schedules[0].Frequency != "weekly" || len(schedules[0].Weekdays) != 2 {
+		t.Errorf("schedule round-trip failed: %+v", schedules[0])
+	}
+	if schedules[1].Frequency != "monthly" || schedules[1].Day != 1 {
+		t.Errorf("second schedule round-trip failed: %+v", schedules[1])
 	}
 
 	// Re-importing the same id must update, not duplicate.
-	path = writeInstances(t, dir, []*Instance{{
-		ID: "mysql-web01", Script: "mysql-backup", RunnerID: "web-02",
-		Params:   map[string]string{"database": "orders"},
-		Schedule: ScheduleJSON{Frequency: "daily", Time: "03:00"},
+	path = writeInstances(t, dir, []*seedInstance{{
+		Instance: Instance{
+			ID: "mysql-web01", Script: "mysql-backup", RunnerID: "web-02",
+			Params: map[string]string{"database": "orders"},
+		},
+		Schedules: []ScheduleJSON{{Frequency: "daily", Time: "03:00"}},
 	}})
 	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("re-import: %v", err)
@@ -80,6 +96,12 @@ func TestImportInstancesUpserts(t *testing.T) {
 	if all[0].RunnerID != "web-02" || all[0].Params["database"] != "orders" {
 		t.Errorf("upsert did not apply: %+v", all[0])
 	}
+	// An overwrite replaces the schedules too rather than stacking a fresh set on top of
+	// the old one, which would leave the task running at times nobody asked for.
+	schedules, err = st.SchedulesForInstance("mysql-web01")
+	if err != nil || len(schedules) != 1 || schedules[0].Time != "03:00" {
+		t.Errorf("SchedulesForInstance = %v, %v; want the one schedule from the re-import", schedules, err)
+	}
 }
 
 func TestImportInstancesMissingFileIsOK(t *testing.T) {
@@ -92,10 +114,10 @@ func TestImportInstancesMissingFileIsOK(t *testing.T) {
 
 func TestInstancesForRunner(t *testing.T) {
 	st, dir := openTestStore(t)
-	path := writeInstances(t, dir, []*Instance{
-		{ID: "a", Script: "hello", RunnerID: "host-1", Schedule: ScheduleJSON{Frequency: "daily", Time: "01:00"}},
-		{ID: "b", Script: "hello", RunnerID: "host-2", Schedule: ScheduleJSON{Frequency: "daily", Time: "01:00"}},
-		{ID: "c", Script: "hello", RunnerID: "host-1", Schedule: ScheduleJSON{Frequency: "daily", Time: "01:00"}},
+	path := writeInstances(t, dir, []*seedInstance{
+		{Instance: Instance{ID: "a", Script: "hello", RunnerID: "host-1"}},
+		{Instance: Instance{ID: "b", Script: "hello", RunnerID: "host-2"}},
+		{Instance: Instance{ID: "c", Script: "hello", RunnerID: "host-1"}},
 	})
 	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("import: %v", err)
@@ -121,7 +143,7 @@ func TestRunLifecycle(t *testing.T) {
 	st, _ := openTestStore(t)
 	inst := &Instance{ID: "hello-demo", Script: "hello", RunnerID: "host-1"}
 
-	run, err := st.CreateRun(inst, 3600)
+	run, err := st.CreateRun(inst, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -179,7 +201,7 @@ func TestFinishRunStatusMapping(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			run, err := st.CreateRun(inst, 3600)
+			run, err := st.CreateRun(inst, "", 3600)
 			if err != nil {
 				t.Fatalf("CreateRun: %v", err)
 			}
@@ -209,7 +231,7 @@ func TestListRunsNewestFirstWithLimit(t *testing.T) {
 	st, _ := openTestStore(t)
 	inst := &Instance{ID: "i", Script: "hello", RunnerID: "h"}
 	for i := 0; i < 3; i++ {
-		if _, err := st.CreateRun(inst, 3600); err != nil {
+		if _, err := st.CreateRun(inst, "", 3600); err != nil {
 			t.Fatalf("CreateRun: %v", err)
 		}
 	}
@@ -297,11 +319,11 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	inst := &Instance{ID: "hello-demo", Script: "hello", RunnerID: "host-1"}
-	path := writeInstances(t, dir, []*Instance{inst})
+	path := writeInstances(t, dir, []*seedInstance{{Instance: *inst}})
 	if _, err := st.ImportInstances(path, true); err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	run, err := st.CreateRun(inst, 3600)
+	run, err := st.CreateRun(inst, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -330,7 +352,7 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 		t.Fatalf("runs lost across reopen: %+v", runs)
 	}
 	// Run ids must keep counting up, not restart at 1 and collide.
-	next, err := reopened.CreateRun(inst, 3600)
+	next, err := reopened.CreateRun(inst, "", 3600)
 	if err != nil {
 		t.Fatalf("CreateRun after reopen: %v", err)
 	}

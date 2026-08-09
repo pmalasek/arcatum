@@ -259,10 +259,12 @@ curl "${A[@]}" https://172.24.0.60:8443/api/v1/runners   # stav, platforma, verz
 Ve webu **Instances → new instance**, skript `hello`. Formulář se sestaví z parametrů
 manifestu ([`scripts/example/hello.toml`](../scripts/example/hello.toml)), takže stačí
 vyplnit `name`, `target` a `token` a jako runner vybrat `backup-central`. `hello` schválně
-nepotřebuje žádný externí nástroj — projde celou cestou od rozvrhu po zachycený výstup,
+nepotřebuje žádný externí nástroj — projde celou cestou od odeslání po zachycený výstup,
 takže když doběhne, funguje řetěz, ne skript.
 
-Pak **run now** a sleduj živý tail v detailu běhu. Totéž ze shellu:
+Nová instance **nemá rozvrh** a spustí se, jen když ji spustíš — což je přesně to, co tady
+chceš. Pak **run now**, což tě přepne do historie té úlohy; klikni na běh a sleduj živý tail.
+Až řetěz funguje, dej mu časový plán v **Schedules → new schedule**. Totéž ze shellu:
 
 ```sh
 curl "${A[@]}" -X POST https://172.24.0.60:8443/api/v1/instances/hello-demo/run
@@ -305,7 +307,10 @@ deploy/install-server.sh && systemctl restart arcatum-server
 Nový nebo změněný skript se dřív neprojeví. Vadný manifest naopak start zastaví, tak se po
 restartu vždycky podívej do logu.
 
-**Změna instance, parametrů nebo rozvrhu** — nic. Platí to hned, restart není potřeba.
+**Změna instance nebo parametrů** — nic. Platí to hned, restart není potřeba.
+
+**Změna rozvrhu** — taky nic. Přidání, úprava, pozastavení i smazání v záložce **Schedules**
+(nebo `PUT /api/v1/schedules/{id}`) přepočítá příští běh okamžitě.
 
 **Změna `server.toml`** — jen restart, instalátor na config nesahá:
 
@@ -368,7 +373,7 @@ databázi i adresáře založí znovu při startu.
 /usr/local/bin/arcatum-ca         symlink na /opt/arcatum/bin/
 
 /central_backup/arcatum/          backup_dir — nic než data
-  data/arcatum.db                 SQLite (instance, běhy, runnery, účty)  server
+  data/arcatum.db                 SQLite (instance, rozvrhy, běhy, runnery, účty)  server
   runs/<run_id>/{stdout,stderr}.log   zachycený výstup běhů               server
   restic/<instance>/              restic repozitář každé instance         server
   config-backups/                 konfigurace uložená před každým importem  server
@@ -394,7 +399,7 @@ Dvě věci, a každou jinak:
    `secrets-master.key` nejsou hesla instancí k ničemu, takže **tohle je ta část, jejíž
    ztráta je nevratná**.
 2. **Konfigurace** — web, záložka **Administration** → *download configuration*, nebo
-   `GET /api/v1/config/export`. Jeden zip s instancemi, účty a runnery, bez klíčů a bez dat
+   `GET /api/v1/config/export`. Jeden zip s instancemi, jejich rozvrhy, účty a runnery, bez klíčů a bez dat
    záloh. Ten samý soubor se dá kdykoli nahrát zpátky a konfiguraci tím nahradit; podrobnosti
    v [README](../README_cz.md#záloha-konfigurace-a-reset-serveru).
 

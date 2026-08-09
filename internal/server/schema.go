@@ -22,8 +22,14 @@ CREATE TABLE IF NOT EXISTS runners (
 );
 
 -- An instance binds a script definition to one runner (N:1) with concrete
--- parameters and a schedule. Secrets are plaintext at this stage; encryption at
--- rest arrives with pkg/crypto.SecretBox.
+-- parameters. It says what to back up and with what, never when — that is the
+-- schedules table below. Secrets are plaintext at this stage; encryption at rest
+-- arrives with pkg/crypto.SecretBox.
+--
+-- The schedule column is the pre-split form, kept because dropping a column would
+-- mean rebuilding the table and losing the record of what an operator had before the
+-- split. It is written once by whoever created the row, read once by
+-- migrateInlineSchedules, and never read again.
 CREATE TABLE IF NOT EXISTS instances (
   id        TEXT PRIMARY KEY,
   script    TEXT NOT NULL,
@@ -32,10 +38,32 @@ CREATE TABLE IF NOT EXISTS instances (
   secrets   TEXT NOT NULL DEFAULT '{}',  -- JSON object
   capture   TEXT NOT NULL DEFAULT '',
   timeout   TEXT NOT NULL DEFAULT '',
-  schedule  TEXT NOT NULL DEFAULT '{}'   -- JSON object
+  schedule  TEXT NOT NULL DEFAULT '{}'   -- JSON object, legacy (see above)
 );
 
 CREATE INDEX IF NOT EXISTS idx_instances_runner ON instances(runner_id);
+
+-- A schedule says when one instance runs. It is a table of its own, N per instance,
+-- because "what to back up" and "when to back it up" change for different reasons and
+-- at different moments: one task can want a nightly dump *and* a full copy once a
+-- month, and pausing the nightly run must not mean editing the backup itself.
+CREATE TABLE IF NOT EXISTS schedules (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  instance_id TEXT    NOT NULL,
+  name        TEXT    NOT NULL DEFAULT '',      -- operator's label, e.g. "nightly"
+  frequency   TEXT    NOT NULL DEFAULT 'daily', -- daily | weekly | monthly
+  time        TEXT    NOT NULL DEFAULT '',      -- HH:MM
+  weekdays    TEXT    NOT NULL DEFAULT '',      -- comma list for weekly, "mon,thu"
+  day         INTEGER NOT NULL DEFAULT 0,       -- day of month for monthly (1-28)
+  timezone    TEXT    NOT NULL DEFAULT '',      -- empty falls back to the server default
+  -- A paused schedule keeps its definition and stops coming due. Deleting one to skip a
+  -- week and typing it in again is how a schedule comes back subtly different.
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  created_at  INTEGER NOT NULL DEFAULT 0,       -- unix millis
+  updated_at  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedules_instance ON schedules(instance_id);
 
 CREATE TABLE IF NOT EXISTS runs (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,4 +199,28 @@ var addColumns = []struct{ table, column, definition string }{
 	// default somebody inherits without having asked for it.
 	{"instances", "keep_last", "INTEGER NOT NULL DEFAULT 0"},
 	{"instances", "keep_days", "INTEGER NOT NULL DEFAULT 0"},
+	// Which schedule caused this run. Empty means somebody pressed "run now": a manual
+	// run belongs to no schedule, and the two reach the runner by different paths
+	// (scheduler.go). History is only readable if it says which of an instance's
+	// schedules a run came from.
+	{"runs", "schedule_id", "TEXT NOT NULL DEFAULT ''"},
+	// Set once this instance's legacy inline schedule has been lifted into the schedules
+	// table. The marker is per row rather than per database on purpose: a global "done"
+	// flag is right only the first time, whereas this one is also right for an instance
+	// restored later from an older archive — and, the case that matters, it never
+	// resurrects a schedule the operator has since deleted (migrate_schedules.go).
+	{"instances", "schedule_migrated", "INTEGER NOT NULL DEFAULT 0"},
 }
+
+// postMigrateSQL is applied after addColumns, so unlike schemaSQL it may refer to
+// columns those added. An index over runs(schedule_id) in schemaSQL would fail on every
+// database that predates the column, because the schema is applied before the migration.
+const postMigrateSQL = `
+-- The run history of one task, newest first. idx_runs_instance above has no sort column
+-- and leaves the ordering to a sort pass; this one is what the per-instance history and
+-- the "last run of this schedule" lookups actually walk.
+CREATE INDEX IF NOT EXISTS idx_runs_instance_id  ON runs(instance_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_runs_schedule     ON runs(schedule_id, id DESC);
+-- The dashboard's "what failed in the last 24 hours".
+CREATE INDEX IF NOT EXISTS idx_runs_status_ended ON runs(status, ended_at DESC);
+`

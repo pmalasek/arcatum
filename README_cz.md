@@ -49,7 +49,7 @@ README je referenční přehled. Postupy krok za krokem mají vlastní dokumenty
 
 Dvě komponenty:
 
-- **arcatum-server** — centrální mozek. Drží rozvrh, definice skriptů, databázi běhů
+- **arcatum-server** — centrální mozek. Drží rozvrhy, definice skriptů, databázi běhů
   a úložiště zálohovaných dat. Poskytuje API (a později web UI).
 - **arcatum-runner** — lehká služba na každém zálohovaném serveru. Spouští skripty
   a streamuje výsledek na server.
@@ -78,24 +78,34 @@ spojení), což je přátelské k firewallu a zmenšuje útočnou plochu.
 
 Nejdůležitější rozdělení v celém systému — **šablona** a její **nasazení**:
 
-| | **Skript** (definice) | **Instance** (nasazení) |
-|---|---|---|
-| Co to je | šablona: kód/binárka + manifest parametrů | konkrétní nasazení na jeden cíl |
-| Kde žije | `scripts/` — verzováno v gitu | databáze (SQLite) |
-| Obsahuje secrets | **ne, nikdy** | ano (šifrované v DB) |
-| Rozvrh | ne | **ano** |
-| Příklad | `mysql-backup` | `mysql-web01`, `mysql-web02`, … |
+| | **Skript** (definice) | **Instance** (nasazení) | **Rozvrh** (kdy) |
+|---|---|---|---|
+| Co to je | šablona: kód/binárka + manifest parametrů | konkrétní nasazení na jeden cíl | kdy se to nasazení spouští |
+| Kde žije | `scripts/` — verzováno v gitu | databáze (SQLite) | databáze (SQLite) |
+| Obsahuje secrets | **ne, nikdy** | ano (šifrované v DB) | ne |
+| Kolik jich je | jeden na druh zálohy | libovolně na skript | **libovolně na instanci** |
+| Příklad | `mysql-backup` | `mysql-web01`, `mysql-web02`, … | `nightly` 02:30, `monthly full` 1. den |
 
 Jeden skript „záloha MySQL" tak obsluhuje libovolný počet MySQL serverů — každý jako
-samostatná instance s vlastními přihlašovacími údaji, databází a časem spouštění.
+samostatná instance s vlastními přihlašovacími údaji a databází.
 
 Instance míří na **právě jeden runner**. Jeden runner může hostit víc instancí.
-**Víc databází = víc instancí** (dá to nezávislý rozvrh, status a retry na každou).
+**Víc databází = víc instancí** (dá to nezávislý status a retry na každou).
+
+**Kdy** se úloha spouští, záměrně není součástí instance. Jedna úloha často chce víc než
+jeden časový plán — noční dump *a* k tomu plnou kopii prvního v měsíci — a pozastavení
+nočního běhu na týden nesmí znamenat editaci samotné zálohy. Rozvrh je proto samostatná
+věc a instance jich může mít víc, nebo taky žádný: instance bez rozvrhu je zcela legitimní
+a spustí se, když někdo zmáčkne **run now**.
+
+Když dva rozvrhy téže úlohy dozrají ve stejnou minutu, server odešle **jeden** běh, ne dva:
+popisují tutéž práci a dva procesy v jednom repozitáři není nic, co by si zálohovací systém
+měl zařídit sám.
 
 ### Tři úrovně konfigurace
 
 1. **Definice skriptu** — `scripts/<name>/<name>.toml` (git, bez secrets)
-2. **Instance** — v DB, seedovaná z `data/instances.json`
+2. **Instance a její rozvrhy** — v DB, seedované z `data/instances.json`
 3. **Host-level** — `config/server.toml` a `config/runner.toml`
 
 ---
@@ -188,7 +198,9 @@ curl http://127.0.0.1:8443/api/v1/runs                   # seznam běhů
 curl http://127.0.0.1:8443/api/v1/runs/run-1/output      # zachycený výstup
 ```
 
-Nebo ve webu na `http://127.0.0.1:8080/` — záložka **Runs** a klik na běh.
+Nebo ve webu na `http://127.0.0.1:8080/` — **Dashboard** ukazuje, co běží a co za poslední
+den selhalo; celou historii jedné úlohy najdeš přes **Instances** → úloha → **run now**,
+nebo tlačítkem **history** vedle jejího rozvrhu.
 
 Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
 
@@ -609,7 +621,7 @@ Instance pak určuje, co se zálohuje a jak dlouho se to drží:
     "keep_monthly": "6"
   },
   "secrets": { "restic_password": "dlouhé-náhodné-heslo" },
-  "schedule": { "frequency": "daily", "time": "01:30" }
+  "schedules": [{ "frequency": "daily", "time": "01:30" }]
 }
 ```
 
@@ -704,8 +716,9 @@ Přehledy a detail běhu:
 
 | Záložka | Co ukazuje |
 |---|---|
-| **Runs** | historie: stav, **stav přenosu na odlehlý server**, návratový kód, přenesená data, trvání |
-| **Instances** | příští běh, velikost restic repozitáře, **run now**; klik otevře úpravu, tlačítko **new instance** |
+| **Dashboard** | úvodní stránka: co **právě běží**, co **za posledních 24 hodin selhalo** a **nejbližší běhy** — plus proužek počtů (instance, rozvrhy a kolik jich je pozastavených, běžící, chyby, nedostupné runnery). Každý řádek někam vede: na chybující běh, nebo do historie úlohy, která se chystá běžet |
+| **Instances** | skript, runner, kolik má úloha **rozvrhů** (nebo „on demand"), příští běh, velikost restic repozitáře, **run now**; klik otevře úpravu, tlačítko **new instance** |
+| **Schedules** | řádek na každý rozvrh: která úloha, **kdy** běží, jeho **stav** (running / ok / failed / never / paused), **poslední** a **příští běh**; **pause** i obnovení bez ztráty nastavení, **history** dané úlohy a tlačítko **new schedule** |
 | **Restore** | snapshoty, procházení stromu, stažení souboru nebo adresáře jako `.tar` |
 | **Keys** | stav rotace všech tří klíčů, přešifrování secrets, postup migrace CA |
 | **Runners** | stav, platforma, **verze buildu**, expirace certifikátu, kdy se naposledy ohlásil; **approve / reject / revoke** |
@@ -716,10 +729,22 @@ Vpravo v hlavičce je přihlášený uživatel, jeho role, **change password** a
 Viewerovi se tlačítka, která něco mění, vůbec nezobrazí — a server je stejně odmítne (403),
 takže shoda UI se skutečnými právy není otázka důvěry v prohlížeč.
 
+**Běh se hledá u úlohy, ke které patří.** Plochý seznam všeho, co kdy server udělal, už
+není: z instance, z řádku rozvrhu i po „run now" se dostaneš do **historie té úlohy**, od
+nejnovějšího, s donačítáním na vyžádání. To odpovídá na otázku „jak se té záloze vede" na
+jednom místě, což jeden promíchaný seznam nikdy nedělal. Plochý seznam zůstává v API
+(`GET /api/v1/runs`) pro shell a stránku `/status`.
+
 Klikem na běh se otevře **detail s živým tailem výstupu** — u probíhající úlohy se log
 dosypává, jak přichází. Přepínač `stdout`/`stderr` a zaškrtávátko „follow"
 (automatické odscrollování). Přesně to, na co jsi mířil požadavkem usnadnit ladění
 skriptů: spustit ručně a hned vidět, co skript píše.
+
+Web je **responzivní**. Na tabletu se formuláře a metadata složí do jednoho sloupce a
+záložky se změní na posuvný pruh; na telefonu tabulky přestanou být tabulkami a každý řádek
+je karta s názvy sloupců u hodnot — protože posouvat tabulku doprava, abys zjistil, jestli
+noční záloha dopadla, je přesně to, co udělá UI nepoužitelným na zařízení, které máš zrovna
+u sebe v sedm ráno.
 
 Živý tail nepoužívá websockety — prohlížeč se ptá `GET /api/v1/runs/{id}/tail?offset=N`
 a server pošle jen to, co od posledního dotazu přibylo. Jednodušší, přežije to odpadnutí
@@ -838,10 +863,17 @@ Jeden zip s tím, co dohromady tvoří nastavení serveru:
 ```
 manifest.json     formát, čas, host, které master klíče secrets potřebují, kontrolní součty
 instances.json    instance včetně secrets — v té podobě, v jaké leží v databázi
+schedules.json    kdy se která instance spouští, včetně pozastavených
 users.json        účty webu včetně ověřovačů hesel (PBKDF2), ne hesel samotných
 runners.json      evidence runnerů: stav enrollmentu, certifikát, otisk
 server.toml       kopie configu — jen pro referenci, import ji nepoužije
 ```
+
+`format` v manifestu je **2**. Formát 1 — zapsaný ještě dřív, než se čas odstěhoval z
+instance — jde pořád naimportovat: jeho inline rozvrhy se cestou dovnitř přesypou do
+samostatných. Archiv, po kterém člověk sáhne, je ten vyexportovaný předtím, než server
+zmizel, a odmítnout ho číst kvůli tomu, že se rozvržení posunulo, by celou tuhle funkci
+připravilo o smysl.
 
 Co v archivu **není**: běhy, logy, dumpy, restic repozitáře — a hlavně **žádné klíče**.
 CA klíč, podepisovací klíč ani `secrets-master.key` do něj nepatří: jeden takový soubor by
@@ -857,8 +889,9 @@ Archiv přesto obsahuje hashe hesel operátorů. **Není to veřejný soubor.**
 
 ### Obnova konfigurace
 
-Import **nahradí celou konfiguraci**: `instances`, `users` a `runners` se vyprázdní a naplní
-obsahem archivu, takže co v archivu není, po importu nebude ani na serveru. Sezení se ruší
+Import **nahradí celou konfiguraci**: `instances`, `schedules`, `users` a `runners` se
+vyprázdní a naplní obsahem archivu, takže co v archivu není, po importu nebude ani na
+serveru. Sezení se ruší
 všechna — po importu se všichni včetně tebe přihlásí znovu.
 
 Běhy, logy ani data záloh se **nemažou**. Když z konfigurace zmizí instance, její restic
@@ -874,7 +907,8 @@ Import odmítne archiv, který by po sobě nechal stav, ze kterého už není ce
 
 - žádný povolený `admin` účet — nikdo by se do webu nedostal
 - instance odkazující na skript, který na serveru není (server by po restartu nenaběhl)
-- rozvrh, kterému scheduler nerozumí
+- rozvrh, kterému scheduler nerozumí, nebo takový, co se sice rozparsuje, ale nikdy nedozraje
+- rozvrh patřící instanci, kterou archiv neobsahuje — řádek, který by nikdy nic nespustil
 - secrets zašifrované klíčem, který tenhle server nemá
 - poškozený archiv (nesedí kontrolní součet)
 
@@ -884,7 +918,7 @@ dveře; kdo ho chce změnit, udělá to ručně a s restartem po ruce.
 ### Vyprázdnění serveru
 
 Smaže **všechny zálohy, dumpy, logy a celou historii běhů** — tedy `backup_dir/runs`,
-`backup_dir/restic` a cache. Zůstanou klíče, uživatelé, instance i schválené runnery, takže
+`backup_dir/restic` a cache. Zůstanou klíče, uživatelé, instance i s rozvrhy a schválené runnery, takže
 server je hned zase provozuschopný, jen bez čehokoli nasbíraného; číslování běhů začne
 znovu od `run-1`.
 
@@ -972,8 +1006,12 @@ a `mysql_backup` (realistická šablona).
 které vybraný skript deklaruje, a hodnoty se proti manifestu **zvalidují při uložení**:
 chybějící heslo nebo překlep v názvu parametru se pozná hned, ne až při noční záloze.
 
-Změny platí **okamžitě, bez restartu serveru** — včetně změny rozvrhu. Hesla se šifrují
-už při uložení, takže nikde nezůstávají v plaintextu.
+Formulář nemá časová pole: nová instance vzniká **bez rozvrhu** a spustí se, když zmáčkneš
+**run now**. Rozvrh jí dej v záložce **Schedules** → **new schedule** — a klidně víc, kolik
+jich úloha potřebuje.
+
+Změny platí **okamžitě, bez restartu serveru**, jak u instance, tak u jejích rozvrhů. Hesla
+se šifrují už při uložení, takže nikde nezůstávají v plaintextu.
 
 Klik na řádek instance ji otevře k úpravě. U uloženého secretu se zobrazí `(unchanged)`;
 když pole necháš prázdné, stará hodnota zůstane.
@@ -996,40 +1034,84 @@ curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
   "runner_id": "web-01",
   "params":  { "host": "127.0.0.1", "port": "3306", "database": "shop", "user": "backup" },
   "secrets": { "password": "…" },
-  "timeout": "2h",
-  "schedule": { "frequency": "weekly", "time": "02:30",
-                "weekdays": ["mon","thu"], "timezone": "Europe/Prague" }
+  "timeout": "2h"
+}'
+# kdy to běží je druhé, samostatné volání — a úloha jich může mít víc
+curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/schedules -d '{
+  "instance_id": "mysql-web01", "name": "nightly",
+  "frequency": "weekly", "time": "02:30",
+  "weekdays": ["mon","thu"], "timezone": "Europe/Prague"
 }'
 curl "${A[@]}" -X PUT    $API/instances/mysql-web01 -d '…'   # úprava
-curl "${A[@]}" -X DELETE $API/instances/mysql-web01          # smazání
+curl "${A[@]}" -X DELETE $API/instances/mysql-web01          # smazání, i s rozvrhy
 
 # kopie: "copy_from" doplní secrety ze zdrojové instance, ať je není nutné znát
 curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
   "id": "mysql-web01-orders", "copy_from": "mysql-web01",
   "script": "mysql-backup", "runner_id": "web-01",
   "params":  { "host": "127.0.0.1", "port": "3306", "database": "orders", "user": "backup" },
-  "secrets": { "password": "***" },
-  "schedule": { "frequency": "daily", "time": "03:00" }
+  "secrets": { "password": "***" }
 }'
 ```
 
 `copy_from` platí jen pro vytvoření. Secret poslaný jako `"***"` nebo prázdný se vezme ze
 zdroje, jakákoli jiná hodnota ho přepíše; secret, který požadavek vůbec nezmíní, se
 nepřebírá (uplatní se default z manifestu, nebo to neprojde validací). Všechno ostatní je
-vždy to, co přišlo v požadavku — kopie tedy může běžet na jiném runneru i jiném rozvrhu.
+vždy to, co přišlo v požadavku — kopie tedy může běžet na jiném runneru. **Rozvrhy se
+nekopírují**: kopie vzniká bez nich a její časový plán je samostatné rozhodnutí.
 
-Rozvrh: `frequency` je `daily` | `weekly` | `monthly`; `weekdays` platí pro `weekly`,
-`day` (1–28) pro `monthly`. `timezone` je nepovinná — jinak platí default ze `server.toml`.
+> **Smazání instance nemaže zálohy.** Odstraní se konfigurace a s ní i její rozvrhy — rozvrh,
+> který přežije svou úlohu, je řádek, co nikdy nic nespustí. Restic repozitář zůstane na
+> disku; když ho chceš opravdu zahodit, smaž ho ručně z `backup_dir/restic/<instance>/`.
 
-> **Smazání instance nemaže zálohy.** Odstraní se jen konfigurace; restic repozitář
-> zůstane na disku. Když ho chceš opravdu zahodit, smaž ho ručně z
-> `backup_dir/restic/<instance>/`.
+### Rozvrhy
+
+```sh
+curl "${A[@]}" $API/schedules                              # všechny, se stavem a příštím během
+curl "${A[@]}" $API/instances/mysql-web01/schedules        # jen té jedné úlohy
+curl "${A[@]}" -X PUT $API/schedules/sch-1 -d '{"enabled": false}'   # pozastavit
+curl "${A[@]}" -X DELETE $API/schedules/sch-1                        # smazat
+```
+
+`frequency` je `daily` | `weekly` | `monthly`; `weekdays` platí pro `weekly`, `day` (1–28)
+pro `monthly` — nikdy víc než 28, jinak by rozvrh přeskočil únor. `timezone` je nepovinná,
+jinak platí default ze `server.toml`. `name` je popisek, aby šlo víc rozvrhů jedné úlohy
+rozlišit. Frekvenci, kterou server nezná, **odmítne při uložení** — místo aby ji přijal do
+rozvrhu, který pak potichu nikdy nedozraje.
+
+**Pozastavení** (`enabled: false`) drží definici a přestane dozrávat. Použij ho radši než
+smazat a za týden napsat znovu: přesně tak se rozvrh vrátí nenápadně jiný, než jaký fungoval.
+
+Každý rozvrh hlásí **stav**: `running` (běh té úlohy je rozjetý), `ok`, `failed`, `never`
+(ještě neběžel) nebo `paused`. Běhy si pamatují, který rozvrh je způsobil, takže historie
+úlohy řekne, jestli šlo o noční nebo měsíční — a ruční „run now" nepatří žádnému rozvrhu a
+nikdy se nevydává za jeho výsledek.
 
 ### Seed soubor `data/instances.json`
 
 Zůstává jako **počáteční** naplnění: při startu se z něj vytvoří jen instance, které
 ještě neexistují. Existující se **nepřepisují**, jinak by restart serveru pokaždé vrátil
 změny udělané z webu. Vynutit přepsání jde přepínačem `-import-force`.
+
+Položka může nést rozvrhy, se kterými instance vzniká:
+
+```json
+{
+  "id": "hello-demo", "script": "hello", "runner_id": "web-01",
+  "params": { "name": "hello-demo" },
+  "schedules": [
+    { "frequency": "daily",   "time": "03:00", "timezone": "Europe/Prague" },
+    { "frequency": "monthly", "time": "23:00", "day": 1 }
+  ]
+}
+```
+
+Starší jednotné `"schedule": { … }` se pořád přijímá, takže seed soubor ležící na existujícím
+serveru se kvůli tomu nemusí přepisovat.
+
+> **Rozvrhy se uplatní jen na instanci, kterou import skutečně založil.** U instance, která
+> už existuje, se nestane nic — záměrně, protože jinak by každý restart znovu vytvořil rozvrh,
+> který operátor smazal. S `-import-force` se rozvrhy instance seedem **nahradí**, ne doplní.
 
 Pozor: soubor obsahuje hesla v plaintextu, proto je v `.gitignore`. Když instance
 spravuješ z webu, můžeš ho po naplnění klidně smazat.
@@ -1058,12 +1140,20 @@ se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém
 | `POST /api/v1/instances/{id}/run` | admin | **manuální spuštění** („spusť teď") |
 | `POST /api/v1/runs/{id}/cancel` | admin | **zastavení běhu** — runner ho vyzvedne do pár sekund |
 | `GET /api/v1/runs/{id}/cancel` | runner | dotaz běžící úlohy, jestli má skončit |
-| `GET /api/v1/instances` | čtení | instance včetně `next_run` (secrets maskované) |
-| `POST /api/v1/instances` | admin | vytvoří instanci (validuje se proti manifestu) |
+| `GET /api/v1/dashboard` | čtení | přehled v jednom požadavku: počty, co běží, chyby za 24 h, nejbližší běhy |
+| `GET /api/v1/instances` | čtení | instance s `next_run` (nejbližší přes jejich **povolené** rozvrhy) a počtem rozvrhů (secrets maskované) |
+| `POST /api/v1/instances` | admin | vytvoří instanci (validuje se proti manifestu) — bez času, ten je rozvrh |
 | `PUT /api/v1/instances/{id}` | admin | upraví instanci |
-| `DELETE /api/v1/instances/{id}` | admin | smaže instanci (zálohy zůstanou) |
+| `DELETE /api/v1/instances/{id}` | admin | smaže instanci **i s jejími rozvrhy** (zálohy zůstanou) |
+| `GET /api/v1/schedules` | čtení | všechny rozvrhy se stavem, posledním a příštím během |
+| `POST /api/v1/schedules` | admin | přidá instanci rozvrh |
+| `GET /api/v1/schedules/{id}` | čtení | jeden rozvrh |
+| `PUT /api/v1/schedules/{id}` | admin | upraví rozvrh, nebo ho pozastaví přes `{"enabled": false}` |
+| `DELETE /api/v1/schedules/{id}` | admin | smaže rozvrh (úloha i zálohy zůstanou) |
+| `GET /api/v1/instances/{id}/schedules` | čtení | rozvrhy jedné úlohy |
+| `GET /api/v1/instances/{id}/runs?limit=&offset=` | čtení | **historie běhů jedné úlohy**, nejnovější první, s `has_more` pro další stránku |
 | `GET /api/v1/scripts` | čtení | skripty a jejich deklarované parametry |
-| `GET /api/v1/runs?limit=N` | čtení | historie běhů, nejnovější první |
+| `GET /api/v1/runs?limit=N` | čtení | plochá historie běhů, nejnovější první — pro shell a `/status`; web čte historii po úlohách |
 | `GET /api/v1/runs/{id}` | čtení | detail jednoho běhu |
 | `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | čtení | zachycený výstup běhu |
 | `GET /api/v1/runs/{id}/tail?offset=N&stream=` | čtení | přírůstek výstupu — základ živého tailu |
@@ -1130,7 +1220,8 @@ server tak nemůže přepsat výsledky jiného.
 
 ## Ladění skriptů
 
-Nejpohodlnější cesta je [web UI](#web-ui): záložka **Instances** → **run now**, pak
+Nejpohodlnější cesta je [web UI](#web-ui): záložka **Instances** → **run now**, což tě
+přepne do historie té úlohy — pak
 klik na běh a sleduješ živý tail výstupu. Ze shellu totéž:
 
 ```sh
@@ -1405,8 +1496,8 @@ typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-develop
 
 **Hotovo:**
 - Pull protokol end-to-end: checkin → doručení úlohy → spuštění → stream výstupu na server
-- Rozvrh (denní/týdenní/měsíční) + manuální trigger
-- Persistence v SQLite (instance, běhy, evidence runnerů) — přežije restart
+- Rozvrhy jako samostatná entita: víc na jednu úlohu (denní/týdenní/měsíční), pozastavitelné, plus manuální trigger
+- Persistence v SQLite (instance, rozvrhy, běhy, evidence runnerů) — přežije restart
 - Tři úrovně konfigurace, manifest s deklarací parametrů
 - **mTLS** mezi serverem a runnery, identita a role z certifikátu, PKI nástroje
 - **Podpis úloh** (Ed25519) — runner ověřuje před spuštěním, jinak odmítne
@@ -1414,7 +1505,7 @@ typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-develop
 - **Zálohování souborů přes restic** — repozitář na serveru (vlastní restic REST backend),
   dedup a inkrementální snapshoty, izolace repozitářů mezi runnery
 - **Retence (GFS)** — `forget --prune` po úspěšné záloze, omezené na vlastní snapshoty
-- **Web UI** zabalené v binárce — běhy, instance, runnery, **živý tail výstupu**, „run now"
+- **Web UI** zabalené v binárce, **responzivní** — dashboard, instance, rozvrhy, historie běhů po úlohách, runnery, **živý tail výstupu**, „run now"
 - **Přihlášení do webu jménem a heslem** na vlastním portu, role `admin`/`viewer`, správa
   účtů z webu (PBKDF2 hashe, sezení v cookie); runnery zůstávají na certifikátech
 - **Instalace jedním příkazem** (`install.sh`) a **enrollment** — runner si vygeneruje vlastní
