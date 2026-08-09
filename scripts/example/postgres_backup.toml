@@ -1,0 +1,36 @@
+# Script DEFINITION (template). Values for a concrete server live in an instance
+# (in the DB / web UI), not here. See docs/architecture.md §5.
+name       = "postgres-backup"
+type       = "bash"               # bash | python | binary | restic
+entrypoint = "postgres_backup.sh" # relative to this manifest
+timeout    = "1h"                 # default; an instance may override
+# stdout of this script is the dump itself, not a log: the server takes it as the
+# backup payload, uploads it raw and never shows it in the run log.
+capture    = "stream"
+
+# Parameter declarations → the server renders a form and validates instances.
+[[param]]
+name = "host"
+type = "string"
+required = true
+
+[[param]]
+name = "port"
+type = "int"
+default = "5432"
+
+[[param]]
+name = "database"
+type = "string"
+required = true
+
+[[param]]
+name = "user"
+type = "string"
+required = true
+
+[[param]]
+name = "password"
+type = "string"
+required = true
+secret = true
