@@ -1067,3 +1067,99 @@ příponu `.sql.gz`, zatím není.
 
 **Dlouhá historie.** `keep_last = 7` při denním rozvrhu znamená, že celá historie je
 týden — tiché poškození dat nebo ransomware se pozná i za měsíc. Na to je `keep_days`.
+
+---
+
+## 20. Záloha konfigurace a reset serveru
+
+Arcatum umělo zálohovat cizí data, ale ne vlastní nastavení: instance, účty a evidence
+runnerů žily jen v `arcatum.db` a na jiný stroj se dostávaly kopírováním souborů. Tohle
+je jeden download a jeden upload — plus opačná operace, vyprázdnění serveru od všeho
+nasbíraného. Obojí obsluhuje záložka **Administrace** a obojí je `admin only`.
+
+Kód: `internal/server/config_archive.go` (formát, validace, handlery),
+`config_archive_store.go` (čtení a nahrazení tabulek), `reset.go`.
+
+### Logický export, ne kopie `arcatum.db`
+
+Kopírovat databázový soubor by bylo jednodušší a je to špatně hned třikrát: v režimu WAL
+nejde zkopírovat konzistentně za běhu, táhne s sebou historii běhů a živá sezení, která
+nemají co cestovat, a přibije archiv na jednu verzi schématu. JSON po tabulkách je čitelný
+a diffovatelný — u souboru, jehož jediný smysl je být obnoven pod tlakem, to není kosmetika.
+
+Nese se `instances`, `users` a `runners`. Běhy jsou historie, ne konfigurace, a soubory,
+na které ukazují, leží stejně na disku. Sezení se zahazují, ne přenášejí: sezení patří
+prohlížeči, který ho otevřel, ne konfiguraci, proti které vzniklo.
+
+### Žádné klíče v archivu
+
+CA klíč, podepisovací klíč ani `secrets-master.key` v archivu nejsou. Jeden takový soubor
+by odemykal každý repozitář a uměl vydat certifikát libovolnému hostu — to nemá být něco,
+co se stahuje kliknutím a leží ve Stažených souborech.
+
+Cena za to: secrets cestují jako **ciphertext**, takže import funguje jen tam, kde je
+stejný master klíč. Aby to nebylo zjištění až za měsíc při selhané záloze, manifest nese
+`secret_key_ids` a import předem ověří, že server ty klíče má (`crypto.SealedKeyID`,
+`Keyring.Has`). Když ne, odmítne se celý.
+
+Archiv i tak obsahuje PBKDF2 ověřovače hesel operátorů, tedy věc lámatelnou offline. Není
+to veřejný soubor a UI to říká nahlas. Passphrase na archivu by šlo doplnit, ale zvolena
+nebyla: bez klíčů je to citlivé, ne katastrofické, a heslo navíc je další věc, která se dá
+zapomenout přesně ve chvíli, kdy se archiv potřebuje.
+
+### Import nahrazuje, a napřed se ptá
+
+Sémantika je **replace-all**: tři tabulky se vyprázdní a naplní archivem, takže po importu
+je přesně to, co bylo exportováno, bez zbytků. Celé v jedné transakci — polovičně
+naimportovaná konfigurace je ten stav, ze kterého se nelze dostat webem ven.
+
+`POST /api/v1/config/import` **bez** `?confirm=replace-all` je dry run: ověří archiv, spočítá
+diff a vrátí ho, ale nezapíše nic. POST, který dorazí omylem, tedy popíše, co by udělal.
+Web ten diff ukáže a teprve pak nechá potvrdit.
+
+Diff porovnává jen to, co je konfigurace: u runneru identitu a enrollment, ne `last_seen`
+a hlášenou verzi. Bez toho by po každém check-inu svítilo „změnil se" u všech runnerů
+a skutečné rozdíly by se v tom šumu ztratily.
+
+Před zápisem si server sám uloží současnou konfiguraci do `backup_dir/config-backups/` jako
+plnohodnotný archiv — cesta zpátky z omylem naimportovaného souboru je naimportovat ten,
+který se tím vyrobil. Když se uložit nepovede, import se **odmítne**: „došlo místo na disku"
+je poslední chvíle, kdy se to má zjistit až potom.
+
+Odmítá se všechno, co by po sobě nechalo nevratný stav: archiv bez povoleného admina,
+instance se skriptem, který tu není (server by po restartu nenaběhl — viz `New`), rozvrh,
+kterému scheduler nerozumí, nečitelné secrets, nesedící kontrolní součet.
+
+Po zápisu se schedulerem provede `Reset` — bez něj by odebrané instance držely místo
+v rozvrhu a nové by se nikdy nedočkaly. Restart potřeba není; právě proto, že se
+nepřenášejí klíče, je import čistě databázová operace.
+
+### `server.toml` se veze, ale neaplikuje
+
+V archivu je pro referenci. Aplikovat ho by znamenalo, že archiv umí přepsat `listen` nebo
+cesty ke klíčům — tedy zamknout dveře zvenčí. Kdo config měnit chce, udělá to ručně
+a s restartem po ruce.
+
+### Reset: opačná operace
+
+Smaže `runs` a pod `backup_dir` adresáře `runs/`, `restic/` a `restic-cache/`. Zůstávají
+klíče, účty, instance **i runnery** — enrollment je konfigurace, ne nasbíraná data, a
+vyhodit ho by znamenalo obejít každý zálohovaný host a znovu ho schválit.
+
+Pořadí je záměrné: nejdřív databáze, pak soubory. Selhání uprostřed tak nechá osiřelé
+adresáře, které stojí místo, místo řádků ukazujících na soubory, které už nejsou — a web
+by nabízel stahování, které skončí chybou. Se řádky se maže i čítač `sqlite_sequence`,
+protože id běhů jsou jména adresářů a všechny se právě odstranily.
+
+`config-backups/` se nemaže. Je to cesta zpět a reset není chvíle ji zahazovat.
+
+Běží-li úloha, reset se odmítne (`409`): mazat adresář, do kterého runner právě streamuje,
+by nechalo běh psát do prázdna. Potvrzení je `?confirm=delete-all-backups` — jediná akce
+v systému, která maže zálohy, nemá být dosažitelná překlepem v URL.
+
+### Ověřeno E2E
+
+Export → smazání instance a účtu → dry run (nezapsal nic) → import s potvrzením: instance
+zpět **i s rozvrhem** bez restartu, účet zpět, staré sezení `401`, archiv předchozího stavu
+v `config-backups/`. Viewer dostane `403` na export, import i reset. Reset s daty na disku:
+`runs/`, `restic/` i cache pryč, `config-backups/` a celá konfigurace nedotčené.

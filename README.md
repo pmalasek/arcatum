@@ -19,6 +19,7 @@ výstup a ukládá ho **centrálně** — na zálohovaném serveru nemá zůstá
 - [Rotace klíčů](#rotace-klíčů)
 - [Zálohování souborů (restic)](#zálohování-souborů-restic)
 - [Web UI](#web-ui)
+- [Záloha konfigurace a reset serveru](#záloha-konfigurace-a-reset-serveru)
 - [Jak napsat vlastní zálohovací skript](#jak-napsat-vlastní-zálohovací-skript)
 - [Jak přidat instanci](#jak-přidat-instanci)
 - [HTTP API](#http-api)
@@ -708,6 +709,7 @@ Přehledy a detail běhu:
 | **Klíče** | stav rotace všech tří klíčů, přešifrování secrets, postup migrace CA |
 | **Runnery** | stav, platforma, **verze buildu**, expirace certifikátu, kdy se naposledy ohlásil; **schválit / zamítnout / zneplatnit** |
 | **Uživatelé** | účty webu: role, stav, poslední přihlášení; **přidat / nové heslo / změnit roli / vypnout / smazat** (jen pro roli `admin`) |
+| **Administrace** | [záloha konfigurace, její obnova a vyprázdnění serveru](#záloha-konfigurace-a-reset-serveru) (jen pro roli `admin`) |
 
 Vpravo v hlavičce je přihlášený uživatel, jeho role, **změnit heslo** a **odhlásit**.
 Viewerovi se tlačítka, která něco mění, vůbec nezobrazí — a server je stejně odmítne (403),
@@ -739,6 +741,77 @@ API s admin certifikátem:
 curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
   https://172.24.0.60:8443/status
 ```
+
+---
+
+## Záloha konfigurace a reset serveru
+
+Záložka **Administrace** ve webu (jen pro roli `admin`) obsluhuje tři věci, které se týkají
+Arcatum samotného, ne toho, co zálohuje.
+
+### Stažení konfigurace
+
+Jeden zip s tím, co dohromady tvoří nastavení serveru:
+
+```
+manifest.json     formát, čas, host, které master klíče secrets potřebují, kontrolní součty
+instances.json    instance včetně secrets — v té podobě, v jaké leží v databázi
+users.json        účty webu včetně ověřovačů hesel (PBKDF2), ne hesel samotných
+runners.json      evidence runnerů: stav enrollmentu, certifikát, otisk
+server.toml       kopie configu — jen pro referenci, import ji nepoužije
+```
+
+Co v archivu **není**: běhy, logy, dumpy, restic repozitáře — a hlavně **žádné klíče**.
+CA klíč, podepisovací klíč ani `secrets-master.key` do něj nepatří: jeden takový soubor by
+odemykal všechny repozitáře a uměl vyrobit certifikát libovolnému hostu. Klíče se zálohují
+zvlášť spolu s `pki/` (viz [docs/production.md](docs/production.md)).
+
+Důsledek toho rozhodnutí: **secrets cestují zašifrované**, takže archiv jde naimportovat
+jen tam, kde je stejný master klíč. Server to zkontroluje předem a jinak import odmítne —
+lepší než zjistit ve tři ráno, že heslo k repozitáři nejde přečíst. Na serveru bez
+`[secrets] master_key` jsou secrets v databázi v plaintextu, a tedy i v archivu.
+
+Archiv přesto obsahuje hashe hesel operátorů. **Není to veřejný soubor.**
+
+### Obnova konfigurace
+
+Import **nahradí celou konfiguraci**: `instances`, `users` a `runners` se vyprázdní a naplní
+obsahem archivu, takže co v archivu není, po importu nebude ani na serveru. Sezení se ruší
+všechna — po importu se všichni včetně tebe přihlásí znovu.
+
+Běhy, logy ani data záloh se **nemažou**. Když z konfigurace zmizí instance, její restic
+repozitář zůstane ležet v `backup_dir` — nic se nemaže samo.
+
+Postup je dvoukrokový. Nahraný archiv se nejdřív jen zkontroluje a web ukáže, **co se
+změní**: co přibude, co se změní, co zmizí, plus varování na následky, které nikdo nečeká —
+třeba že runner, kterého archiv nezná, přijde o přístup a bude se muset znovu naenrollovat.
+Teprve pak se potvrzuje. Než se něco zapíše, server si **současnou konfiguraci sám uloží**
+do `backup_dir/config-backups/` — cesta zpátky je naimportovat ten soubor.
+
+Import odmítne archiv, který by po sobě nechal stav, ze kterého už není cesty ven:
+
+- žádný povolený `admin` účet — nikdo by se do webu nedostal
+- instance odkazující na skript, který na serveru není (server by po restartu nenaběhl)
+- rozvrh, kterému scheduler nerozumí
+- secrets zašifrované klíčem, který tenhle server nemá
+- poškozený archiv (nesedí kontrolní součet)
+
+`server.toml` se **nikdy neaplikuje**. Přepsat si `listen` importem znamená zamknout si
+dveře; kdo ho chce změnit, udělá to ručně a s restartem po ruce.
+
+### Vyprázdnění serveru
+
+Smaže **všechny zálohy, dumpy, logy a celou historii běhů** — tedy `backup_dir/runs`,
+`backup_dir/restic` a cache. Zůstanou klíče, uživatelé, instance i schválené runnery, takže
+server je hned zase provozuschopný, jen bez čehokoli nasbíraného; číslování běhů začne
+znovu od `run-1`.
+
+Uložené konfigurační archivy (`backup_dir/config-backups`) se nemažou — jsou to cesty zpět
+a reset není chvíle, kdy je zahazovat.
+
+Jediná akce v Arcatum, která maže zálohy. Potvrzuje se slovem, běží jen s `confirm` v URL,
+a **nejde vzít zpět** — data odsud nejsou nikde jinde. Dokud běží nějaká úloha, reset se
+odmítne: mazat adresář, do kterého runner právě streamuje, není dobrý nápad.
 
 ---
 
@@ -919,6 +992,10 @@ se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém
 | `GET /api/v1/whoami` | čtení | kdo jsi, jak jsi se přihlásil, expirace certifikátů |
 | `GET /api/v1/rotation` | čtení | stav rotace všech tří klíčů |
 | `POST /api/v1/secrets/rekey` | admin | přešifruje secrets aktuálním master klíčem |
+| `GET /api/v1/config/export` | admin | [záloha konfigurace](#záloha-konfigurace-a-reset-serveru) jako zip (bez klíčů a bez dat záloh) |
+| `POST /api/v1/config/import` | admin | archiv v těle requestu; **bez** `?confirm=replace-all` jen vrátí, co by změnil |
+| `GET /api/v1/reset` | admin | co by [vyprázdnění serveru](#vyprázdnění-serveru) smazalo |
+| `POST /api/v1/reset?confirm=delete-all-backups` | admin | smaže všechny zálohy, dumpy, logy a historii běhů |
 | `GET /api/v1/trust` | runner / admin | podepsaná sada podepisovacích klíčů a CA bundle |
 | `GET /api/v1/update` | runner / admin | podepsaný manifest publikovaných buildů runneru |
 | `GET /api/v1/update/{name}` | runner / admin | binárka runneru (jen přes mTLS) |
@@ -1269,6 +1346,10 @@ typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-develop
 
 - **Obnova z webu** — procházení snapshotů a stažení souboru či adresáře, běží na serveru
   (nezávisle na zálohovaném hostu)
+- **Záloha a obnova konfigurace jedním souborem** — instance, účty a runnery jako zip, import
+  s náhledem změn a automatickou zálohou předchozího stavu; klíče se záměrně nepřenášejí
+- **Vyprázdnění serveru** — smazání všech záloh, dumpů, logů a historie se zachováním
+  konfigurace
 
 **Chybí (další fáze):**
 - **Obnova zpět na zálohovaný server** (dnes stáhneš data k sobě a nakopíruješ je sám)

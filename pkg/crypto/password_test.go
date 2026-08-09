@@ -174,3 +174,28 @@ func TestGeneratePassword(t *testing.T) {
 		t.Errorf("generated password is not accepted by HashPassword: %v", err)
 	}
 }
+
+// ValidPasswordHash checks a verifier without the password, which is what an imported
+// configuration archive can do: it carries hashes, and an account whose hash cannot be
+// parsed would restore as one nobody can ever log into.
+func TestValidPasswordHash(t *testing.T) {
+	hash, err := HashPassword("heslo1234")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := ValidPasswordHash(hash); err != nil {
+		t.Errorf("ValidPasswordHash(genuine) = %v", err)
+	}
+	for _, bad := range []string{
+		"",
+		"heslo1234",                   // a password, not a verifier
+		"bcrypt$10$abc$def",           // another scheme
+		"pbkdf2-sha256$0$c2FsdA$a2V5", // no work factor
+		"pbkdf2-sha256$1000$!!!$a2V5", // salt is not base64
+		"pbkdf2-sha256$1000$c2FsdA$",  // no key
+	} {
+		if err := ValidPasswordHash(bad); err == nil {
+			t.Errorf("ValidPasswordHash(%q) accepted a hash nothing can verify", bad)
+		}
+	}
+}

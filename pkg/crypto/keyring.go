@@ -102,6 +102,35 @@ func readMasterKey(path string) ([]byte, error) {
 	return key, nil
 }
 
+// Has reports whether a key with this id is loaded, which is what tells a caller
+// holding a ciphertext whether this server can read it. An empty id means a v1 value,
+// which carries no id and is readable as long as there is any key at all.
+func (k *Keyring) Has(id string) bool {
+	if id == "" {
+		return len(k.keys) > 0
+	}
+	return k.has(id)
+}
+
+// SealedKeyID reports which master key a stored value was sealed with. sealed is false
+// for a legacy plaintext value. A v1 ciphertext is sealed but carries no key id, which
+// is reported as an empty id — every loaded key is a candidate for it.
+//
+// This is what lets a configuration archive be checked before it is imported: the
+// ciphertexts travel without the keys, so a server that cannot decrypt them should say
+// so up front rather than after the secrets are already in its database.
+func SealedKeyID(stored string) (id string, sealed bool) {
+	switch {
+	case strings.HasPrefix(stored, sealedPrefixV2):
+		id, _, _ = strings.Cut(strings.TrimPrefix(stored, sealedPrefixV2), ":")
+		return id, true
+	case IsSealed(stored):
+		return "", true
+	default:
+		return "", false
+	}
+}
+
 // PrimaryID is the id of the key new values are sealed with.
 func (k *Keyring) PrimaryID() string {
 	if len(k.keys) == 0 {

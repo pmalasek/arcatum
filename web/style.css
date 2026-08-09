@@ -298,6 +298,32 @@ select {
 }
 .rot .meta { border-bottom: none; }
 
+/* Administration view: the same blocks as the rotation view, plus the prose a
+   destructive button needs beside it. Three operations that act on Arcatum itself, so
+   each one gets room to say what it does before anyone clicks. */
+.rot > .hint {
+  margin: 0;
+  padding: 0 .8rem .5rem;
+  max-width: 62rem;
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.55;
+}
+.rot > .hint code { font-family: var(--mono); font-size: .95em; }
+#config-plan:not(:empty) { border-top: 1px solid var(--border); }
+#config-plan .warning { margin: 0 .8rem; }
+#config-plan .meta dd { font-family: inherit; }
+#config-note, #reset-note {
+  padding: 0 .8rem .7rem;
+  color: var(--muted);
+  font-size: .8rem;
+}
+#config-note:empty, #reset-note:empty { padding: 0; }
+#reset-summary .meta { border-bottom: none; }
+/* A file picker sits in a row of buttons; keeping it from stretching keeps the row
+   readable on a narrow window. */
+#config-file { max-width: 22rem; font-size: .82rem; }
+
 /* Instance form: label on the left, inputs on the right */
 .field {
   display: grid;

@@ -45,6 +45,9 @@ type Server struct {
 	retention RetentionOptions
 	// logins throttles failed password logins.
 	logins *loginLimiter
+	// configPath is the server.toml this process was started with. A configuration export
+	// carries a copy of it for reference (config_archive.go); empty means none was found.
+	configPath string
 }
 
 // Options carries the security wiring. Both fields are empty/false in development
@@ -76,6 +79,9 @@ type Options struct {
 	// Retention bounds how long finished runs' logs are kept. Backup payloads are never
 	// removed by it (see retention.go).
 	Retention RetentionOptions
+	// ConfigPath is the server.toml in use, included in a configuration export so the
+	// archive records how the server it came from was set up. Empty leaves it out.
+	ConfigPath string
 }
 
 // New builds a Server over an open Store: loads the script catalog and starts
@@ -115,6 +121,7 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		web:                opts.Web,
 		retention:          opts.Retention,
 		logins:             newLoginLimiter(),
+		configPath:         opts.ConfigPath,
 	}, nil
 }
 
@@ -222,6 +229,14 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux, read, write guard) {
 	mux.HandleFunc("POST /api/v1/runners/revoke-all", write(s.handleRevokeAllRunners))
 	mux.HandleFunc("GET /api/v1/rotation", read(s.handleRotationStatus))
 	mux.HandleFunc("POST /api/v1/secrets/rekey", write(s.handleRekeySecrets))
+	// Administration: the server's own configuration in and out, and emptying it of
+	// collected data. All four are admin-only — the export carries password verifiers,
+	// and the other three destroy something. `write` is the admin guard on both
+	// listeners, which is why the export is behind it despite being a GET.
+	mux.HandleFunc("GET /api/v1/config/export", write(s.handleExportConfig))
+	mux.HandleFunc("POST /api/v1/config/import", write(s.handleImportConfig))
+	mux.HandleFunc("GET /api/v1/reset", write(s.handleResetPreview))
+	mux.HandleFunc("POST /api/v1/reset", write(s.handleReset))
 	mux.HandleFunc("GET /api/v1/instances/{id}/repo", read(s.handleRepoInfo))
 	// Stored dumps of a streaming instance — the restore view's equivalent of snapshots.
 	mux.HandleFunc("GET /api/v1/instances/{id}/dumps", read(s.handleListDumps))

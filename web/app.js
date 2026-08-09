@@ -1107,6 +1107,203 @@ async function loadRotation() {
     </div>`;
 }
 
+// --- administrace -----------------------------------------------------------
+
+// Tři operace, které se týkají Arcatum samotného, ne toho, co zálohuje: stáhnout
+// konfiguraci, nahrát ji zpátky, a vyprázdnit server od všeho nasbíraného.
+//
+// Import i reset jsou destruktivní, každý jinak, takže ani jeden nejde spustit jedním
+// kliknutím. Import napřed ukáže, co by udělal, a teprve potom se potvrzuje; reset se
+// potvrzuje slovem. Klíče nejsou ani v jednom z toho — ty leží na disku a z webu se na
+// ně nesahá.
+
+// pendingArchive drží nahraný soubor mezi kontrolou a potvrzením. Server dostane
+// stejné bajty dvakrát: podruhé už s confirm, takže potvrzuje se přesně to, co bylo
+// zkontrolováno, ne co mezitím leží ve formuláři.
+let pendingArchive = null;
+
+function filenameFrom(header) {
+  const m = /filename="([^"]+)"/.exec(header || '');
+  return m ? m[1] : '';
+}
+
+// exportConfig stahuje přes fetch, ne přes odkaz: kdyby server odpověděl chybou nebo
+// vypršelým sezením, prohlížeč by ji ukázal jako holou stránku místo hlášky ve webu.
+async function exportConfig(btn) {
+  const note = el('config-export-note');
+  btn.disabled = true;
+  note.textContent = 'připravuji…';
+  try {
+    const res = await fetch(API + '/config/export');
+    if (res.status === 401) {
+      showLogin('Sezení vypršelo, přihlas se znovu.');
+      return;
+    }
+    if (!res.ok) throw new Error(await errorText(res));
+    const blob = await res.blob();
+    const name = filenameFrom(res.headers.get('Content-Disposition')) || 'arcatum-config.zip';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    note.textContent = `staženo: ${name} (${fmtBytes(blob.size)})`;
+  } catch (err) {
+    note.textContent = 'nepovedlo se: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function clearConfigPlan() {
+  pendingArchive = null;
+  const box = el('config-plan');
+  if (box) box.innerHTML = '';
+}
+
+// checkConfigArchive pošle archiv bez confirm — server ho ověří a odpoví plánem, ale
+// nic nezmění.
+async function checkConfigArchive(btn) {
+  const input = el('config-file');
+  const file = input.files && input.files[0];
+  const box = el('config-plan');
+  if (!file) {
+    box.innerHTML = '<p class="empty">nejdřív vyber soubor s archivem</p>';
+    return;
+  }
+  btn.disabled = true;
+  box.innerHTML = '<p class="empty">kontroluji…</p>';
+  try {
+    const bytes = await file.arrayBuffer();
+    const plan = await postArchive(bytes, false);
+    pendingArchive = bytes;
+    renderConfigPlan(plan, file.name);
+  } catch (err) {
+    pendingArchive = null;
+    if (err.status !== 401) box.innerHTML = `<p class="empty">archiv odmítnut: ${esc(err.message)}</p>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// apply = false je jen kontrola: server archiv ověří, spočítá rozdíl a nic nezapíše.
+function postArchive(bytes, apply) {
+  return api('/config/import' + (apply ? '?confirm=replace-all' : ''), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/zip' },
+    body: bytes,
+  });
+}
+
+// diffText popisuje jednu tabulku jednou větou. Jména se vypisují, ne jen počty —
+// „−3 zmizí" nikomu nepomůže, dokud neví které.
+function diffText(d) {
+  const parts = [];
+  if (d.added.length) parts.push(`<b>+${d.added.length}</b> přibude (${d.added.map(esc).join(', ')})`);
+  if (d.changed.length) parts.push(`<b>~${d.changed.length}</b> se změní (${d.changed.map(esc).join(', ')})`);
+  if (d.removed.length) {
+    parts.push(`<span class="expiry alert"><b>−${d.removed.length}</b> zmizí</span>`
+      + ` (${d.removed.map(esc).join(', ')})`);
+  }
+  if (d.unchanged) parts.push(`${d.unchanged} beze změny`);
+  return parts.length ? parts.join(' · ') : '<span class="muted">beze změny</span>';
+}
+
+function renderConfigPlan(plan, fileName) {
+  const m = plan.manifest || {};
+  el('config-plan').innerHTML = `
+    <dl class="meta">
+      <dt>archiv</dt><dd>${esc(fileName)}</dd>
+      <dt>vytvořen</dt><dd>${fmtTime(m.created_at)}${m.host ? ' na ' + esc(m.host) : ''}
+        ${m.arcatum ? `<span class="days">· Arcatum ${esc(m.arcatum)}</span>` : ''}</dd>
+      <dt>instance</dt><dd>${diffText(plan.instances)}</dd>
+      <dt>uživatelé</dt><dd>${diffText(plan.users)}</dd>
+      <dt>runnery</dt><dd>${diffText(plan.runners)}</dd>
+    </dl>
+    ${(plan.warnings || []).map((wtext) =>
+      `<div class="warning warn">${esc(wtext)}</div>`).join('')}
+    <div class="section-foot">
+      <input id="config-confirm" placeholder="NAHRADIT" size="12" autocapitalize="characters"
+             spellcheck="false" autocomplete="off">
+      <button id="config-apply" class="action danger">nahradit konfiguraci</button>
+      <span class="hint">pro potvrzení napiš NAHRADIT · současná konfigurace se předtím
+        sama uloží do backup_dir/config-backups</span>
+    </div>
+    <div id="config-note" class="hint"></div>`;
+}
+
+async function applyConfigArchive(btn) {
+  const note = el('config-note');
+  if (!pendingArchive) {
+    note.textContent = 'archiv už není načtený, zkontroluj ho znovu';
+    return;
+  }
+  if (el('config-confirm').value.trim().toUpperCase() !== 'NAHRADIT') {
+    note.textContent = 'napiš do políčka NAHRADIT';
+    return;
+  }
+  btn.disabled = true;
+  note.textContent = 'nahrazuji…';
+  try {
+    const plan = await postArchive(pendingArchive, true);
+    clearConfigPlan();
+    // Import smazal všechna sezení, tohle včetně — přihlašovací obrazovka je jediné,
+    // co teď dává smysl ukázat.
+    showLogin(`Konfigurace nahrazena (${plan.instances.added.length + plan.instances.unchanged
+      + plan.instances.changed.length} instancí). Přihlas se znovu.`);
+  } catch (err) {
+    if (err.status !== 401) note.textContent = 'nepovedlo se: ' + err.message;
+    btn.disabled = false;
+  }
+}
+
+// loadAdmin obnovuje jen souhrn resetu. Rozdělaný plán importu se nechává být — přepsat
+// ho pod rukama uprostřed potvrzování by bylo to poslední, co si tady kdo přeje.
+async function loadAdmin() {
+  const box = el('reset-summary');
+  let st;
+  try {
+    st = await api('/reset');
+  } catch (err) {
+    box.innerHTML = `<p class="empty">${esc(err.message)}</p>`;
+    return;
+  }
+  box.innerHTML = `
+    <dl class="meta">
+      <dt>smaže se</dt><dd>${st.runs} běhů · ${fmtBytes(st.log_bytes)} logů
+        · ${fmtBytes(st.data_bytes)} dumpů · ${st.repositories} restic repozitářů</dd>
+      <dt>zůstane</dt><dd>${st.kept.instances} instancí · ${st.kept.users} uživatelů
+        · ${st.kept.runners} runnerů · klíče na disku</dd>
+    </dl>`;
+}
+
+async function runReset(btn) {
+  const note = el('reset-note');
+  if (el('reset-confirm').value.trim().toUpperCase() !== 'SMAZAT') {
+    note.textContent = 'napiš do políčka SMAZAT';
+    return;
+  }
+  if (!confirm('Smazat všechny zálohy, dumpy, logy a historii běhů?\n\n'
+    + 'Zůstanou jen klíče, uživatelé, instance a runnery. Tohle nejde vzít zpět '
+    + 'a data nejsou nikde jinde — Arcatum je to poslední místo, kde leží.')) return;
+  btn.disabled = true;
+  note.textContent = 'mažu…';
+  try {
+    const res = await api('/reset?confirm=delete-all-backups', { method: 'POST' });
+    el('reset-confirm').value = '';
+    note.textContent = `smazáno: ${res.runs} běhů, ${res.repositories} repozitářů`
+      + `, ${fmtBytes(res.log_bytes + res.data_bytes)} dat`;
+    await loadAdmin();
+  } catch (err) {
+    if (err.status !== 401) note.textContent = 'nepovedlo se: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 const loaders = {
   runs: loadRuns,
   instances: loadInstances,
@@ -1114,10 +1311,11 @@ const loaders = {
   runners: loadRunners,
   rotation: loadRotation,
   users: loadUsers,
+  admin: loadAdmin,
 };
 
 const VIEWS = ['runs', 'instances', 'instance-form', 'restore', 'runners', 'rotation',
-  'users', 'account', 'detail'];
+  'users', 'admin', 'account', 'detail'];
 
 async function refresh() {
   if (!me) return; // odhlášeno: není za co tahat
@@ -1148,6 +1346,7 @@ function showView(name) {
     tab.classList.toggle('active', tab.dataset.view === name);
   }
   if (name === 'users') userNote('');
+  if (name !== 'admin') clearConfigPlan(); // rozdělaný import se odchodem ze záložky zahazuje
   closePasswordReset(); // rozdělaná změna hesla se odchodem z tabulky zahazuje
   if (name !== 'detail') {
     stopTail();
@@ -1276,6 +1475,12 @@ el('pw-reset-value').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitPasswordReset(false);
   if (e.key === 'Escape') closePasswordReset();
 });
+
+el('config-export').addEventListener('click', (e) => exportConfig(e.currentTarget));
+el('config-check').addEventListener('click', (e) => checkConfigArchive(e.currentTarget));
+el('reset-run').addEventListener('click', (e) => runReset(e.currentTarget));
+// Nový soubor znamená nový plán: ten předchozí patřil jinému archivu.
+el('config-file').addEventListener('change', clearConfigPlan);
 
 el('back').addEventListener('click', () => showView('runs'));
 el('detail-stop').addEventListener('click', (e) => cancelRun(e.currentTarget.dataset.run));
@@ -1418,6 +1623,12 @@ document.addEventListener('click', async (e) => {
     } catch (err) {
       el('form-error').textContent = err.message;
     }
+    return;
+  }
+  // Potvrzení importu. Tlačítko vzniká až s plánem, takže se na něj čeká tady.
+  const applyConfig = e.target.closest('#config-apply');
+  if (applyConfig) {
+    await applyConfigArchive(applyConfig);
     return;
   }
   if (e.target.closest('#rekey')) {

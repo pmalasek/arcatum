@@ -47,6 +47,7 @@
   <button class="tab" data-view="runners">Runnery</button>
   <button class="tab" data-view="rotation">Klíče</button>
   <button class="tab admin-only" data-view="users">Uživatelé</button>
+  <button class="tab admin-only" data-view="admin">Administrace</button>
 </nav>
 
 <!-- Varování na blížící se expiraci certifikátů; skryté, dokud není co hlásit -->
@@ -168,6 +169,52 @@
       <span class="hint">staré heslo přestane platit a přihlášení uživatele se ukončí</span>
     </div>
     <div id="users-error" class="section-foot hidden"></div>
+  </section>
+
+  <!-- Administrace: konfigurace serveru ven a zpět, a vyprázdnění nasbíraných dat.
+       Tři operace, které se týkají Arcatum samotného, ne toho, co zálohuje. -->
+  <section id="view-admin" class="view hidden">
+
+    <div class="rot">
+      <h3>Záloha konfigurace</h3>
+      <p class="hint">Jeden zip s instancemi, uživateli a runnery. Hesla instancí v něm leží
+        přesně tak, jak jsou v databázi — tedy <b>zašifrovaná</b>, pokud je nastavený
+        <code>[secrets] master_key</code>. Klíče v archivu <b>nejsou</b>; ty patří k
+        <code>pki/</code> a zálohují se zvlášť (viz <i>docs/production.md</i>). Archiv přesto
+        obsahuje ověřovače hesel operátorů — zacházej s ním jako s citlivým souborem.</p>
+      <div class="section-foot">
+        <button id="config-export" class="action">stáhnout konfiguraci</button>
+        <span id="config-export-note" class="hint">běhy, logy ani data záloh v archivu nejsou</span>
+      </div>
+    </div>
+
+    <div class="rot">
+      <h3>Obnovení konfigurace</h3>
+      <p class="hint">Import <b>nahradí celou konfiguraci</b> obsahem archivu: co v něm není,
+        tady po importu nebude. Nejdřív se ukáže, co se změní, a teprve pak se potvrzuje.
+        Data záloh, běhy ani logy se nemažou.</p>
+      <div class="section-foot">
+        <input type="file" id="config-file" accept=".zip,application/zip">
+        <button id="config-check" class="action">zkontrolovat archiv</button>
+      </div>
+      <div id="config-plan"></div>
+    </div>
+
+    <div class="rot">
+      <h3>Vyprázdnit server</h3>
+      <p class="hint">Smaže <b>všechny zálohy, dumpy a logy</b> i celou historii běhů.
+        Zůstanou klíče, uživatelé, instance a schválené runnery — server je hned zase
+        provozuschopný, jen bez čehokoli nasbíraného. Tohle je jediná akce v Arcatum,
+        která maže zálohy, a <b>nejde vzít zpět</b>.</p>
+      <div id="reset-summary"><p class="empty">načítám…</p></div>
+      <div class="section-foot">
+        <input id="reset-confirm" placeholder="SMAZAT" size="10" autocapitalize="characters"
+               spellcheck="false" autocomplete="off">
+        <button id="reset-run" class="action danger">smazat všechny zálohy a logy</button>
+        <span class="hint">pro potvrzení napiš do políčka SMAZAT</span>
+      </div>
+      <div id="reset-note" class="hint"></div>
+    </div>
   </section>
 
   <!-- Vlastní heslo -->

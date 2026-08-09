@@ -232,6 +232,9 @@ func main() {
 			LogSuccess: logKeepSuccess,
 			LogFailed:  logKeepFailed,
 		},
+		// A configuration export includes a copy of this file for reference. It is never
+		// applied by an import — restoring a listen address is how you lock yourself out.
+		ConfigPath: resolvedConfig,
 	}
 	var tlsConfig *tls.Config
 	var signingPubPEM []byte

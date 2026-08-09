@@ -371,6 +371,7 @@ databázi i adresáře založí znovu při startu.
   data/arcatum.db                 SQLite (instance, běhy, runnery, účty)  server
   runs/<run_id>/{stdout,stderr}.log   zachycený výstup běhů               server
   restic/<instance>/              restic repozitář každé instance         server
+  config-backups/                 konfigurace uložená před každým importem  server
 ```
 
 Dělicí čára je jednoduchá: **do `backup_dir` ručně nesaháš.** Všechno pod ním si zakládá
@@ -383,6 +384,26 @@ runneru skončí na 404.
 PKI schválně není v `backup_dir`: `secrets-master.key` dešifruje hesla restic repozitářů,
 takže na stejném svazku jako `restic/` by jedna odnesená kopie znamenala zašifrovaná data
 i klíč k nim v jednom balíku.
+
+### Co zálohovat ze samotného Arcatum
+
+Dvě věci, a každou jinak:
+
+1. **`/opt/arcatum/pki/`** — CA klíč, podepisovací klíč a `secrets-master.key`. Ručně, mimo
+   tenhle stroj, a s vědomím, že kdo tohle má, má přístup ke všem repozitářům. Bez
+   `secrets-master.key` nejsou hesla instancí k ničemu, takže **tohle je ta část, jejíž
+   ztráta je nevratná**.
+2. **Konfigurace** — web, záložka **Administrace** → *stáhnout konfiguraci*, nebo
+   `GET /api/v1/config/export`. Jeden zip s instancemi, účty a runnery, bez klíčů a bez dat
+   záloh. Ten samý soubor se dá kdykoli nahrát zpátky a konfiguraci tím nahradit; podrobnosti
+   v [README](../README.md#záloha-konfigurace-a-reset-serveru).
+
+Dělba je záměrná: klíče se mění jednou za rotaci a nepatří do žádného automatického exportu,
+konfigurace se mění průběžně a stáhnout si ji smí být otázka jednoho kliknutí. Obnova na
+novém stroji je tedy: nakopírovat `pki/`, nastavit `server.toml`, naimportovat zip.
+
+Data záloh (`runs/`, `restic/`) jsou to největší a zálohují se — pokud vůbec — na úrovni
+svazku. Arcatum je pro ně poslední místo, kde leží.
 
 ## `server.toml`
 

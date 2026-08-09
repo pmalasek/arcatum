@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -25,6 +26,11 @@ type schedState struct {
 func NewScheduler(loc *time.Location) *Scheduler {
 	return &Scheduler{st: map[string]*schedState{}, loc: loc}
 }
+
+// Location is the default timezone instances fall back to. Validating a schedule
+// without tracking it needs the same location the scheduler would use, so a schedule
+// that parses here is one Track will accept.
+func (s *Scheduler) Location() *time.Location { return s.loc }
 
 // Track registers an instance and computes its first next-run after `now`.
 func (s *Scheduler) Track(inst *Instance, now time.Time) error {
@@ -74,6 +80,32 @@ func (s *Scheduler) Untrack(instanceID string) {
 	s.mu.Lock()
 	delete(s.st, instanceID)
 	s.mu.Unlock()
+}
+
+// Reset replaces everything tracked with exactly this set of instances. It exists for
+// the configuration import, which does not edit instances one by one but swaps the
+// whole set: untracking the old ones individually would leave whatever the import
+// removed still on the schedule.
+//
+// The specs are computed before anything is dropped, so an instance with an unparseable
+// schedule fails the call and leaves the previous state alone.
+func (s *Scheduler) Reset(instances []*Instance, now time.Time) error {
+	next := make(map[string]*schedState, len(instances))
+	for _, in := range instances {
+		spec, err := in.Schedule.Spec(s.loc)
+		if err != nil {
+			return fmt.Errorf("instance %q schedule: %w", in.ID, err)
+		}
+		at, err := spec.Next(now)
+		if err != nil {
+			return fmt.Errorf("instance %q schedule: %w", in.ID, err)
+		}
+		next[in.ID] = &schedState{spec: spec, next: at}
+	}
+	s.mu.Lock()
+	s.st = next
+	s.mu.Unlock()
+	return nil
 }
 
 // Trigger requests an immediate run of an instance on its next check-in. This backs

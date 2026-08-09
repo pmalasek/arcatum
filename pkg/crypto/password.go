@@ -98,26 +98,46 @@ func hashPasswordWith(password string, iterations int) (string, error) {
 	}, "$"), nil
 }
 
+// parsePasswordHash splits a stored verifier into its parts. Everything it can reject
+// is a malformed hash rather than a wrong password, so the caller answers with
+// ErrBadPasswordHash.
+func parsePasswordHash(stored string) (iterations int, salt, key []byte, err error) {
+	parts := strings.Split(stored, "$")
+	if len(parts) != 4 || parts[0] != passwordScheme {
+		return 0, nil, nil, ErrBadPasswordHash
+	}
+	iterations, err = strconv.Atoi(parts[1])
+	if err != nil || iterations <= 0 {
+		return 0, nil, nil, ErrBadPasswordHash
+	}
+	salt, err = base64.RawStdEncoding.DecodeString(parts[2])
+	if err != nil {
+		return 0, nil, nil, ErrBadPasswordHash
+	}
+	key, err = base64.RawStdEncoding.DecodeString(parts[3])
+	if err != nil || len(key) == 0 {
+		return 0, nil, nil, ErrBadPasswordHash
+	}
+	return iterations, salt, key, nil
+}
+
+// ValidPasswordHash checks that a stored verifier is one this package can verify
+// against, without knowing the password. A configuration archive carries hashes rather
+// than passwords, so importing one has to be able to tell a usable account from a row
+// that would only ever refuse to log in.
+func ValidPasswordHash(stored string) error {
+	_, _, _, err := parsePasswordHash(stored)
+	return err
+}
+
 // VerifyPassword reports whether password matches a hash produced by HashPassword. It
 // returns an error only when the stored hash itself is unusable; a plain mismatch is
 // (false, nil), because the caller must treat "wrong password" and "no such user"
 // identically.
 func VerifyPassword(stored, password string) (bool, error) {
-	parts := strings.Split(stored, "$")
-	if len(parts) != 4 || parts[0] != passwordScheme {
-		return false, ErrBadPasswordHash
-	}
-	iterations, err := strconv.Atoi(parts[1])
-	if err != nil || iterations <= 0 {
-		return false, ErrBadPasswordHash
-	}
-	salt, err := base64.RawStdEncoding.DecodeString(parts[2])
+	iterations, salt, want, err := parsePasswordHash(stored)
 	if err != nil {
-		return false, ErrBadPasswordHash
-	}
-	want, err := base64.RawStdEncoding.DecodeString(parts[3])
-	if err != nil || len(want) == 0 {
-		return false, ErrBadPasswordHash
+		return false, err
 	}
 	got, err := pbkdf2.Key(sha256.New, password, salt, iterations, len(want))
 	if err != nil {

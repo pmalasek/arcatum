@@ -207,3 +207,43 @@ func TestKeyringRejectsBadInput(t *testing.T) {
 		}
 	}
 }
+
+// SealedKeyID is what lets a configuration archive be checked before it is imported: the
+// ciphertexts travel without the keys, so the importer has to be able to name the keys it
+// would need without holding any of them.
+func TestSealedKeyID(t *testing.T) {
+	dir := t.TempDir()
+	kr, err := LoadKeyring(writeMasterKeyFile(t, dir, "master.key"), nil)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	sealed, err := kr.SealString("hunter2", "mysql-web01", "password")
+	if err != nil {
+		t.Fatalf("SealString: %v", err)
+	}
+
+	id, isSealed := SealedKeyID(sealed)
+	if !isSealed || id != kr.PrimaryID() {
+		t.Errorf("SealedKeyID = %q, %v; want %q, true", id, isSealed, kr.PrimaryID())
+	}
+	if !kr.Has(id) {
+		t.Errorf("Has(%q) = false for the key that just sealed the value", id)
+	}
+	if kr.Has("00000000") {
+		t.Error("Has reports a key that was never loaded")
+	}
+
+	// A v1 value names no key, which is reported as an empty id: any loaded key is a
+	// candidate for it, so Has says yes as long as there is one.
+	if id, isSealed := SealedKeyID("enc:v1:c29tZXRoaW5n"); !isSealed || id != "" {
+		t.Errorf("SealedKeyID(v1) = %q, %v; want \"\", true", id, isSealed)
+	}
+	if !kr.Has("") {
+		t.Error(`Has("") = false, but a v1 value can be tried against every loaded key`)
+	}
+
+	// Plaintext predates encryption and is not sealed with anything.
+	if id, isSealed := SealedKeyID("hunter2"); isSealed || id != "" {
+		t.Errorf("SealedKeyID(plaintext) = %q, %v; want \"\", false", id, isSealed)
+	}
+}
