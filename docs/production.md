@@ -455,6 +455,12 @@ ssh-keygen -t ed25519 -N '' -C arcatum-replica -f /opt/arcatum/pki/replica-ssh.k
 chmod 600 /opt/arcatum/pki/replica-ssh.key
 ```
 
+> **The key and `known_hosts` must live outside `/root`.** The systemd unit has
+> `ProtectHome=yes`, so `/root` and `/home` are empty directories as far as the service is
+> concerned — `ssh_key = "/root/.ssh/id_ed25519"` works when you test it by hand from a
+> root shell and fails for the service, with `rsync exit 255` and nothing else to go on.
+> `/opt/arcatum/pki/` is the right place: readable by the service, outside `backup_dir`.
+
 Write the public part into `~arcatum/.ssh/authorized_keys` on the replica, **restricted**:
 
 ```
@@ -657,6 +663,11 @@ somewhere else. An empty catalogue does not stop the startup; check with
 **A deleted script is still showing** — `rsync` is missing on this machine, so the installer
 copies without `--delete`. Delete it from `/opt/arcatum/scripts` by hand (or
 `apt install rsync`).
+
+**Replication fails with `rsync exit 255`** — ssh could not connect. Try the same command
+by hand as root; if it works, the paths are the problem: with `ProtectHome=yes` in the unit
+the service does not see `/root/.ssh`. Move the key and `known_hosts` into
+`/opt/arcatum/pki/` and adjust `[replica]`.
 
 **Installing a runner ends in a 404** — there is no `arcatum-runner-linux-<arch>` in `dist/`
 for that architecture. `ls /opt/arcatum/dist`, and if need be `just dist-runner bin` and the

@@ -436,6 +436,12 @@ ssh-keygen -t ed25519 -N '' -C arcatum-replica -f /opt/arcatum/pki/replica-ssh.k
 chmod 600 /opt/arcatum/pki/replica-ssh.key
 ```
 
+> **Klíč ani `known_hosts` nesmí ležet v `/root`.** Systemd unit má `ProtectHome=yes`, takže
+> `/root` a `/home` jsou pro službu prázdné adresáře — `ssh_key = "/root/.ssh/id_ed25519"`
+> ti z rootovského shellu ručně projde a službě selže, s `rsync exit 255` a ničím dalším,
+> podle čeho se řídit. Správné místo je `/opt/arcatum/pki/`: služba na něj vidí a není to
+> `backup_dir`.
+
 Veřejnou část zapiš na replice do `~arcatum/.ssh/authorized_keys` **omezenou**:
 
 ```
@@ -631,6 +637,10 @@ míří jinam. Prázdný katalog start nezastaví; ověř `curl "${A[@]}" …/ap
 
 **Smazaný skript pořád svítí** — na tomhle stroji chybí `rsync`, takže instalátor kopíruje
 bez `--delete`. Smaž ho z `/opt/arcatum/scripts` ručně (nebo `apt install rsync`).
+
+**Replikace padá na `rsync exit 255`** — ssh se nepřipojilo. Zkus tentýž příkaz ručně jako
+root; když projde, jsou špatně cesty: s `ProtectHome=yes` v unitu služba na `/root/.ssh`
+nevidí. Klíč i `known_hosts` přesuň do `/opt/arcatum/pki/` a uprav `[replica]`.
 
 **Instalace runneru končí na 404** — v `dist/` není `arcatum-runner-linux-<arch>` pro danou
 architekturu. `ls /opt/arcatum/dist`, případně znovu `just dist-runner bin` a instalátor.

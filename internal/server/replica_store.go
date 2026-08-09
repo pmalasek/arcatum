@@ -66,6 +66,8 @@ type ReplicaLink struct {
 	// DownSince is when the link first stopped working, so the UI can say how long the
 	// outage has lasted rather than only that the last attempt failed. Zero means the
 	// link is healthy.
+	// omitempty does nothing for a time.Time: an unset value still goes out as
+	// 0001-01-01, which is truthy in JavaScript. Consumers must test Healthy, not this.
 	DownSince time.Time `json:"down_since,omitempty"`
 }
 
@@ -289,6 +291,7 @@ type ReplicaCounts struct {
 	Failed  int `json:"failed"`
 	// OldestPendingAt is when the longest-waiting unfinished item was queued. A backlog
 	// is only alarming once it is old, and a count alone cannot say that.
+	// Unset means nothing is queued, and arrives as 0001-01-01 — see DownSince.
 	OldestPendingAt time.Time `json:"oldest_pending_at,omitempty"`
 }
 

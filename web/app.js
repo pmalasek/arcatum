@@ -79,8 +79,15 @@ function esc(s) {
 
 const ZERO_TIME = '0001-01-01T00:00:00Z';
 
+// hasTime tells a real timestamp from Go's unset one. `omitempty` does not drop a zero
+// time.Time, so the field always arrives — and "0001-01-01T00:00:00Z" is a truthy string,
+// which makes a plain `if (iso)` read an unset time as a moment two millennia ago.
+function hasTime(iso) {
+  return !!iso && !iso.startsWith('0001-01-01');
+}
+
 function fmtTime(iso) {
-  if (!iso || iso.startsWith('0001-01-01')) return '—';
+  if (!hasTime(iso)) return '—';
   const d = new Date(iso);
   return d.toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'medium' });
 }
@@ -1378,11 +1385,16 @@ const REPLICA_BACKLOG_WARN_MS = 7200000;
 
 function replicaWarning(st) {
   if (!st || !st.enabled) { setWarning('replica', null); return; }
-  const downMs = st.link && st.link.down_since ? Date.now() - new Date(st.link.down_since) : 0;
-  if (downMs > 0) {
+  // Whether the link is down is `healthy`, not a timestamp: Go serializes an unset time as
+  // 0001-01-01, which is a perfectly truthy string over here and would date the outage to
+  // the year one. down_since only decides how long to say it has lasted.
+  const downMs = (!st.healthy && st.link && hasTime(st.link.down_since))
+    ? Date.now() - new Date(st.link.down_since) : 0;
+  if (!st.healthy) {
     setWarning('replica', {
       level: downMs >= REPLICA_DOWN_ALERT_MS ? 'alert' : 'warn',
-      text: `The off-site replica (${st.target}) has been unreachable for ${fmtAge(downMs)}`
+      text: `The off-site replica (${st.target}) is unreachable`
+        + `${downMs > 0 ? ` (for ${fmtAge(downMs)})` : ''}`
         + `${st.counts.pending + st.counts.failed > 0
           ? ` — ${st.counts.pending + st.counts.failed} items are waiting to be sent` : ''}`
         + `. Backups here keep running and the queue catches up once the link is repaired. `
@@ -1398,7 +1410,10 @@ function replicaWarning(st) {
     });
     return;
   }
-  const oldest = st.counts.oldest_pending_at ? Date.now() - new Date(st.counts.oldest_pending_at) : 0;
+  // Same trap as down_since: with nothing queued the server sends the zero time, and
+  // "waiting since the year one" would put a permanent warning above every tab.
+  const oldest = hasTime(st.counts.oldest_pending_at)
+    ? Date.now() - new Date(st.counts.oldest_pending_at) : 0;
   if (oldest > REPLICA_BACKLOG_WARN_MS) {
     setWarning('replica', {
       level: 'warn',
