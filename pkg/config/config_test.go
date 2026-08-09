@@ -298,3 +298,128 @@ func TestDefaultLogRetentionIsValid(t *testing.T) {
 		t.Errorf("defaults = success %v / failed %v, want both set and failures kept longer", success, failed)
 	}
 }
+
+// Replication that is switched on but has nowhere to write is worse than one that is
+// off: the UI reports it as configured while the backlog grows behind a target that
+// never existed. The same reasoning as the half-filled [tls] section.
+func TestReplicaRejectsHalfConfiguration(t *testing.T) {
+	cases := []struct {
+		name, body, wantIn string
+	}{
+		{"no host", `
+[replica]
+enabled = true
+path    = "/data"
+ssh_key = "/pki/replica.key"
+`, "host is required"},
+		{"no path", `
+[replica]
+enabled = true
+host    = "172.26.0.2"
+ssh_key = "/pki/replica.key"
+`, "path is required"},
+		{"no key", `
+[replica]
+enabled = true
+host    = "172.26.0.2"
+path    = "/data"
+`, "ssh_key is required"},
+		{"relative path", `
+[replica]
+enabled = true
+host    = "172.26.0.2"
+path    = "data"
+ssh_key = "/pki/replica.key"
+`, "must be absolute"},
+		// Mirroring without a ceiling is the configuration in which a backup_dir that has
+		// gone missing empties the off-site copy. It has to be a mistake, not a mode.
+		{"mirror without max_delete", `
+[replica]
+enabled = true
+host    = "172.26.0.2"
+path    = "/data"
+ssh_key = "/pki/replica.key"
+mirror  = true
+`, "max_delete"},
+		{"bad timeout", `
+[replica]
+enabled = true
+host    = "172.26.0.2"
+path    = "/data"
+ssh_key = "/pki/replica.key"
+timeout = "two hours"
+`, "timeout"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, `
+[server]
+listen = "0.0.0.0:8443"
+
+[storage]
+backup_dir = "/central_backup/arcatum"
+`+c.body))
+			if err == nil {
+				t.Fatalf("configuration was accepted: %s", c.body)
+			}
+			if !strings.Contains(err.Error(), c.wantIn) {
+				t.Fatalf("error %q does not mention %q", err, c.wantIn)
+			}
+		})
+	}
+}
+
+func TestReplicaDefaultsAndAccessors(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+[server]
+listen = "0.0.0.0:8443"
+
+[storage]
+backup_dir = "/central_backup/arcatum"
+
+[replica]
+enabled    = true
+host       = "172.26.0.2"
+user       = "arcatum"
+path       = "/data"
+ssh_key    = "/pki/replica.key"
+mirror     = true
+max_delete = 100
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Replica.Addr(); got != "arcatum@172.26.0.2:/data" {
+		t.Fatalf("Addr = %q", got)
+	}
+	if got := cfg.Replica.SSHPort(); got != 22 {
+		t.Fatalf("SSHPort = %d, want the default 22", got)
+	}
+	timeout, sweep, probe, err := cfg.Replica.Durations()
+	if err != nil {
+		t.Fatalf("Durations: %v", err)
+	}
+	if timeout != 2*time.Hour || sweep != time.Hour || probe != 5*time.Minute {
+		t.Fatalf("defaults = %v/%v/%v", timeout, sweep, probe)
+	}
+}
+
+// A server with no [replica] section must load exactly as it did before.
+func TestReplicaIsOffByDefault(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+[server]
+listen = "0.0.0.0:8443"
+
+[storage]
+backup_dir = "/central_backup/arcatum"
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Replica.Enabled {
+		t.Fatal("replication must be off unless asked for")
+	}
+	if err := cfg.Replica.Validate(); err != nil {
+		t.Fatalf("a disabled replica must validate: %v", err)
+	}
+}

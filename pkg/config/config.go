@@ -28,6 +28,145 @@ type Config struct {
 	Signing   Signing   `toml:"signing"`
 	Secrets   Secrets   `toml:"secrets"`
 	Bootstrap Bootstrap `toml:"bootstrap"`
+	Replica   Replica   `toml:"replica"`
+}
+
+// Replica configures the off-site copy: everything the server stores is pushed to a
+// second machine over rsync/ssh, so that a fire, a ransomware run or a mistyped rm in
+// backup_dir does not take the only copy with it.
+//
+// It is deliberately one-way and read-only on this side. The server never pulls from
+// the replica and never writes into backup_dir on its behalf; a broken link degrades
+// into a backlog, never into a failed backup.
+type Replica struct {
+	Enabled bool `toml:"enabled"`
+
+	Host string `toml:"host"` // e.g. "172.26.0.2"
+	User string `toml:"user"` // ssh user; empty means the current one
+	Path string `toml:"path"` // destination root on the replica, e.g. "/data"
+	Port int    `toml:"port"` // ssh port; 0 means 22
+
+	SSHKey string `toml:"ssh_key"` // private key, used with IdentitiesOnly
+	// KnownHosts pins the replica's host key. Without it StrictHostKeyChecking has
+	// nothing to check against, and a transfer that stops to ask "unknown host,
+	// continue?" is a transfer that never completes — so an empty value switches host
+	// key checking off explicitly rather than by accident, and Validate says so.
+	KnownHosts string `toml:"known_hosts"`
+
+	// BWLimit caps the transfer in KiB/s (rsync --bwlimit). 0 means no limit. The point
+	// is not to save bandwidth but to keep replication from competing with the backups
+	// that are still arriving.
+	BWLimit int `toml:"bwlimit"`
+	// Timeout bounds one item's transfer, e.g. "2h". A stalled rsync is killed with its
+	// whole process group and the item is retried later.
+	Timeout string `toml:"timeout"`
+
+	// Mirror propagates deletions (rsync --delete), so retention here reaches the
+	// replica too. It is the sharper of the two settings: whoever can delete backups
+	// here can then delete them there, which is the very risk an off-site copy exists
+	// for. MaxDelete is the guard.
+	Mirror bool `toml:"mirror"`
+	// MaxDelete aborts a pass that would remove more than this many files. An unmounted
+	// volume makes backup_dir look empty, and without this the next pass would faithfully
+	// mirror that emptiness onto the replica. Required when Mirror is set.
+	MaxDelete int `toml:"max_delete"`
+
+	// IncludeKeys also replicates the PKI, the dispatch signing key, the secrets master
+	// key and a consistent snapshot of the database, which is what makes the replica a
+	// complete restore point rather than a pile of undecryptable repositories.
+	//
+	// It also means whoever reaches the replica's directory can open every repository
+	// and issue a certificate for any host. Restrict the account, the directory mode and
+	// the authorized_keys entry accordingly — see docs/production.md.
+	IncludeKeys bool `toml:"include_keys"`
+
+	SweepEvery string `toml:"sweep_every"` // full reconciliation pass, e.g. "1h"
+	ProbeEvery string `toml:"probe_every"` // reachability check, e.g. "5m"
+}
+
+// Enabled reports whether replication should run.
+func (r Replica) Active() bool { return r.Enabled }
+
+// Addr renders the rsync destination, e.g. "arcatum@172.26.0.2:/data".
+func (r Replica) Addr() string {
+	host := r.Host
+	if r.User != "" {
+		host = r.User + "@" + host
+	}
+	return host + ":" + r.Path
+}
+
+// SSHPort resolves the ssh port, defaulting to 22.
+func (r Replica) SSHPort() int {
+	if r.Port == 0 {
+		return 22
+	}
+	return r.Port
+}
+
+// Durations resolves the three configurable intervals, applying defaults for the ones
+// left out. They are parsed together so a typo in any of them stops the start rather
+// than surfacing hours later as a subsystem that quietly never ticked.
+func (r Replica) Durations() (timeout, sweep, probe time.Duration, err error) {
+	parse := func(field, value string, def time.Duration) (time.Duration, error) {
+		if strings.TrimSpace(value) == "" {
+			return def, nil
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return 0, fmt.Errorf("config: [replica] %s %q: %w", field, value, err)
+		}
+		if d <= 0 {
+			return 0, fmt.Errorf("config: [replica] %s must be positive", field)
+		}
+		return d, nil
+	}
+	if timeout, err = parse("timeout", r.Timeout, 2*time.Hour); err != nil {
+		return 0, 0, 0, err
+	}
+	if sweep, err = parse("sweep_every", r.SweepEvery, time.Hour); err != nil {
+		return 0, 0, 0, err
+	}
+	if probe, err = parse("probe_every", r.ProbeEvery, 5*time.Minute); err != nil {
+		return 0, 0, 0, err
+	}
+	return timeout, sweep, probe, nil
+}
+
+// Validate rejects a half-filled section. Replication that is switched on but has
+// nowhere to write is worse than one that is off: the UI would show it as configured
+// and the backlog would grow behind a target that never existed.
+func (r Replica) Validate() error {
+	if !r.Enabled {
+		return nil
+	}
+	for _, f := range []struct{ name, value string }{
+		{"host", r.Host}, {"path", r.Path}, {"ssh_key", r.SSHKey},
+	} {
+		if strings.TrimSpace(f.value) == "" {
+			return fmt.Errorf("config: [replica] %s is required when replication is enabled", f.name)
+		}
+	}
+	if !filepath.IsAbs(r.Path) {
+		return fmt.Errorf("config: [replica] path %q must be absolute", r.Path)
+	}
+	if r.BWLimit < 0 {
+		return errors.New("config: [replica] bwlimit must not be negative")
+	}
+	if r.Port < 0 || r.Port > 65535 {
+		return fmt.Errorf("config: [replica] port %d is out of range", r.Port)
+	}
+	if r.Mirror && r.MaxDelete <= 0 {
+		return errors.New("config: [replica] mirror needs max_delete > 0 — " +
+			"without a ceiling, a backup_dir that has gone missing would be mirrored onto the replica as an empty one")
+	}
+	if r.MaxDelete < 0 {
+		return errors.New("config: [replica] max_delete must not be negative")
+	}
+	if _, _, _, err := r.Durations(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Web configures the plain-HTTP listener serving the web UI. It is a separate port from
@@ -328,6 +467,9 @@ func (c *Config) Validate() error {
 		if !c.TLS.Enabled() {
 			return errors.New("config: [bootstrap] needs [tls] as well — enrolling runners into a server that does not use mTLS would hand out certificates nothing checks")
 		}
+	}
+	if err := c.Replica.Validate(); err != nil {
+		return err
 	}
 	if _, err := c.Location(); err != nil {
 		return err

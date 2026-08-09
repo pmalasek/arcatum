@@ -48,6 +48,10 @@ type Server struct {
 	// configPath is the server.toml this process was started with. A configuration export
 	// carries a copy of it for reference (config_archive.go); empty means none was found.
 	configPath string
+	// replica drives the off-site copy (replica.go). Nil when [replica] is not
+	// configured, which every call site has to tolerate: replication is an addition to
+	// the backups, never a precondition for them.
+	replica *replicator
 }
 
 // Options carries the security wiring. Both fields are empty/false in development
@@ -82,6 +86,9 @@ type Options struct {
 	// ConfigPath is the server.toml in use, included in a configuration export so the
 	// archive records how the server it came from was set up. Empty leaves it out.
 	ConfigPath string
+	// Replica configures the off-site copy. Leaving Enabled false switches it off, and
+	// nothing else in the server changes (see replica.go).
+	Replica ReplicaOptions
 }
 
 // New builds a Server over an open Store: loads the script catalog and starts
@@ -105,7 +112,7 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 			return nil, fmt.Errorf("instance %q schedule: %w", in.ID, err)
 		}
 	}
-	return &Server{
+	srv := &Server{
 		store:              store,
 		sched:              sched,
 		catalog:            cat,
@@ -122,7 +129,19 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		retention:          opts.Retention,
 		logins:             newLoginLimiter(),
 		configPath:         opts.ConfigPath,
-	}, nil
+	}
+	if opts.Replica.Enabled {
+		timeout, sweep, probe, err := opts.Replica.Durations()
+		if err != nil {
+			return nil, err
+		}
+		srv.replica = &replicator{
+			srv: srv, cfg: opts.Replica.Replica, keyFiles: opts.Replica.KeyFiles,
+			timeout: timeout, sweepEvery: sweep, probeEvery: probe,
+			wake: make(chan struct{}, 1),
+		}
+	}
+	return srv, nil
 }
 
 // Arcatum listens on two ports, because the two kinds of caller are not alike:
@@ -229,6 +248,13 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux, read, write guard) {
 	mux.HandleFunc("POST /api/v1/runners/revoke-all", write(s.handleRevokeAllRunners))
 	mux.HandleFunc("GET /api/v1/rotation", read(s.handleRotationStatus))
 	mux.HandleFunc("POST /api/v1/secrets/rekey", write(s.handleRekeySecrets))
+	// Off-site copy: its health and backlog are something a viewer needs to see, since a
+	// replica that has quietly stopped working is the failure this whole subsystem
+	// exists to make impossible. Forcing a pass changes what the server does, so it is
+	// behind the write guard.
+	mux.HandleFunc("GET /api/v1/replica", read(s.handleReplicaStatus))
+	mux.HandleFunc("POST /api/v1/replica/sync", write(s.handleReplicaSync))
+	mux.HandleFunc("POST /api/v1/replica/retry", write(s.handleReplicaRetry))
 	// Administration: the server's own configuration in and out, and emptying it of
 	// collected data. All four are admin-only — the export carries password verifiers,
 	// and the other three destroy something. `write` is the admin guard on both
@@ -402,8 +428,13 @@ func (s *Server) applyUpdate(u proto.RunUpdate) {
 		if err == nil {
 			s.log.Printf("run=%s finished exit=%d err=%q", u.RunID, u.ExitCode, u.Error)
 			// Off the update stream: rotating dumps means deleting files, and the runner
-			// is still holding this request open.
-			go s.pruneDumpsForRun(u.RunID)
+			// is still holding this request open. Retention runs before the off-site
+			// queue, in that order rather than in two goroutines, so a dump that this
+			// very run rotated away is never queued only to be unpicked.
+			go func(runID string) {
+				s.pruneDumpsForRun(runID)
+				s.enqueueRunForReplica(runID)
+			}(u.RunID)
 		}
 	}
 	if err != nil {

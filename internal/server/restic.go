@@ -365,6 +365,10 @@ type ResticRepoInfo struct {
 	// the payload, one per successful run. Without it such an instance reads as having no
 	// backups at all, when in fact it has every one it was told to keep (dumps.go).
 	Dumps DumpStats `json:"dumps"`
+	// Replica is how far this instance's repository has got towards the off-site copy.
+	// A file backup adds to one repository run after run, so the answer does not belong
+	// to any single run — this is where it can be asked (replica.go).
+	Replica ReplicaStatus `json:"replica,omitempty"`
 }
 
 // resticRepoInfo measures a repository on disk. Size is computed on demand rather than
@@ -423,6 +427,11 @@ func (s *Server) handleRepoInfo(w http.ResponseWriter, r *http.Request) {
 		s.log.Printf("dump stats %s: %v", id, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	if item, err := s.store.ReplicaItemFor(ReplicaKindRepo, id); err != nil {
+		s.log.Printf("replica state %s: %v", id, err)
+	} else if item != nil {
+		info.Replica = item.Status
 	}
 	writeJSON(w, info)
 }

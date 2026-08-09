@@ -80,6 +80,44 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(username);
+
+-- What still has to reach the off-site replica, and what already has. The queue is the
+-- single source of truth for replication: the run list joins it, the catch-up sweep
+-- walks it, and an outage shows up as rows that stay pending rather than as anything
+-- lost. Nothing is ever dropped from it on failure — an item that cannot be transferred
+-- keeps its place and is retried, which is what makes a repaired link catch up by itself.
+--
+-- One row per item, keyed by kind and key, so re-queueing the same thing is an update
+-- rather than a duplicate:
+--   run  <run id>       a finished run's directory (dump and logs)
+--   repo <instance id>  an instance's restic repository
+--   meta server         the database snapshot, server.toml and the keys
+CREATE TABLE IF NOT EXISTS replica_queue (
+  kind        TEXT NOT NULL,
+  key         TEXT NOT NULL,
+  status      TEXT NOT NULL,                  -- pending | syncing | done | failed
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  queued_at   INTEGER NOT NULL DEFAULT 0,     -- unix millis
+  started_at  INTEGER NOT NULL DEFAULT 0,
+  done_at     INTEGER NOT NULL DEFAULT 0,
+  next_try_at INTEGER NOT NULL DEFAULT 0,     -- backoff: not before this
+  bytes       INTEGER NOT NULL DEFAULT 0,     -- transferred by the last successful pass
+  err         TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (kind, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replica_due ON replica_queue(status, next_try_at);
+
+-- Whether the replica is reachable at all, kept apart from the queue so the UI can say
+-- "off-site has been down since 14:02" even at a moment when there is nothing to send.
+-- One row, id 1.
+CREATE TABLE IF NOT EXISTS replica_state (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  last_ok_at  INTEGER NOT NULL DEFAULT 0,
+  last_err    TEXT    NOT NULL DEFAULT '',
+  last_err_at INTEGER NOT NULL DEFAULT 0,
+  down_since  INTEGER NOT NULL DEFAULT 0      -- 0 = healthy
+);
 `
 
 // addColumns lists columns added after the initial schema. They are applied only when

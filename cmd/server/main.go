@@ -235,6 +235,13 @@ func main() {
 		// A configuration export includes a copy of this file for reference. It is never
 		// applied by an import — restoring a listen address is how you lock yourself out.
 		ConfigPath: resolvedConfig,
+		// The off-site copy. The key list is derived from the configuration rather than
+		// from a directory, so a rotation that introduces a new key file cannot quietly
+		// stop being replicated.
+		Replica: server.ReplicaOptions{
+			Replica:  cfg.Replica,
+			KeyFiles: server.ReplicaKeyFiles(cfg),
+		},
 	}
 	var tlsConfig *tls.Config
 	var signingPubPEM []byte
@@ -303,6 +310,10 @@ func main() {
 	// Backup dumps are rotated per instance (keep_last / keep_days); an instance that
 	// sets neither keeps everything.
 	srv.StartDumpRetention(context.Background())
+	// The off-site copy. Inert unless [replica] is configured, and a missing rsync
+	// disables it with a log line: a backup server must start even when its second copy
+	// cannot be reached.
+	srv.StartReplication(context.Background())
 
 	// The bootstrap listener is plain HTTP on purpose: a host that has no certificate
 	// yet cannot get through the mTLS handshake, so this is what install.sh talks to.

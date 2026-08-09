@@ -110,13 +110,29 @@ function badge(status) {
   return `<span class="badge ${esc(status)}">${esc(status)}</span>`;
 }
 
+// Jak daleko je záloha na cestě na odlehlý server. Prázdná hodnota není porucha, ale
+// „nevíme": replikace může být vypnutá, nebo je běh starší než ona — proto pomlčka,
+// ne červená. Slova místo stavů z API, aby se ve sloupci dalo číst, co znamenají.
+const REPLICA_LABEL = {
+  done: ['success', 'přeneseno', 'záloha je na odlehlém serveru'],
+  syncing: ['running', 'přenáší se', 'přenos právě probíhá'],
+  pending: ['pending', 've frontě', 'čeká na přenos na odlehlý server'],
+  failed: ['failed', 'chyba', 'přenos selhal, opakuje se automaticky'],
+};
+
+function replicaBadge(status) {
+  const cell = REPLICA_LABEL[status];
+  if (!cell) return '<span class="muted" title="replikace neprobíhá">—</span>';
+  return `<span class="badge ${cell[0]}" title="${esc(cell[2])}">${esc(cell[1])}</span>`;
+}
+
 // --- views ------------------------------------------------------------------
 
 async function loadRuns() {
   const runs = await api('/runs?limit=100');
   const body = el('runs-body');
   if (!runs || runs.length === 0) {
-    body.innerHTML = '<tr><td colspan="8" class="empty">žádné běhy</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="empty">žádné běhy</td></tr>';
     return;
   }
   body.innerHTML = runs.map((r) => `
@@ -124,6 +140,7 @@ async function loadRuns() {
       <td class="mono">${esc(r.id)}</td>
       <td>${esc(r.instance_id)}</td>
       <td>${badge(r.status)}</td>
+      <td>${replicaBadge(r.replica_status)}</td>
       <td class="num">${r.exit_code}</td>
       <td class="num">${fmtBytes(r.data_bytes || r.bytes)}</td>
       <td>${fmtTime(r.started_at)}</td>
@@ -272,10 +289,23 @@ function setRepoText(id, text) {
 // repozitář, databázové rotované dumpy — bez druhé větve vypadá instance, která má
 // každou zálohu, jakou si vyžádala, jako by neměla žádnou.
 function storedSummary(info) {
-  if (info.exists) return `${fmtBytes(info.bytes)} · ${info.snapshots} snap.`;
+  if (info.exists) return `${fmtBytes(info.bytes)} · ${info.snapshots} snap.${offsiteSuffix(info.replica)}`;
   const d = info.dumps;
-  if (d && d.count > 0) return `${fmtBytes(d.bytes)} · ${d.count} dump${d.count === 1 ? '' : 'ů'}`;
+  if (d && d.count > 0) {
+    return `${fmtBytes(d.bytes)} · ${d.count} dump${d.count === 1 ? '' : 'ů'}${offsiteSuffix(info.replica)}`;
+  }
   return '—';
+}
+
+// U souborové zálohy nevisí stav přenosu na jednom běhu, ale na repozitáři — bez tohohle
+// dovětku by instance zálohovaná resticem o replikaci mlčela. Čistý text, protože buňka
+// se escapuje (id instance je uživatelský vstup); barvu a podrobnosti nese karta
+// v Administraci a varování nad tabulkou.
+const OFFSITE_MARK = { done: '✓', syncing: '⇅', pending: '⏳', failed: '✗' };
+
+function offsiteSuffix(status) {
+  const mark = OFFSITE_MARK[status];
+  return mark ? ` · offsite ${mark}` : '';
 }
 
 // shortFp abbreviates a fingerprint; the full value is in the title attribute so it can
@@ -1263,6 +1293,7 @@ async function applyConfigArchive(btn) {
 // loadAdmin obnovuje jen souhrn resetu. Rozdělaný plán importu se nechává být — přepsat
 // ho pod rukama uprostřed potvrzování by bylo to poslední, co si tady kdo přeje.
 async function loadAdmin() {
+  await loadReplicaCard();
   const box = el('reset-summary');
   let st;
   try {
@@ -1304,6 +1335,128 @@ async function runReset(btn) {
   }
 }
 
+// --- odlehlá kopie ----------------------------------------------------------
+
+// Stav repliky se stahuje pořád, ne jen na záložce Administrace: výpadek přenosu má být
+// vidět odkudkoli, jinak by se o něm operátor dozvěděl teprve ve chvíli, kdy by po
+// odlehlé kopii sáhl. Odtud se plní i varování nad tabulkou a důvody v detailu běhu.
+let replicaState = null;
+
+async function refreshReplica() {
+  try {
+    replicaState = await api('/replica');
+  } catch (err) {
+    if (err.status === 401) return;
+    return; // nedostupné API hlásí showError; tady by druhá hláška jen přebíjela první
+  }
+  replicaFailures.clear();
+  for (const it of replicaState.failing || []) {
+    replicaFailures.set(`${it.kind}:${it.key}`, it);
+  }
+  replicaWarning(replicaState);
+}
+
+// Kdy má výpadek křičet. Krátký zádrhel na lince se dožene sám a hlásit ho by jen
+// naučilo lidi varování přehlížet; hodina bez spojení nebo položka, která se opakovaně
+// nepřenesla, už znamená, že zálohy nemají druhou kopii.
+const REPLICA_DOWN_ALERT_MS = 3600000;
+const REPLICA_BACKLOG_WARN_MS = 7200000;
+
+function replicaWarning(st) {
+  if (!st || !st.enabled) { setWarning('replica', null); return; }
+  const downMs = st.link && st.link.down_since ? Date.now() - new Date(st.link.down_since) : 0;
+  if (downMs > 0) {
+    setWarning('replica', {
+      level: downMs >= REPLICA_DOWN_ALERT_MS ? 'alert' : 'warn',
+      text: `Odlehlá kopie (${st.target}) je nedostupná ${fmtAge(downMs)}`
+        + `${st.counts.pending + st.counts.failed > 0
+          ? ` — ${st.counts.pending + st.counts.failed} položek čeká na přenos` : ''}`
+        + `. Zálohy tady běží dál a fronta se po opravě spojení sama dožene. `
+        + `Poslední chyba: ${st.link.last_err || '—'}`,
+    });
+    return;
+  }
+  if (st.counts.failed > 0) {
+    setWarning('replica', {
+      level: 'alert',
+      text: `${st.counts.failed} položek se nedaří přenést na odlehlý server (${st.target}). `
+        + `Poslední chyba: ${st.link.last_err || (st.failing && st.failing[0] && st.failing[0].err) || '—'}`,
+    });
+    return;
+  }
+  const oldest = st.counts.oldest_pending_at ? Date.now() - new Date(st.counts.oldest_pending_at) : 0;
+  if (oldest > REPLICA_BACKLOG_WARN_MS) {
+    setWarning('replica', {
+      level: 'warn',
+      text: `Odlehlá kopie zaostává: nejstarší nepřenesená položka čeká ${fmtAge(oldest)} `
+        + `(${st.counts.pending} ve frontě).`,
+    });
+    return;
+  }
+  setWarning('replica', null);
+}
+
+function fmtAge(ms) {
+  const min = Math.floor(ms / 60000);
+  if (min < 60) return `${min} min`;
+  const hours = Math.floor(min / 60);
+  if (hours < 48) return `${hours} h`;
+  return `${Math.floor(hours / 24)} d`;
+}
+
+async function loadReplicaCard() {
+  const box = el('replica-summary');
+  await refreshReplica();
+  const st = replicaState;
+  if (!st) { box.innerHTML = '<p class="empty">stav se nepodařilo načíst</p>'; return; }
+  if (!st.enabled) {
+    box.innerHTML = '<p class="empty">Odlehlá kopie není nastavená — viz <code>[replica]</code> '
+      + 'v <code>server.toml</code>.</p>';
+    return;
+  }
+  const health = st.healthy
+    ? '<span class="badge success">dostupná</span>'
+    : `<span class="badge failed">nedostupná</span> <span class="hint">od ${fmtTime(st.link.down_since)}</span>`;
+  box.innerHTML = `
+    <dl class="meta">
+      <dt>cíl</dt><dd class="mono">${esc(st.target)}</dd>
+      <dt>spojení</dt><dd>${health}</dd>
+      <dt>poslední úspěch</dt><dd>${fmtTime(st.link.last_ok_at)}</dd>
+      <dt>fronta</dt><dd>${st.counts.pending} čeká · ${st.counts.syncing} přenáší se
+        · ${st.counts.done} hotovo · ${st.counts.failed} chybných</dd>
+      <dt>režim</dt><dd>${st.mirror ? 'zrcadlo (maže se i na replice)' : 'jen přidávání'}
+        · ${st.include_keys ? 'včetně klíčů a databáze' : 'bez klíčů'}</dd>
+      ${st.link.last_err ? `<dt>poslední chyba</dt><dd>${esc(st.link.last_err)}</dd>` : ''}
+    </dl>
+    ${replicaFailingList(st)}`;
+}
+
+function replicaFailingList(st) {
+  if (!st.failing || st.failing.length === 0) return '';
+  return '<table class="sub"><thead><tr><th>položka</th><th>pokusů</th><th>chyba</th></tr></thead><tbody>'
+    + st.failing.map((it) => `<tr>
+        <td class="mono">${esc(it.kind)}:${esc(it.key)}</td>
+        <td class="num">${it.attempts}</td>
+        <td>${esc(it.err || '')}</td>
+      </tr>`).join('')
+    + '</tbody></table>';
+}
+
+async function replicaAction(path, btn, doing) {
+  const note = el('replica-note');
+  btn.disabled = true;
+  note.textContent = doing;
+  try {
+    await api(path, { method: 'POST' });
+    note.textContent = 'zařazeno, přenos běží na pozadí';
+    await loadReplicaCard();
+  } catch (err) {
+    if (err.status !== 401) note.textContent = 'nepovedlo se: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 const loaders = {
   runs: loadRuns,
   instances: loadInstances,
@@ -1319,6 +1472,9 @@ const VIEWS = ['runs', 'instances', 'instance-form', 'restore', 'runners', 'rota
 
 async function refresh() {
   if (!me) return; // odhlášeno: není za co tahat
+  // Stav odlehlé kopie se tahá při každém obnovení, ať je otevřená kterákoli záložka:
+  // varování na výpadek přenosu nemá čekat, až někdo přijde do Administrace.
+  if (currentView !== 'admin') refreshReplica();
   const load = loaders[currentView];
   if (!load) return; // detail, formulář a účet se neobnovují periodicky
   try {
@@ -1393,8 +1549,30 @@ function renderRunMeta(run) {
     <dt>log</dt><dd>${fmtBytes(run.bytes)}</dd>
     <dt>začátek</dt><dd>${fmtTime(run.started_at)}</dd>
     <dt>trvání</dt><dd>${fmtDuration(run.started_at, run.ended_at)}</dd>
+    ${replicaRow(run)}
     ${run.err ? `<dt>chyba</dt><dd>${esc(run.err)}</dd>` : ''}`;
 }
+
+// replicaRow říká, jestli tahle konkrétní záloha je i na odlehlém serveru. U čekající
+// nebo chybné položky se ukáže i důvod — bez něj je „ve frontě" jen tvrzení a operátor
+// musí hledat jinde, proč se to nehýbe.
+function replicaRow(run) {
+  const status = run.replica_status;
+  if (!status) return '';
+  // Data běhu nese buď jeho vlastní adresář (dump), nebo repozitář instance (restic),
+  // takže se hledá v obojím — ve stejném pořadí, v jakém stav vybírá server.
+  const it = replicaFailures.get(`run:${run.id}`) || replicaFailures.get(`repo:${run.instance_id}`);
+  let detail = '';
+  if (status !== 'done' && it) {
+    detail = ` <span class="hint">${esc(it.err || '')}</span>`;
+    if (it.attempts > 1) detail += ` <span class="hint">(pokus ${it.attempts})</span>`;
+  }
+  return `<dt>offsite</dt><dd>${replicaBadge(status)}${detail}</dd>`;
+}
+
+// Chybné položky fronty, aby detail běhu uměl říct proč. Plní se ze stavu repliky,
+// který se stahuje kvůli varování stejně — druhý dotaz na běh by nic nepřidal.
+const replicaFailures = new Map();
 
 // renderStopButton řídí tlačítko v hlavičce detailu. Skryté u doběhnutého běhu,
 // neaktivní, když už zastavení běží — runner se ptá po pár sekundách.
@@ -1479,6 +1657,10 @@ el('pw-reset-value').addEventListener('keydown', (e) => {
 el('config-export').addEventListener('click', (e) => exportConfig(e.currentTarget));
 el('config-check').addEventListener('click', (e) => checkConfigArchive(e.currentTarget));
 el('reset-run').addEventListener('click', (e) => runReset(e.currentTarget));
+el('replica-sync').addEventListener('click', (e) =>
+  replicaAction('/replica/sync', e.currentTarget, 'zařazuji…'));
+el('replica-retry').addEventListener('click', (e) =>
+  replicaAction('/replica/retry', e.currentTarget, 'zkouším znovu…'));
 // Nový soubor znamená nový plán: ten předchozí patřil jinému archivu.
 el('config-file').addEventListener('change', clearConfigPlan);
 

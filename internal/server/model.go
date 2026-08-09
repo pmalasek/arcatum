@@ -123,4 +123,9 @@ type Run struct {
 	// DataPruned says the backup payload has been rotated away by retention. DataBytes
 	// still reports what the run produced, so the history stays honest.
 	DataPruned bool `json:"data_pruned"`
+	// ReplicaStatus is how far this run's data has got towards the off-site copy: the
+	// state of its run directory, or of the repository a restic backup wrote into. Empty
+	// means it was never queued — replication is off, or the run predates it — which the
+	// UI shows as a dash rather than as a failure (replica.go).
+	ReplicaStatus ReplicaStatus `json:"replica_status,omitempty"`
 }

@@ -58,9 +58,9 @@
   <section id="view-runs" class="view">
     <table>
       <thead>
-        <tr><th>Běh</th><th>Instance</th><th>Stav</th><th>Kód</th><th>Data</th><th>Začátek</th><th>Trvání</th><th></th></tr>
+        <tr><th>Běh</th><th>Instance</th><th>Stav</th><th>Offsite</th><th>Kód</th><th>Data</th><th>Začátek</th><th>Trvání</th><th></th></tr>
       </thead>
-      <tbody id="runs-body"><tr><td colspan="8" class="empty">načítám…</td></tr></tbody>
+      <tbody id="runs-body"><tr><td colspan="9" class="empty">načítám…</td></tr></tbody>
     </table>
   </section>
 
@@ -174,6 +174,19 @@
   <!-- Administrace: konfigurace serveru ven a zpět, a vyprázdnění nasbíraných dat.
        Tři operace, které se týkají Arcatum samotného, ne toho, co zálohuje. -->
   <section id="view-admin" class="view hidden">
+
+    <div class="rot">
+      <h3>Odlehlá kopie</h3>
+      <p class="hint">Všechno, co server uloží, se průběžně kopíruje na druhý stroj, aby
+        tohle nebylo jediné místo, kde zálohy leží. Přerušená linka se projeví jako fronta,
+        která se po nápravě sama dožene — nikdy jako neúspěšná záloha.</p>
+      <div id="replica-summary"><p class="empty">načítám…</p></div>
+      <div class="section-foot admin-only">
+        <button id="replica-sync" class="action">synchronizovat teď</button>
+        <button id="replica-retry" class="action">zopakovat chybné</button>
+        <span id="replica-note" class="hint"></span>
+      </div>
+    </div>
 
     <div class="rot">
       <h3>Záloha konfigurace</h3>

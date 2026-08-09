@@ -86,3 +86,38 @@ log_retention_failed  = "90d"
 # every authority still trusted. Keep the server's own certificate under the outgoing
 # authority until every runner has adopted the bundle (see README: Rotace klíčů).
 # ca_cert  = "/opt/arcatum/pki/ca.pem"
+
+# Off-site copy. Everything the server stores is pushed to a second machine with
+# rsync over ssh, so this server stops being the only place the backups exist.
+#
+# The transfer is one-way and read-only on this side: a broken link turns into a
+# visible backlog that catches up by itself, never into a failed backup. Prepare the
+# replica first — see docs/production.md ("Off-site replika").
+[replica]
+# enabled     = true
+# host        = "172.26.0.2"                      # reachable over the WireGuard tunnel
+# user        = "arcatum"
+# path        = "/data"                           # destination root on the replica
+# port        = 22
+# ssh_key     = "/opt/arcatum/pki/replica-ssh.key"
+# known_hosts = "/opt/arcatum/pki/replica-known_hosts"   # empty disables host key checking
+#
+# bwlimit = 0        # KiB/s, 0 = unlimited. Keeps replication from competing with backups.
+# timeout = "2h"     # ceiling for one item; a stalled rsync is killed and retried later
+#
+# Propagate deletions, so retention here reaches the replica too. max_delete is the
+# guard that makes this safe: a pass that would remove more files than this aborts and
+# leaves the replica alone, which is what stands between an unmounted backup_dir and an
+# emptied off-site copy. Required whenever mirror is set.
+# mirror     = true
+# max_delete = 100
+#
+# Also replicate the PKI, the signing key, the secrets master key and a consistent
+# snapshot of arcatum.db. This is what makes the replica a complete restore point —
+# without the keys the repositories over there cannot be opened at all. It also makes
+# the replica as sensitive as this server: keep /data mode 0700, owned by a dedicated
+# account, and restrict its authorized_keys entry.
+# include_keys = true
+#
+# sweep_every = "1h"   # full reconciliation pass (catches deletions and anything missed)
+# probe_every = "5m"   # reachability check, so an outage is visible before the next backup

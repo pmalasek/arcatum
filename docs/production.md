@@ -402,8 +402,97 @@ Dělba je záměrná: klíče se mění jednou za rotaci a nepatří do žádné
 konfigurace se mění průběžně a stáhnout si ji smí být otázka jednoho kliknutí. Obnova na
 novém stroji je tedy: nakopírovat `pki/`, nastavit `server.toml`, naimportovat zip.
 
-Data záloh (`runs/`, `restic/`) jsou to největší a zálohují se — pokud vůbec — na úrovni
-svazku. Arcatum je pro ně poslední místo, kde leží.
+Data záloh (`runs/`, `restic/`) jsou to největší. Buď se zálohují na úrovni svazku, nebo
+— a to je doporučená cesta — se zapne **odlehlá replika** níž, která je průběžně odlévá
+na druhý stroj i s klíči a snapshotem databáze. Bez ní je Arcatum pro ně poslední místo,
+kde leží.
+
+## Off-site replika
+
+Druhý stroj, na který průběžně odtéká všechno, co server uloží. Návrh a chování jsou
+v [README](../README.md#odlehlá-kopie) a [architecture.md](architecture.md#21-odlehlá-kopie);
+tady je jen postup, jak to nachystat.
+
+### Na replice
+
+```sh
+# vyhrazený účet, který nemá dělat nic jiného
+useradd -r -m -d /var/lib/arcatum-replica -s /bin/sh arcatum
+install -d -o arcatum -g arcatum -m 700 /data
+apt-get install -y rsync                       # nebo dnf install rsync
+```
+
+Mód `0700` není kosmetika: při `include_keys = true` leží v `/data/keys/` master klíč
+i klíč CA, takže kdo se tam dostane, otevře každý repozitář a vydá certifikát libovolnému
+hostu. Ideálně na šifrovaném svazku.
+
+### Klíč a jeho omezení
+
+Na **Arcatum serveru** vyrob vyhrazený klíč jen pro tohle (bez passphrase — přenos běží
+bez obsluhy):
+
+```sh
+ssh-keygen -t ed25519 -N '' -C arcatum-replica -f /opt/arcatum/pki/replica-ssh.key
+chmod 600 /opt/arcatum/pki/replica-ssh.key
+```
+
+Veřejnou část zapiš na replice do `~arcatum/.ssh/authorized_keys` **omezenou**:
+
+```
+from="172.26.0.1",restrict,command="rrsync /data" ssh-ed25519 AAAA… arcatum-replica
+```
+
+- `restrict` vypne port forwarding, agenta i pty — klíč umí jen spustit `command`.
+- `command="rrsync /data"` udrží přenos uvnitř `/data`, i kdyby někdo ovládl Arcatum
+  server. (`rrsync` bývá v `/usr/share/rsync/scripts/` nebo `/usr/share/doc/rsync/scripts/`.)
+- `from=` omezí použití na adresu uvnitř WireGuard tunelu.
+
+Pak si přišpendli hostitelský klíč repliky, ať přenos nikdy nezůstane viset na otázce:
+
+```sh
+ssh-keyscan -H 172.26.0.2 > /opt/arcatum/pki/replica-known_hosts
+# fingerprint porovnej s tím, co hlásí replika: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+ssh -i /opt/arcatum/pki/replica-ssh.key \
+    -o UserKnownHostsFile=/opt/arcatum/pki/replica-known_hosts \
+    arcatum@172.26.0.2 true && echo OK
+```
+
+### V `server.toml`
+
+Sekci `[replica]` vezmi z [`config/server.example.toml`](../config/server.example.toml).
+Minimum, které dává smysl u nás:
+
+```toml
+[replica]
+enabled      = true
+host         = "172.26.0.2"
+user         = "arcatum"
+path         = "/data"
+ssh_key      = "/opt/arcatum/pki/replica-ssh.key"
+known_hosts  = "/opt/arcatum/pki/replica-known_hosts"
+mirror       = true
+max_delete   = 100
+include_keys = true
+```
+
+Server potřebuje mít nainstalovaný `rsync`; když chybí, replikace se vypne s hláškou
+v logu a jinak běží všechno dál.
+
+Po restartu se ve startovním logu objeví cíl a dvě varování, která nejsou chyby, jen
+připomínka toho, co jsi zapnul (klíče na replice, případně nepřišpendlený hostitelský
+klíč). Průběh je vidět v Administraci → **Odlehlá kopie**.
+
+### Na co si dát pozor
+
+- **`max_delete`** musí být vyšší než kolik souborů odmaže běžná retence za hodinu,
+  a nižší než kolik jich je v celém `backup_dir`. Sto je rozumný začátek. Průchod nad
+  stropem se odmítne celý a je vidět jako chybná položka — je to zamýšlené chování, ne
+  porucha, a znamená „zkontroluj, že `backup_dir` je namountovaný a plný".
+- **Místo na replice.** Při `mirror = true` drží zhruba tolik, co `backup_dir`; při
+  vypnutém zrcadlení roste bez omezení.
+- **Obnova z repliky** je: nakopírovat `/data/keys/` do `pki/`, `/data/meta/arcatum.db`
+  do `data_dir`, `/data/restic/` a `/data/runs/` do `backup_dir`, upravit `server.toml`
+  a nastartovat. Vyzkoušej to nanečisto dřív, než to budeš potřebovat.
 
 ## `server.toml`
 

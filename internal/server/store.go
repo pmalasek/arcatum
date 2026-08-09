@@ -637,8 +637,13 @@ func (s *Store) FinishRun(runID string, at time.Time, exitCode int, execErr stri
 	return s.discardData(runID)
 }
 
+// runCols and scanRun are positionally coupled: the column list and the Scan below have
+// to be edited together. The last entry is a sub-select rather than a column — a run's
+// off-site state lives in the replication queue, and joining it here is what puts it in
+// front of an operator without a second request per row (replica_store.go).
 const runCols = `id, instance_id, runner_id, script, status, exit_code, bytes, data_bytes, ` +
-	`created_at, started_at, ended_at, err, timeout_sec, cancel_requested, data_pruned`
+	`created_at, started_at, ended_at, err, timeout_sec, cancel_requested, data_pruned, ` +
+	replicaStatusFor
 
 func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	var r Run
@@ -646,11 +651,15 @@ func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	var created, started, ended int64
 	var status string
 	var cancelRequested, dataPruned int
+	var replicaStatus sql.NullString
 	if err := sc.Scan(&id, &r.InstanceID, &r.RunnerID, &r.Script, &status,
 		&r.ExitCode, &r.Bytes, &r.DataBytes, &created, &started, &ended, &r.Err,
-		&r.TimeoutSec, &cancelRequested, &dataPruned); err != nil {
+		&r.TimeoutSec, &cancelRequested, &dataPruned, &replicaStatus); err != nil {
 		return nil, err
 	}
+	// NULL means the run has never been queued — replication switched off, or a run old
+	// enough to predate it. That is "unknown", not "failed", and the UI shows a dash.
+	r.ReplicaStatus = ReplicaStatus(replicaStatus.String)
 	r.CancelRequested, r.DataPruned = cancelRequested != 0, dataPruned != 0
 	r.ID = formatRunID(id)
 	r.Status = RunStatus(status)

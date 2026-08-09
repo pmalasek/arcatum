@@ -5,7 +5,10 @@ Zálohovací systém pro interní síť Xtuning. Monorepo, jazyk **Go** pro runn
 Stav implementace: fáze A–J hotové — scaffold, protokol, SQLite, mTLS a podpis úloh,
 šifrování secrets, restic zálohy, web UI, instalace a enrollment, životní cyklus
 certifikátů, obnova z webu, rotace klíčů, správa instancí z webu, auto-update runnerů,
-přihlášení do webu jménem a heslem. Přehled v §10, detaily v §11–19.
+přihlášení do webu jménem a heslem. Přehled v §10, detaily v §11–21.
+
+Přibyla **odlehlá kopie** (§21): všechno, co server uloží, průběžně odtéká na druhý stroj,
+takže `backup_dir` přestal být jediné místo, kde zálohy leží.
 
 ---
 
@@ -354,8 +357,9 @@ a přijít o výstup zapsaný po čtení.
 - ~~**Restore flow**~~ — hotovo pro procházení a stažení z webu (§13); obnova **zpět na
   zálohovaný host** chybí.
 - **Notifikace** při selhání (e-mail/Slack).
-- **Storage backend** serveru — dnes lokální disk (`backup_dir`); NAS/S3 zatím ne.
-  Šifrování zálohovaných dat řeší restic sám, secrets v DB šifrujeme (§7).
+- ~~**Storage backend** serveru — dnes lokální disk (`backup_dir`); NAS/S3 zatím ne.~~ —
+  částečně vyřešeno: `backup_dir` zůstává lokální disk, ale všechno z něj odtéká na
+  **odlehlou repliku** (§21). NAS/S3 jako primární úložiště dál ne.
 - **Chování při nedostupnosti** (server dole v čase zálohy → dohnat / přeskočit).
 - **Auto-update runneru**.
 - **Autentizace k webu/API** + audit log.
@@ -1163,3 +1167,138 @@ Export → smazání instance a účtu → dry run (nezapsal nic) → import s p
 zpět **i s rozvrhem** bez restartu, účet zpět, staré sezení `401`, archiv předchozího stavu
 v `config-backups/`. Viewer dostane `403` na export, import i reset. Reset s daty na disku:
 `runs/`, `restic/` i cache pryč, `config-backups/` a celá konfigurace nedotčené.
+
+---
+
+## 21. Odlehlá kopie
+
+`backup_dir` byl doteď jediné místo, kde zálohy leží — `production.md` to říká otevřeně
+a §9 to vedla jako otevřený bod. Jedna kopie na jednom stroji znamená, že požár,
+ransomware nebo chybný `rm` zlikviduje všechno naráz, včetně `arcatum.db` a PKI, bez
+kterých se restic repozitáře neotevřou.
+
+Replikace posílá všechno, co server uloží, na druhý stroj přes `rsync`/`ssh`.
+Kód: `internal/server/replica.go` (worker, sweep, probe, API),
+`replica_rsync.go` (transport), `replica_store.go` (fronta a stav linky).
+
+### Fronta, ne událost
+
+Jednotkou práce je řádek v `replica_queue`, ne reakce na dokončenou zálohu. Rozdíl je
+celý v tom, co se stane, když linka nefunguje: událost se vyhodnotí jednou a je pryč,
+řádek zůstane. Položka, která se nepřenesla, si drží místo a zkouší se dál (30 s, pak
+dvojnásobek do 30 min), takže **spravená linka najde práci, jak ji nechala**. Nic se
+nezahazuje proto, že přenos selhal.
+
+Ze stejného důvodu je fronta v databázi a ne v paměti: backlog, který by se restartem
+serveru vynuloval, by mizel přesně ve chvíli, kdy na něm záleží nejvíc.
+
+Do fronty se věci dostávají třemi cestami:
+
+| Cesta | Kdy | Co zařadí |
+|---|---|---|
+| po běhu | hned po úspěšném `FinishRun` | `run:<id>`, u restic instance navíc `repo:<instance>` |
+| sweep | co hodinu a při startu | vše, co ještě není přenesené, plus `tree:*` a `meta:server` |
+| ručně | tlačítko ve webu | úplný průchod teď |
+
+`tree:*` (`runs`, `restic`, `config-backups`) jsou **rekonciliační průchody celých
+stromů**. Bez nich by zrcadlení nefungovalo: retence smaže dump lokálně a žádná událost
+se nekoná — teprve porovnání stromů to přenese ven. Jsou zároveň pojistkou proti tomu,
+že by rychlá cesta o něčem nevěděla.
+
+Zařazení je idempotentní upsert. Jedna subtilita: `queued_at` se obnovuje jen u položky,
+která už byla hotová. U položky, která pořád čeká, by přepsání času znamenalo, že
+„fronta zaostává dvě hodiny" nikdy nenastane, protože hodiny se každou hodinu resetují.
+
+### Jeden přenos v jednu chvíli
+
+Worker je jedna goroutina; nová práce ji probudí kanálem, jinak tiká po 30 s. Paralelní
+přenosy přes jeden tunel nic nezrychlí a jen by ubraly I/O zálohám, které právě
+přicházejí. Proces jde přes `nice`/`ionice`, ve vlastní procesní skupině a s tvrdým
+timeoutem, který zabije i potomky — stejný vzor jako u rušení běhů (§18).
+
+Řádek zůstalý ve stavu `syncing` po pádu procesu se při startu vrací do fronty: ten stav
+umí nastavit jenom worker a je právě jeden, takže ho nemá kdo dokončit.
+
+### Co dělá z repliky bod obnovy
+
+Kromě `runs/` a `restic/` odtéká i **snapshot databáze**, `server.toml` a (volitelně)
+klíče. Bez nich je replika hromada souborů, které nikdo neotevře — heslo repozitáře leží
+zašifrované v `arcatum.db` a rozšifruje ho jen master klíč.
+
+`arcatum.db` se **nekopíruje jako soubor**. V režimu WAL by kopie byla směsí souboru
+a logu, který k němu nepatří — přesně ta chyba, kterou §20 popisuje u archivu
+konfigurace. Místo toho `VACUUM INTO` do `replica-staging/`, a rsyncuje se až výsledek.
+
+Klíče se posílají **z místa, kde leží**, ne přes staging: privátní klíč zkopírovaný do
+`backup_dir` by skončil na stejném svazku jako repozitáře, které odemyká, což je právě
+to, co produkční rozvržení odděluje. Seznam se skládá z načteného configu, ne z pevného
+adresáře — po rotaci (§14) přibude soubor a natvrdo zadaná cesta by ho tiše minula.
+`--delete` se na klíče nepoužívá: během rotace je předchůdce přesně to, co obnova může
+potřebovat.
+
+Cena je jasná a je vědomá: **replika je tím stejně citlivá jako tenhle server.** Kdo se
+dostane k jejímu adresáři, otevře každý repozitář a vydá certifikát libovolnému hostu.
+Server na to při startu upozorní stejně hlasitě jako na chybějící master klíč.
+
+### Zrcadlení a strop mazání
+
+Zrcadlo znamená, že smazání tady se propaguje ven — tedy přesně to riziko, kvůli kterému
+odlehlá kopie existuje. Nestačí na to `--max-delete`: `rsync` maže **až do limitu**
+a teprve pak se zastaví, takže omezí škodu, ale nezabrání jí. (Odhalil to test proti
+skutečnému `rsync`u, ne úvaha.)
+
+Každému zrcadlícímu průchodu proto předchází `--dry-run --itemize-changes`, který spočítá
+plánovaná mazání; při překročení stropu se průchod **vůbec nespustí**. Odpojený svazek
+vypadá pro `rsync` k nerozeznání od „operátor smazal všechno", a tohle je jediné místo,
+kde se ty dvě věci dají rozlišit — dřív, než zmizí první soubor. `--max-delete` zůstává
+jako druhá linie.
+
+### Restic na dvě fáze
+
+Repozitář se posílá nejdřív bez `index/` a `snapshots/`, teprve druhý průchod je doplní.
+Snapshot jmenuje index, index jmenuje packy; opačné pořadí nechá na replice snapshot
+ukazující na data, která tam nejsou — repozitář, který restic otevře a pak z něj
+neobnoví. To je horší než chybějící záloha, protože vypadá jako záloha.
+
+Repozitář instance, pro kterou zrovna běží úloha, se odloží. Není to chyba (počítadlo
+pokusů se nezvyšuje), jen ne teď.
+
+### Jednotlivá položka jede přes rodičovský adresář
+
+`rsync` vytvoří jen poslední složku cílové cesty. Adresář jednoho běhu adresovaný přímo
+by tedy neměl kam přistát, dokud by `runs/` nevyrobilo něco jiného. Položky se proto
+posílají jako „tenhle podstrom `runs/`" (`--include=/run-42/*** --exclude=*`), což zároveň
+drží `--delete` uvnitř toho, co je zahrnuté.
+
+### Co chrání zálohy na tomhle serveru
+
+Replikace do `backup_dir` nikdy nezapisuje — zdroj rsyncu je vždy lokální, cíl vždy
+vzdálený, opačný směr v kódu není. Zařazuje se až po `FinishRun` a `data.part` je navíc
+v `--exclude`, takže se nepřenáší dump, který ještě není zálohou. Selhání se zapisuje
+**výhradně** do `replica_queue` a `replica_state`: rozbitá linka neudělá z úspěšné zálohy
+neúspěšnou. A chybějící `rsync` nebo špatná konfigurace nechá podsystém nečinný, ale
+server naběhne — replikace je to poslední, co má bránit zálohovacímu serveru ve startu.
+
+### Viditelnost
+
+Stav běhu ve výpisu se odvozuje `LEFT JOIN`em na frontu (`replicaStatusFor` v `store.go`),
+takže sloupec „offsite" nestojí na druhém dotazu na řádek. Prázdná hodnota je „neví se"
+(replikace vypnutá, nebo běh starší než ona) — pomlčka, ne selhání.
+
+`GET /api/v1/replica` vrací zdraví linky včetně `down_since`. Ten se nastavuje jen při
+**první** chybě; restartovat ho každým pokusem by ze šestihodinového výpadku udělalo
+dvouminutový, tedy přesně to číslo, podle kterého by se někdo rozhodoval. Web z toho
+staví varování viditelné na každé záložce.
+
+### Ověřeno
+
+Testy proti **skutečnému `rsync`u** (cíl na téhle mašině, „vzdálený" konec přes lokální
+shell místo ssh, `rshCommand` je kvůli tomu proměnná — stejná indirekce jako
+`config.systemDir`): dump dorazí bit za bit, rozdělaný upload ne, smazání se zrcadlí,
+bez `mirror` odlehlá kopie přežije smazání tady, průchod nad stropem nechá repliku
+nedotčenou a označí položku za chybnou, repozitář mid-backup se odloží bez započítání
+pokusu, replikovaná databáze jde otevřít a klíč dorazí s módem `0600`.
+Negativně: přenos proti nedostupnému cíli nechá lokální zálohu i stav běhu beze změny.
+Dál jednotkově: stavba argumentů (strop mazání, `data.part`, `partial-dir`, ssh volby,
+pořadí filtrů u restiku), fronta (idempotence, backoff se stropem, `down_since`),
+`viewer` dostane 403 na `sync`/`retry` a 200 na stav.
