@@ -38,10 +38,10 @@ README je referenční přehled. Postupy krok za krokem mají vlastní dokumenty
 
 | Návod | Kdy ho otevřít |
 |---|---|
-| [Nasazení produkční verze](docs/production.md) | od čistého serveru k běžícímu Arcatum se zapnutým zabezpečením — PKI, systemd, publikování buildů, rollout runnerů, provoz, záloha samotného Arcatum |
-| [Vývoj a ladění backendu](docs/backend-development.md) | práce na Go kódu: lokální prostředí, tok dat jedním během, kam co přidat, testy, ladění, mTLS lokálně |
-| [Vývoj a ladění skriptů](docs/script-development.md) | psaní zálohovacích skriptů: manifest, předání parametrů, vývojová smyčka, katalog chyb |
-| [Obnova databáze z dumpu](docs/restore.md) | jak dump dostat zpět do MySQL nebo PostgreSQL, co v něm není, a zkušební obnova |
+| [Nasazení produkční verze](docs/production_cz.md) | od čistého serveru k běžícímu Arcatum se zapnutým zabezpečením — PKI, systemd, publikování buildů, rollout runnerů, provoz, záloha samotného Arcatum |
+| [Vývoj a ladění backendu](docs/backend-development_cz.md) | práce na Go kódu: lokální prostředí, tok dat jedním během, kam co přidat, testy, ladění, mTLS lokálně |
+| [Vývoj a ladění skriptů](docs/script-development_cz.md) | psaní zálohovacích skriptů: manifest, předání parametrů, vývojová smyčka, katalog chyb |
+| [Obnova databáze z dumpu](docs/restore_cz.md) | jak dump dostat zpět do MySQL nebo PostgreSQL, co v něm není, a zkušební obnova |
 
 ---
 
@@ -188,7 +188,7 @@ curl http://127.0.0.1:8443/api/v1/runs                   # seznam běhů
 curl http://127.0.0.1:8443/api/v1/runs/run-1/output      # zachycený výstup
 ```
 
-Nebo ve webu na `http://127.0.0.1:8080/` — záložka **Běhy** a klik na běh.
+Nebo ve webu na `http://127.0.0.1:8080/` — záložka **Runs** a klik na běh.
 
 Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
 
@@ -198,7 +198,7 @@ Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
 
 > Tento rychlý start běží **bez zabezpečení** (plain HTTP, žádné ověřování). Pro reálné
 > nasazení pokračuj sekcí [Zabezpečení](#zabezpečení-mtls-a-podpis-úloh) nebo přímo
-> návodem [Nasazení produkční verze](docs/production.md).
+> návodem [Nasazení produkční verze](docs/production_cz.md).
 
 ---
 
@@ -305,12 +305,12 @@ a jeho vygenerované heslo se **jednou** vypíše do logu:
   ┌─ first start: created the web account ─────────────────────
   │   user:     admin
   │   password: k4m2ftq7hn3bwzla
-  │ Log in and change it (Účet → změnit heslo). A forgotten
+  │ Log in and change it (Account → change password). A forgotten
   │ password is reset with: arcatum-server -passwd admin
   └───────────────────────────────────────────────────────────
 ```
 
-Další účty se přidávají z webu (záložka **Uživatelé**). Když se heslo ztratí i tomu
+Další účty se přidávají z webu (záložka **Users**). Když se heslo ztratí i tomu
 poslednímu adminovi, cesta zpět je ze shellu na serveru:
 
 ```sh
@@ -449,7 +449,7 @@ v den, kdy vyprší původní certifikáty. Obnova zároveň **vymění i klíč
 Runner se pak sám restartuje, aby nový certifikát začal používat (systemd unit má
 `Restart=always`).
 
-**Zneplatnění při kompromitaci.** Ve webu u runneru klikneš na **zneplatnit**:
+**Zneplatnění při kompromitaci.** Ve webu u runneru klikneš na **revoke**:
 
 1. Certifikát okamžitě přestane platit **všude** — checkin, hlášení výsledků i přístup
    k restic repozitáři
@@ -458,11 +458,11 @@ Runner se pak sám restartuje, aby nový certifikát začal používat (systemd 
    žádost
 4. Ty ho schválíš — nebo mu certifikát předáš ručně (`arcatum-ca runner -id <id>`)
 
-Při podezření na kompromitaci **CA** je ve spodní části záložky Runnery tlačítko
-**zneplatnit certifikáty všech runnerů**. Zastaví to zálohování, dokud runnery znovu
+Při podezření na kompromitaci **CA** je ve spodní části záložky Runners tlačítko
+**revoke the certificates of all runners**. Zastaví to zálohování, dokud runnery znovu
 neschválíš.
 
-> Rozdíl mezi **zneplatnit** a **zamítnout**: zneplatnění znamená „začni znovu" a runner
+> Rozdíl mezi **revoke** a **reject**: zneplatnění znamená „začni znovu" a runner
 > sám požádá o nový certifikát. Zamítnutí je „ne" — runner se pak už neozývá, aby ti
 > nezaplňoval frontu žádostmi.
 
@@ -481,7 +481,7 @@ go run ./cmd/arcatum-ca server -dir pki -hosts 172.24.0.60   # certifikát serve
 
 Všechny tři dlouhodobé klíče jde vyměnit bez zásahu na jednotlivých hostech. Postup je
 u všech stejný: **okno, kdy platí starý i nový**, runnery si nové převezmou samy, a okno
-zavřeš, až server potvrdí, že jsou všichni přeneseni. Stav sleduje záložka **Klíče**.
+zavřeš, až server potvrdí, že jsou všichni přeneseni. Stav sleduje záložka **Keys**.
 
 | Co | Kdo to roznese | Cutover |
 |---|---|---|
@@ -494,7 +494,7 @@ zavřeš, až server potvrdí, že jsou všichni přeneseni. Stav sleduje zálo�
 ```sh
 arcatum-ca master-key -dir pki -name secrets-master-2      # 1. nový klíč
 # 2. server.toml: master_key = nový, previous_keys = ["…/secrets-master.key"]
-# 3. restart, pak v UI „Klíče" → přešifrovat (nebo POST /api/v1/secrets/rekey)
+# 3. restart, pak v UI „Keys" → re-encrypt (nebo POST /api/v1/secrets/rekey)
 # 4. až je pending 0, odeber previous_keys a restartuj
 ```
 
@@ -641,7 +641,7 @@ jiné. Prázdná hodnota znamená „nenastaveno", ne „nedrž nic".
 
 ### Obnova dat
 
-**Z webu** — záložka **Obnova**: vybereš instanci a snapshot, procházíš strom a stáhneš
+**Z webu** — záložka **Restore**: vybereš instanci a snapshot, procházíš strom a stáhneš
 jednotlivý soubor nebo celý adresář jako `.tar`.
 
 Obnova běží **na serveru** proti repozitáři, který už tam je, a heslo si server
@@ -704,20 +704,20 @@ Přehledy a detail běhu:
 
 | Záložka | Co ukazuje |
 |---|---|
-| **Běhy** | historie: stav, **stav přenosu na odlehlý server**, návratový kód, přenesená data, trvání |
-| **Instance** | příští běh, velikost restic repozitáře, **spustit teď**; klik otevře úpravu, tlačítko **nová instance** |
-| **Obnova** | snapshoty, procházení stromu, stažení souboru nebo adresáře jako `.tar` |
-| **Klíče** | stav rotace všech tří klíčů, přešifrování secrets, postup migrace CA |
-| **Runnery** | stav, platforma, **verze buildu**, expirace certifikátu, kdy se naposledy ohlásil; **schválit / zamítnout / zneplatnit** |
-| **Uživatelé** | účty webu: role, stav, poslední přihlášení; **přidat / nové heslo / změnit roli / vypnout / smazat** (jen pro roli `admin`) |
-| **Administrace** | [odlehlá kopie](#odlehlá-kopie), [záloha konfigurace, její obnova a vyprázdnění serveru](#záloha-konfigurace-a-reset-serveru) (jen pro roli `admin`) |
+| **Runs** | historie: stav, **stav přenosu na odlehlý server**, návratový kód, přenesená data, trvání |
+| **Instances** | příští běh, velikost restic repozitáře, **run now**; klik otevře úpravu, tlačítko **new instance** |
+| **Restore** | snapshoty, procházení stromu, stažení souboru nebo adresáře jako `.tar` |
+| **Keys** | stav rotace všech tří klíčů, přešifrování secrets, postup migrace CA |
+| **Runners** | stav, platforma, **verze buildu**, expirace certifikátu, kdy se naposledy ohlásil; **approve / reject / revoke** |
+| **Users** | účty webu: role, stav, poslední přihlášení; **add / new password / change role / disable / delete** (jen pro roli `admin`) |
+| **Administration** | [odlehlá kopie](#odlehlá-kopie), [záloha konfigurace, její obnova a vyprázdnění serveru](#záloha-konfigurace-a-reset-serveru) (jen pro roli `admin`) |
 
-Vpravo v hlavičce je přihlášený uživatel, jeho role, **změnit heslo** a **odhlásit**.
+Vpravo v hlavičce je přihlášený uživatel, jeho role, **change password** a **sign out**.
 Viewerovi se tlačítka, která něco mění, vůbec nezobrazí — a server je stejně odmítne (403),
 takže shoda UI se skutečnými právy není otázka důvěry v prohlížeč.
 
 Klikem na běh se otevře **detail s živým tailem výstupu** — u probíhající úlohy se log
-dosypává, jak přichází. Přepínač `stdout`/`stderr` a zaškrtávátko „sledovat"
+dosypává, jak přichází. Přepínač `stdout`/`stderr` a zaškrtávátko „follow"
 (automatické odscrollování). Přesně to, na co jsi mířil požadavkem usnadnit ladění
 skriptů: spustit ručně a hned vidět, co skript píše.
 
@@ -766,7 +766,7 @@ max_delete   = 100       # pojistka: víc smazání v jednom průchodu = odmítn
 include_keys = true      # PKI, master klíč a snapshot databáze
 ```
 
-Příprava druhého stroje je v [docs/production.md](docs/production.md#off-site-replika).
+Příprava druhého stroje je v [docs/production.md](docs/production_cz.md#off-site-replika).
 
 ### Co tam odtéká
 
@@ -793,14 +793,14 @@ práci, jak ji nechala. Nic se nezahazuje proto, že přenos selhal.
 
 Vidět je to na třech místech:
 
-- **Sloupec „Offsite" u každého běhu** — `přeneseno` / `ve frontě` / `přenáší se` / `chyba`.
+- **Sloupec „Offsite" u každého běhu** — `sent` / `queued` / `sending` / `error`.
   Pomlčka znamená „neví se" (replikace je vypnutá nebo je běh starší), ne poruchu.
 - **Detail běhu** — kromě stavu i text poslední chyby a počet pokusů.
 - **Varování nad tabulkou** na kterékoli záložce, když je replika nedostupná (s časem,
   **od kdy**) nebo se položky nedaří přenést.
 
-Karta **Odlehlá kopie** v Administraci ukazuje cíl, stav linky, velikost fronty a soupis
-chybných položek, plus tlačítka **synchronizovat teď** a **zopakovat chybné**.
+Karta **Off-site replica** v Administraci ukazuje cíl, stav linky, velikost fronty a soupis
+chybných položek, plus tlačítka **sync now** a **retry failed**.
 
 ### Proč to nemůže ohrozit zálohy tady
 
@@ -828,7 +828,7 @@ Repozitář, pro jehož instanci zrovna běží úloha, se odloží (není to ch
 
 ## Záloha konfigurace a reset serveru
 
-Záložka **Administrace** ve webu (jen pro roli `admin`) obsluhuje tři věci, které se týkají
+Záložka **Administration** ve webu (jen pro roli `admin`) obsluhuje tři věci, které se týkají
 Arcatum samotného, ne toho, co zálohuje.
 
 ### Stažení konfigurace
@@ -846,7 +846,7 @@ server.toml       kopie configu — jen pro referenci, import ji nepoužije
 Co v archivu **není**: běhy, logy, dumpy, restic repozitáře — a hlavně **žádné klíče**.
 CA klíč, podepisovací klíč ani `secrets-master.key` do něj nepatří: jeden takový soubor by
 odemykal všechny repozitáře a uměl vyrobit certifikát libovolnému hostu. Klíče se zálohují
-zvlášť spolu s `pki/` (viz [docs/production.md](docs/production.md)).
+zvlášť spolu s `pki/` (viz [docs/production.md](docs/production_cz.md)).
 
 Důsledek toho rozhodnutí: **secrets cestují zašifrované**, takže archiv jde naimportovat
 jen tam, kde je stejný master klíč. Server to zkontroluje předem a jinak import odmítne —
@@ -968,17 +968,17 @@ a `mysql_backup` (realistická šablona).
 
 ## Jak přidat instanci
 
-**Z webu** — záložka **Instance** → **nová instance**. Formulář se sestaví z parametrů,
+**Z webu** — záložka **Instances** → **new instance**. Formulář se sestaví z parametrů,
 které vybraný skript deklaruje, a hodnoty se proti manifestu **zvalidují při uložení**:
 chybějící heslo nebo překlep v názvu parametru se pozná hned, ne až při noční záloze.
 
 Změny platí **okamžitě, bez restartu serveru** — včetně změny rozvrhu. Hesla se šifrují
 už při uložení, takže nikde nezůstávají v plaintextu.
 
-Klik na řádek instance ji otevře k úpravě. U uloženého secretu se zobrazí `(nezměněno)`;
+Klik na řádek instance ji otevře k úpravě. U uloženého secretu se zobrazí `(unchanged)`;
 když pole necháš prázdné, stará hodnota zůstane.
 
-**Kopie hotové instance** — tlačítko **kopírovat** u řádku otevře formulář předvyplněný
+**Kopie hotové instance** — tlačítko **copy** u řádku otevře formulář předvyplněný
 podle ní. Druhá databáze na stejném serveru je pak otázka dvou políček: nové `id` a jiný
 název databáze. Hesla přebere server ze zdrojové instance — ven je nepustí ani do
 formuláře, takže je není kde opsat.
@@ -1130,7 +1130,7 @@ server tak nemůže přepsat výsledky jiného.
 
 ## Ladění skriptů
 
-Nejpohodlnější cesta je [web UI](#web-ui): záložka **Instance** → **spustit teď**, pak
+Nejpohodlnější cesta je [web UI](#web-ui): záložka **Instances** → **run now**, pak
 klik na běh a sleduješ živý tail výstupu. Ze shellu totéž:
 
 ```sh
@@ -1157,16 +1157,16 @@ kdykoli nahlédnout i přímo na serveru. Chystá se dry-run režim.
 Uloží se vedle něj jako `runs/<run_id>/data.bin` a ve webu se nabídne ke stažení, kdežto
 log obsahuje jen jednu shrnující řádku a stderr. Logy mají strop 4 MiB na stream a mažou
 se podle `[storage] log_retention_success` / `log_retention_failed`. Detaily
-v [architektuře, §17](docs/architecture.md).
+v [architektuře, §17](docs/architecture_cz.md).
 
 **Dumpy se rotují, nededuplikují.** Databázová záloha je jeden artefakt, který se
 obnovuje celý, takže se nedává do resticu — drží se posledních N (`keep_last`) a všechno
 mladší než D dnů (`keep_days`), obojí nastavené **na instanci**. Nula u obou znamená
 držet všechno; formulář nové instance předvyplňuje 7. Mazání běží hned po úspěšné záloze
-a pro jistotu ještě jednou za hodinu. Viz [§19](docs/architecture.md).
+a pro jistotu ještě jednou za hodinu. Viz [§19](docs/architecture_cz.md).
 
 Celá vývojová smyčka včetně spuštění skriptu nasucho mimo Arcatum a katalogu chybových
-zpráv: [Vývoj a ladění skriptů](docs/script-development.md).
+zpráv: [Vývoj a ladění skriptů](docs/script-development_cz.md).
 
 ---
 
@@ -1178,15 +1178,15 @@ Na zálohovaném serveru stačí jeden příkaz:
 curl -LsSf http://172.24.0.60/arcatum_runner/install.sh | sudo sh
 ```
 
-> Přesné znění včetně adresy tohohle serveru najdeš i ve web UI: záložka **Runnery** →
-> **Přidat runner**. Je to tatáž stránka, na které runner pak schvaluješ.
+> Přesné znění včetně adresy tohohle serveru najdeš i ve web UI: záložka **Runners** →
+> **Add runner**. Je to tatáž stránka, na které runner pak schvaluješ.
 
 Skript stáhne binárku pro danou platformu, `ca.pem` a podepisovací veřejný klíč, vypíše
 `runner.toml`, nainstaluje systemd službu a spustí ji. **Adresu serveru si odvodí z URL,
 ze které se sám stáhl** — nezadáváš ji tedy dvakrát. Opakované spuštění binárku
 aktualizuje, ale existující `runner.toml` nechá být.
 
-Pak už zbývá jen **schválit hosta ve webu** (záložka Runnery). Do té doby runner
+Pak už zbývá jen **schválit hosta ve webu** (záložka Runners). Do té doby runner
 opakovaně dotazuje a nic nedělá — to je v pořádku.
 
 ```sh
@@ -1273,7 +1273,7 @@ V=2026.07.26 just dist-runner /opt/arcatum/dist
 ```
 
 Runner při dalším checkinu zjistí, že běží na starší verzi, novou stáhne, nahradí sám
-sebe a restartuje se. Aktuální verze každého hostu je vidět v záložce **Runnery** —
+sebe a restartuje se. Aktuální verze každého hostu je vidět v záložce **Runners** —
 podle toho poznáš, jak daleko je rozjezd.
 
 **Bez `VERSION` se nic nenabízí.** Binárky v adresáři samy o sobě aktualizaci nespustí;
@@ -1397,7 +1397,7 @@ Recepty, které berou argument, ho přijímají pozičně: `just trigger mysql-w
 `just run-output 42`, `just dist-runner /opt/arcatum/dist`.
 
 Podrobněji — lokální prostředí, tok dat jedním během, kam přidat endpoint / sloupec /
-typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-development.md).
+typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-development_cz.md).
 
 ---
 
@@ -1414,7 +1414,7 @@ typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-develop
 - **Zálohování souborů přes restic** — repozitář na serveru (vlastní restic REST backend),
   dedup a inkrementální snapshoty, izolace repozitářů mezi runnery
 - **Retence (GFS)** — `forget --prune` po úspěšné záloze, omezené na vlastní snapshoty
-- **Web UI** zabalené v binárce — běhy, instance, runnery, **živý tail výstupu**, „spustit teď"
+- **Web UI** zabalené v binárce — běhy, instance, runnery, **živý tail výstupu**, „run now"
 - **Přihlášení do webu jménem a heslem** na vlastním portu, role `admin`/`viewer`, správa
   účtů z webu (PBKDF2 hashe, sezení v cookie); runnery zůstávají na certifikátech
 - **Instalace jedním příkazem** (`install.sh`) a **enrollment** — runner si vygeneruje vlastní
@@ -1444,4 +1444,4 @@ typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-develop
 - **Notifikace** při selhání (e-mail/Slack) a **dry-run** režim
 - **CRL/OCSP** — [záměrně nezavedeno](#proč-ne-crlocsp)
 
-Podrobná architektura a rozhodnutí: [docs/architecture.md](docs/architecture.md).
+Podrobná architektura a rozhodnutí: [docs/architecture.md](docs/architecture_cz.md).

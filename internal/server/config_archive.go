@@ -532,7 +532,7 @@ func (s *Server) configImportWarnings(current, incoming *ConfigSet, plan *Config
 			for name, value := range in.Secrets {
 				if _, sealed := crypto.SealedKeyID(value); !sealed && value != "" {
 					out = append(out, fmt.Sprintf("secret %q of instance %q is not encrypted in "+
-						"the archive; it will be stored as-is until you re-encrypt (Klíče → přešifrovat)",
+						"the archive; it will be stored as-is until you re-encrypt (Keys → re-encrypt)",
 						name, in.ID))
 				}
 			}

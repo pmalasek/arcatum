@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="cs">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -8,92 +8,92 @@
 </head>
 <body>
 
-<!-- Přihlášení. Zakryje celou aplikaci, dokud server nepotvrdí platné přihlášení —
-     runnery se hlásí certifikátem, lidé jménem a heslem. -->
+<!-- Login. Covers the whole app until the server confirms a valid session —
+     runners authenticate with a certificate, people with a username and password. -->
 <div id="login" class="login hidden">
   <form id="login-form" class="login-box" autocomplete="on">
     <h1>Arcatum</h1>
-    <p class="sub">zálohovací systém — Xtuning</p>
-    <label class="login-field">uživatel
+    <p class="sub">backup system — Xtuning</p>
+    <label class="login-field">user
       <input id="login-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
     </label>
-    <label class="login-field">heslo
+    <label class="login-field">password
       <input id="login-pass" name="password" type="password" autocomplete="current-password" required>
     </label>
-    <button id="login-submit" class="action primary" type="submit">přihlásit</button>
+    <button id="login-submit" class="action primary" type="submit">sign in</button>
     <div id="login-error" class="login-error"></div>
   </form>
 </div>
 
-<!-- Aplikace. Skrytá, dokud přihlášení neproběhne. -->
+<!-- The app. Hidden until the login goes through. -->
 <div id="app" class="hidden">
 
 <header>
   <h1>Arcatum</h1>
-  <span class="sub">zálohovací systém — Xtuning</span>
+  <span class="sub">backup system — Xtuning</span>
   <span id="conn" class="conn"></span>
   <span class="account">
     <span id="me-name" class="me-name"></span>
     <span id="me-role" class="badge"></span>
-    <button id="open-account" class="ghost">změnit heslo</button>
-    <button id="logout" class="ghost">odhlásit</button>
+    <button id="open-account" class="ghost">change password</button>
+    <button id="logout" class="ghost">sign out</button>
   </span>
 </header>
 
 <nav>
-  <button class="tab active" data-view="runs">Běhy</button>
-  <button class="tab" data-view="instances">Instance</button>
-  <button class="tab" data-view="restore">Obnova</button>
-  <button class="tab" data-view="runners">Runnery</button>
-  <button class="tab" data-view="rotation">Klíče</button>
-  <button class="tab admin-only" data-view="users">Uživatelé</button>
-  <button class="tab admin-only" data-view="admin">Administrace</button>
+  <button class="tab active" data-view="runs">Runs</button>
+  <button class="tab" data-view="instances">Instances</button>
+  <button class="tab" data-view="restore">Restore</button>
+  <button class="tab" data-view="runners">Runners</button>
+  <button class="tab" data-view="rotation">Keys</button>
+  <button class="tab admin-only" data-view="users">Users</button>
+  <button class="tab admin-only" data-view="admin">Administration</button>
 </nav>
 
-<!-- Varování na blížící se expiraci certifikátů; skryté, dokud není co hlásit -->
+<!-- Warnings about approaching certificate expiry; hidden until there is something to report -->
 <div id="warnings" class="warnings hidden"></div>
 
 <main>
-  <!-- Seznam běhů -->
+  <!-- List of runs -->
   <section id="view-runs" class="view">
     <table>
       <thead>
-        <tr><th>Běh</th><th>Instance</th><th>Stav</th><th>Offsite</th><th>Kód</th><th>Data</th><th>Začátek</th><th>Trvání</th><th></th></tr>
+        <tr><th>Run</th><th>Instance</th><th>Status</th><th>Offsite</th><th>Code</th><th>Data</th><th>Started</th><th>Duration</th><th></th></tr>
       </thead>
-      <tbody id="runs-body"><tr><td colspan="9" class="empty">načítám…</td></tr></tbody>
+      <tbody id="runs-body"><tr><td colspan="9" class="empty">loading…</td></tr></tbody>
     </table>
   </section>
 
-  <!-- Instance -->
+  <!-- Instances -->
   <section id="view-instances" class="view hidden">
     <table>
       <thead>
-        <tr><th>Instance</th><th>Skript</th><th>Runner</th><th>Příští běh</th><th>Repozitář</th><th></th></tr>
+        <tr><th>Instance</th><th>Script</th><th>Runner</th><th>Next run</th><th>Repository</th><th></th></tr>
       </thead>
-      <tbody id="instances-body"><tr><td colspan="6" class="empty">načítám…</td></tr></tbody>
+      <tbody id="instances-body"><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
     </table>
     <div class="section-foot admin-only">
-      <button id="new-instance" class="action">nová instance</button>
-      <span class="hint">formulář se sestaví z parametrů, které skript deklaruje</span>
+      <button id="new-instance" class="action">new instance</button>
+      <span class="hint">the form is assembled from the parameters the script declares</span>
     </div>
   </section>
 
-  <!-- Formulář instance (vytvoření i úprava) -->
+  <!-- Instance form (both creating and editing) -->
   <section id="view-instance-form" class="view hidden">
     <div class="detail-head">
-      <button id="form-back" class="ghost">‹ zpět</button>
+      <button id="form-back" class="ghost">‹ back</button>
       <h2 id="form-title">Instance</h2>
       <span class="grow"></span>
       <span id="form-error" class="hint"></span>
     </div>
     <div id="form-body"></div>
     <div class="section-foot">
-      <button id="form-save" class="action">uložit</button>
-      <button id="form-delete" class="action danger hidden">smazat</button>
+      <button id="form-save" class="action">save</button>
+      <button id="form-delete" class="action danger hidden">delete</button>
     </div>
   </section>
 
-  <!-- Obnova: snapshoty → procházení → stažení -->
+  <!-- Restore: snapshots → browsing → download -->
   <section id="view-restore" class="view hidden">
     <div class="detail-head">
       <label class="follow">instance
@@ -108,166 +108,169 @@
     <div id="restore-crumbs" class="crumbs"></div>
     <table>
       <thead>
-        <tr><th>Název</th><th>Typ</th><th>Velikost</th><th>Změněno</th><th></th></tr>
+        <tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th></th></tr>
       </thead>
-      <tbody id="restore-body"><tr><td colspan="5" class="empty">vyber instanci</td></tr></tbody>
+      <tbody id="restore-body"><tr><td colspan="5" class="empty">pick an instance</td></tr></tbody>
     </table>
   </section>
 
-  <!-- Runnery -->
+  <!-- Runners -->
   <section id="view-runners" class="view hidden">
     <table>
       <thead>
-        <tr><th>Runner</th><th>Stav</th><th>Platforma</th><th>Verze</th><th>Certifikát platí do</th><th>Naposledy viděn</th><th></th></tr>
+        <tr><th>Runner</th><th>Status</th><th>Platform</th><th>Version</th><th>Certificate valid until</th><th>Last seen</th><th></th></tr>
       </thead>
-      <tbody id="runners-body"><tr><td colspan="7" class="empty">načítám…</td></tr></tbody>
+      <tbody id="runners-body"><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
     </table>
-    <!-- Návod na instalaci. Uzavřený detail: kdo runnery jen kontroluje, ho nepotřebuje
-         mít pod nosem, a kdo instaluje, ho najde tam, kde stejně schvaluje. -->
+    <!-- Installation instructions. A closed details element: whoever only checks on runners
+         does not need it in their face, and whoever installs one finds it where they approve
+         it anyway. -->
     <details id="install-guide" class="guide admin-only">
-      <summary>Přidat runner</summary>
-      <div id="install-body" class="guide-body"><p class="empty">načítám…</p></div>
+      <summary>Add runner</summary>
+      <div id="install-body" class="guide-body"><p class="empty">loading…</p></div>
     </details>
     <div class="section-foot admin-only">
-      <button id="revoke-all" class="action danger">zneplatnit certifikáty všech runnerů</button>
-      <span class="hint">při podezření na kompromitaci CA — zastaví zálohování, než runnery znovu schválíš</span>
+      <button id="revoke-all" class="action danger">revoke the certificates of all runners</button>
+      <span class="hint">for a suspected CA compromise — stops backups until you approve the runners again</span>
     </div>
   </section>
 
-  <!-- Rotace klíčů: stav všech tří klíčů a co ještě zbývá dokončit -->
+  <!-- Key rotation: the status of all three keys and what is left to finish -->
   <section id="view-rotation" class="view hidden">
-    <div id="rotation-body"><p class="empty">načítám…</p></div>
+    <div id="rotation-body"><p class="empty">loading…</p></div>
   </section>
 
-  <!-- Uživatelé web UI. Runnery sem nepatří — ty se hlásí certifikátem. -->
+  <!-- Web UI users. Runners do not belong here — those authenticate with a certificate. -->
   <section id="view-users" class="view hidden">
     <table>
       <thead>
-        <tr><th>Uživatel</th><th>Role</th><th>Stav</th><th>Vytvořen</th><th>Poslední přihlášení</th><th></th></tr>
+        <tr><th>User</th><th>Role</th><th>Status</th><th>Created</th><th>Last login</th><th></th></tr>
       </thead>
-      <tbody id="users-body"><tr><td colspan="6" class="empty">načítám…</td></tr></tbody>
+      <tbody id="users-body"><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
     </table>
     <div class="section-foot">
-      <input id="new-user-name" placeholder="jmeno" autocapitalize="none" spellcheck="false" size="14">
+      <input id="new-user-name" placeholder="name" autocapitalize="none" spellcheck="false" size="14">
       <select id="new-user-role">
-        <option value="viewer">viewer — jen čte</option>
-        <option value="admin">admin — může měnit</option>
+        <option value="viewer">viewer — read only</option>
+        <option value="admin">admin — can change things</option>
       </select>
-      <input id="new-user-pass" type="password" placeholder="heslo (nepovinné)" size="18">
-      <button id="new-user" class="action">přidat uživatele</button>
-      <span class="hint">bez hesla ho server vygeneruje a jednorázově zobrazí</span>
+      <input id="new-user-pass" type="password" placeholder="password (optional)" size="18">
+      <button id="new-user" class="action">add user</button>
+      <span class="hint">without a password the server generates one and shows it once</span>
     </div>
-    <!-- Nové heslo cizího účtu. Otevře se tlačítkem u uživatele: buď se zadá, nebo
-         nechá vygenerovat serverem. -->
+    <!-- A new password for someone else's account. Opened by the button next to a user:
+         either type one in, or let the server generate it. -->
     <div id="pw-reset" class="section-foot hidden">
-      <span>nové heslo pro <b id="pw-reset-user" class="mono"></b>:</span>
-      <input id="pw-reset-value" type="password" placeholder="heslo (nejméně 8 znaků)"
+      <span>new password for <b id="pw-reset-user" class="mono"></b>:</span>
+      <input id="pw-reset-value" type="password" placeholder="password (at least 8 characters)"
              autocomplete="new-password" size="22">
-      <button id="pw-reset-save" class="action">nastavit</button>
-      <button id="pw-reset-generate" class="action">vygenerovat</button>
-      <button id="pw-reset-cancel" class="ghost">zrušit</button>
-      <span class="hint">staré heslo přestane platit a přihlášení uživatele se ukončí</span>
+      <button id="pw-reset-save" class="action">set</button>
+      <button id="pw-reset-generate" class="action">generate</button>
+      <button id="pw-reset-cancel" class="ghost">cancel</button>
+      <span class="hint">the old password stops working and the user's sessions end</span>
     </div>
     <div id="users-error" class="section-foot hidden"></div>
   </section>
 
-  <!-- Administrace: konfigurace serveru ven a zpět, a vyprázdnění nasbíraných dat.
-       Tři operace, které se týkají Arcatum samotného, ne toho, co zálohuje. -->
+  <!-- Administration: the server configuration out and back, and emptying the collected data.
+       Three operations concerning Arcatum itself, not what it backs up. -->
   <section id="view-admin" class="view hidden">
 
     <div class="rot">
-      <h3>Odlehlá kopie</h3>
-      <p class="hint">Všechno, co server uloží, se průběžně kopíruje na druhý stroj, aby
-        tohle nebylo jediné místo, kde zálohy leží. Přerušená linka se projeví jako fronta,
-        která se po nápravě sama dožene — nikdy jako neúspěšná záloha.</p>
-      <div id="replica-summary"><p class="empty">načítám…</p></div>
+      <h3>Off-site replica</h3>
+      <p class="hint">Everything the server stores is continuously copied to a second machine,
+        so this is not the only place the backups sit. An interrupted link shows up as a queue
+        that catches up on its own once it is fixed — never as a failed backup.</p>
+      <div id="replica-summary"><p class="empty">loading…</p></div>
       <div class="section-foot admin-only">
-        <button id="replica-sync" class="action">synchronizovat teď</button>
-        <button id="replica-retry" class="action">zopakovat chybné</button>
+        <button id="replica-sync" class="action">sync now</button>
+        <button id="replica-retry" class="action">retry failed</button>
         <span id="replica-note" class="hint"></span>
       </div>
     </div>
 
     <div class="rot">
-      <h3>Záloha konfigurace</h3>
-      <p class="hint">Jeden zip s instancemi, uživateli a runnery. Hesla instancí v něm leží
-        přesně tak, jak jsou v databázi — tedy <b>zašifrovaná</b>, pokud je nastavený
-        <code>[secrets] master_key</code>. Klíče v archivu <b>nejsou</b>; ty patří k
-        <code>pki/</code> a zálohují se zvlášť (viz <i>docs/production.md</i>). Archiv přesto
-        obsahuje ověřovače hesel operátorů — zacházej s ním jako s citlivým souborem.</p>
+      <h3>Config backup</h3>
+      <p class="hint">A single zip with the instances, users and runners. Instance passwords sit
+        in it exactly as they are in the database — that is, <b>encrypted</b>, if
+        <code>[secrets] master_key</code> is set. The keys are <b>not</b> in the archive; they
+        belong with <code>pki/</code> and are backed up separately (see
+        <i>docs/production.md</i>). The archive does contain operator password verifiers, though
+        — treat it as a sensitive file.</p>
       <div class="section-foot">
-        <button id="config-export" class="action">stáhnout konfiguraci</button>
-        <span id="config-export-note" class="hint">běhy, logy ani data záloh v archivu nejsou</span>
+        <button id="config-export" class="action">download configuration</button>
+        <span id="config-export-note" class="hint">runs, logs and backup data are not in the archive</span>
       </div>
     </div>
 
     <div class="rot">
-      <h3>Obnovení konfigurace</h3>
-      <p class="hint">Import <b>nahradí celou konfiguraci</b> obsahem archivu: co v něm není,
-        tady po importu nebude. Nejdřív se ukáže, co se změní, a teprve pak se potvrzuje.
-        Data záloh, běhy ani logy se nemažou.</p>
+      <h3>Config restore</h3>
+      <p class="hint">The import <b>replaces the whole configuration</b> with the contents of the
+        archive: whatever is not in it will not be here after the import. What will change is
+        shown first, and only then do you confirm. Backup data, runs and logs are not
+        deleted.</p>
       <div class="section-foot">
         <input type="file" id="config-file" accept=".zip,application/zip">
-        <button id="config-check" class="action">zkontrolovat archiv</button>
+        <button id="config-check" class="action">check archive</button>
       </div>
       <div id="config-plan"></div>
     </div>
 
     <div class="rot">
-      <h3>Vyprázdnit server</h3>
-      <p class="hint">Smaže <b>všechny zálohy, dumpy a logy</b> i celou historii běhů.
-        Zůstanou klíče, uživatelé, instance a schválené runnery — server je hned zase
-        provozuschopný, jen bez čehokoli nasbíraného. Tohle je jediná akce v Arcatum,
-        která maže zálohy, a <b>nejde vzít zpět</b>.</p>
-      <div id="reset-summary"><p class="empty">načítám…</p></div>
+      <h3>Wipe the server</h3>
+      <p class="hint">Deletes <b>all backups, dumps and logs</b> as well as the entire run
+        history. The keys, users, instances and approved runners stay — the server is
+        immediately operational again, just without anything collected. This is the only action
+        in Arcatum that deletes backups, and it <b>cannot be undone</b>.</p>
+      <div id="reset-summary"><p class="empty">loading…</p></div>
       <div class="section-foot">
-        <input id="reset-confirm" placeholder="SMAZAT" size="10" autocapitalize="characters"
+        <input id="reset-confirm" placeholder="DELETE" size="10" autocapitalize="characters"
                spellcheck="false" autocomplete="off">
-        <button id="reset-run" class="action danger">smazat všechny zálohy a logy</button>
-        <span class="hint">pro potvrzení napiš do políčka SMAZAT</span>
+        <button id="reset-run" class="action danger">delete all backups and logs</button>
+        <span class="hint">to confirm, type DELETE into the field</span>
       </div>
       <div id="reset-note" class="hint"></div>
     </div>
   </section>
 
-  <!-- Vlastní heslo -->
+  <!-- Your own password -->
   <section id="view-account" class="view hidden">
     <div class="detail-head">
-      <button id="account-back" class="ghost">‹ zpět</button>
-      <h2 id="account-title">Změna hesla</h2>
+      <button id="account-back" class="ghost">‹ back</button>
+      <h2 id="account-title">Change password</h2>
       <span class="grow"></span>
       <span id="account-error" class="hint"></span>
     </div>
     <div class="field">
-      <label>současné heslo</label>
+      <label>current password</label>
       <div><input id="pw-current" type="password" autocomplete="current-password"></div>
     </div>
     <div class="field">
-      <label>nové heslo</label>
+      <label>new password</label>
       <div>
         <input id="pw-new" type="password" autocomplete="new-password">
-        <div class="hint">nejméně 8 znaků</div>
+        <div class="hint">at least 8 characters</div>
       </div>
     </div>
     <div class="field">
-      <label>nové heslo znovu</label>
+      <label>new password again</label>
       <div><input id="pw-again" type="password" autocomplete="new-password"></div>
     </div>
     <div class="section-foot">
-      <button id="pw-save" class="action">změnit heslo</button>
-      <span class="hint">po změně se přihlásíš znovu — tím se nové heslo hned potvrdí</span>
+      <button id="pw-save" class="action">change password</button>
+      <span class="hint">you will sign in again afterwards — that confirms the new password right away</span>
     </div>
   </section>
 
-  <!-- Detail běhu s živým tailem -->
+  <!-- Run detail with a live tail -->
   <section id="view-detail" class="view hidden">
     <div class="detail-head">
-      <button id="back" class="ghost">‹ zpět</button>
-      <h2 id="detail-title">Běh</h2>
+      <button id="back" class="ghost">‹ back</button>
+      <h2 id="detail-title">Run</h2>
       <span id="detail-status" class="badge"></span>
       <span class="grow"></span>
-      <button id="detail-stop" class="action admin-only hidden">zastavit</button>
-      <label class="follow"><input type="checkbox" id="follow" checked> sledovat</label>
+      <button id="detail-stop" class="action admin-only hidden">stop</button>
+      <label class="follow"><input type="checkbox" id="follow" checked> follow</label>
       <select id="stream">
         <option value="stdout">stdout</option>
         <option value="stderr">stderr</option>

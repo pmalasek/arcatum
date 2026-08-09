@@ -1,82 +1,83 @@
-# Rozjetí serveru v `/opt/arcatum`
+# Bringing the server up in `/opt/arcatum`
 
-Návod pro **testovací stroj**: jsi přihlášený na počítači, kde má Arcatum běžet, a leží tu
-checkout repozitáře. Nic se nikam nepřenáší — postaví se to tady a rovnou se to odsud
-nainstaluje do `/opt/arcatum`.
+A guide for a **test machine**: you are logged in on the computer where Arcatum is meant to
+run, and a checkout of the repository is sitting here. Nothing is transferred anywhere — it is
+built here and installed straight from here into `/opt/arcatum`.
 
-Zabezpečení je zapnuté i tady (mTLS, podepsané úlohy, šifrované secrets) — nedělá se to
-kvůli přísnosti, ale proto, že vypnuté by to bylo něco jiného, než co pak pojede ostře.
-Vývojový režim nad `local/` (plain HTTP, bez ověřování) je jiná věc a je v
-[README → Rychlý start](../README.md#rychlý-start-lokální-vyzkoušení).
+Security is enabled here too (mTLS, signed jobs, encrypted secrets) — not out of strictness,
+but because with it turned off this would be something other than what will run for real. The
+development mode over `local/` (plain HTTP, no authentication) is a different thing and is
+covered in [README → Quick start](../README.md#quick-start-trying-it-locally).
 
-> **Nasazení na cizí stroj (balík + `scp`) tady zatím není** — až tohle odladíme, přibude
-> sem druhá kapitola. Zatím platí: `/opt/arcatum` a checkout jsou na jednom stroji.
+> **Deployment onto a remote machine (a bundle + `scp`) is not here yet** — once we have this
+> debugged, a second chapter will be added. For now: `/opt/arcatum` and the checkout are on the
+> same machine.
 
-- [Předpoklady](#předpoklady)
-- [Celý postup](#celý-postup)
-- [1. Postavit binárky](#1-postavit-binárky)
-- [2. Nainstalovat do `/opt/arcatum`](#2-nainstalovat-do-optarcatum)
-- [3. První start na popředí](#3-první-start-na-popředí)
-- [4. Pustit to jako službu](#4-pustit-to-jako-službu)
-- [5. Ověřit](#5-ověřit)
-- [6. Web](#6-web)
-- [7. Runner na tomtéž stroji](#7-runner-na-tomtéž-stroji)
-- [8. Testovací instance a první běh](#8-testovací-instance-a-první-běh)
-- [Ladicí smyčka](#ladicí-smyčka)
-- [Začít znovu od nuly](#začít-znovu-od-nuly)
-- [Kde co leží](#kde-co-leží)
+- [Prerequisites](#prerequisites)
+- [The whole procedure](#the-whole-procedure)
+- [1. Build the binaries](#1-build-the-binaries)
+- [2. Install into `/opt/arcatum`](#2-install-into-optarcatum)
+- [3. The first start in the foreground](#3-the-first-start-in-the-foreground)
+- [4. Run it as a service](#4-run-it-as-a-service)
+- [5. Verify](#5-verify)
+- [6. The web UI](#6-the-web-ui)
+- [7. A runner on the same machine](#7-a-runner-on-the-same-machine)
+- [8. A test instance and the first run](#8-a-test-instance-and-the-first-run)
+- [The debugging loop](#the-debugging-loop)
+- [Starting again from scratch](#starting-again-from-scratch)
+- [Where things live](#where-things-live)
 - [`server.toml`](#servertoml)
-- [Systemd unit](#systemd-unit)
-- [Když to nejede](#když-to-nejede)
+- [The systemd unit](#the-systemd-unit)
+- [When it does not work](#when-it-does-not-work)
 
 ---
 
-## Předpoklady
+## Prerequisites
 
-| Co | Proč | Ověření |
+| What | Why | How to check |
 |---|---|---|
-| Go 1.26+ | staví se tady | `go version` |
-| `just` | recepty na build | `just --version` |
-| systemd | služba `arcatum-server` | — |
-| `restic` | **obnova dat a velikost repozitářů běží na serveru** | `restic version` |
-| `rsync` (volitelný) | instalátor jím srovnává `scripts/` | `command -v rsync` |
+| Go 1.26+ | it is built here | `go version` |
+| `just` | build recipes | `just --version` |
+| systemd | the `arcatum-server` service | — |
+| `restic` | **data restore and repository sizes run on the server** | `restic version` |
+| `rsync` (optional) | the installer syncs `scripts/` with it | `command -v rsync` |
 
-Go v tomhle prostředí není na `PATH`:
+Go is not on `PATH` in this environment:
 
 ```sh
 export PATH=/usr/local/go/bin:$PATH
 ```
 
-Bez `rsync` instalátor `scripts/` jen zkopíruje (`cp -a`) a upozorní na to. Rozdíl je jen
-v tom, že smazaný manifest v `/opt/arcatum/scripts` zůstane ležet — při ladění skriptů na to
-narazíš, tak buď `apt install rsync`, nebo ten soubor smaž ručně.
+Without `rsync` the installer merely copies `scripts/` (`cp -a`) and says so. The only
+difference is that a deleted manifest stays behind in `/opt/arcatum/scripts` — you will run
+into this while debugging scripts, so either `apt install rsync` or delete that file by hand.
 
-Adresa, na kterou se budou runnery připojovat, jde do certifikátu serveru a do `api_url`.
-Na testovacím stroji je to jeho vlastní IP a hostname:
+The address the runners will connect to goes into the server certificate and into `api_url`.
+On a test machine that is its own IP and hostname:
 
 ```sh
 hostname -s        # backup-central
 hostname -I        # 172.24.0.60
 ```
 
-Dosaď je do `-H` v kroku 2. V celém návodu je to `172.24.0.60,backup-central`.
+Substitute them into `-H` in step 2. Throughout this guide it is `172.24.0.60,backup-central`.
 
-## Celý postup
+## The whole procedure
 
-Šest příkazů; zbytek dokumentu je rozepisuje.
+Six commands; the rest of the document spells them out.
 
 ```sh
 export PATH=/usr/local/go/bin:$PATH
 cd /root/src/backup_central
 
-just release && just dist-runner bin                      # 1. binárky
-deploy/install-server.sh -H 172.24.0.60,backup-central    # 2. do /opt/arcatum
-cd /root && arcatum-server -instances /dev/null           # 3. zkusmý start, Ctrl-C ukončí
-systemctl enable --now arcatum-server                     # 4. služba
+just release && just dist-runner bin                      # 1. the binaries
+deploy/install-server.sh -H 172.24.0.60,backup-central    # 2. into /opt/arcatum
+cd /root && arcatum-server -instances /dev/null           # 3. a trial start, Ctrl-C ends it
+systemctl enable --now arcatum-server                     # 4. the service
 journalctl -u arcatum-server -n 30
 ```
 
-## 1. Postavit binárky
+## 1. Build the binaries
 
 ```sh
 cd /root/src/backup_central
@@ -84,65 +85,69 @@ just release          # bin/arcatum-server, bin/arcatum-ca, bin/arcatum-runner
 just dist-runner bin  # bin/arcatum-runner-linux-{amd64,arm64} + bin/VERSION
 ```
 
-Instalátor nic nestaví — jen rozmisťuje to, co v `bin/` najde. Proto oba recepty; druhý
-vyrábí binárky, které si stahují zálohované hosty, a soubor `VERSION`, bez kterého se
-runnerům žádná aktualizace nenabídne.
+The installer builds nothing — it only distributes what it finds in `bin/`. Hence both
+recipes; the second produces the binaries the backed-up hosts download, and the `VERSION`
+file, without which no update is offered to the runners.
 
-Verze se vypaluje do binárek přes `-ldflags` a bere se z `V` (výchozí dnešní datum). Vlastní
-si vynutíš `V=test1 just release`; nestampovaný build se hlásí jako `dev`.
+The version is baked into the binaries through `-ldflags` and taken from `V` (today's date by
+default). You force your own with `V=test1 just release`; an unstamped build reports itself as
+`dev`.
 
-## 2. Nainstalovat do `/opt/arcatum`
+## 2. Install into `/opt/arcatum`
 
 ```sh
 deploy/install-server.sh -H 172.24.0.60,backup-central -a petr
 ```
 
-Spouští se **z checkoutu** a instaluje z něj (`bin/` a `scripts/` vedle sebe). Musí běžet
-jako root; `-n` je suchý běh, který jen vypíše, co by udělal.
+It is run **from the checkout** and installs from it (`bin/` and `scripts/` side by side). It
+must run as root; `-n` is a dry run that only prints what it would do.
 
-Co udělá:
+What it does:
 
-- založí `/opt/arcatum/{bin,pki,dist,scripts}`, `/etc/arcatum` a `/central_backup/arcatum`,
-- nainstaluje `arcatum-server` a `arcatum-ca` do `/opt/arcatum/bin` a udělá na ně symlinky
-  v `/usr/local/bin` (proto se dál píše jen `arcatum-server`),
-- nakopíruje `bin/arcatum-runner-linux-*` a `VERSION` do `dist/`,
-- srovná `scripts/` — **definice skriptů jsou jediná věc, kterou server čte z disku**; web
-  UI i `install.sh` jsou zakompilované v binárce,
-- vygeneruje PKI, napíše `/etc/arcatum/server.toml` a systemd unit.
+- creates `/opt/arcatum/{bin,pki,dist,scripts}`, `/etc/arcatum` and `/central_backup/arcatum`,
+- installs `arcatum-server` and `arcatum-ca` into `/opt/arcatum/bin` and symlinks them into
+  `/usr/local/bin` (which is why from here on we just write `arcatum-server`),
+- copies `bin/arcatum-runner-linux-*` and `VERSION` into `dist/`,
+- syncs `scripts/` — **script definitions are the only thing the server reads from disk**; the
+  web UI and `install.sh` are compiled into the binary,
+- generates the PKI, writes `/etc/arcatum/server.toml` and the systemd unit.
 
-**Co už existuje, nechá být.** Config, PKI ani unit se po prvním zápisu nikdy nepřepisují —
-tvoje úpravy tedy přežijou každý další běh a tentýž příkaz je zároveň postup pro
-přeinstalaci po změně kódu ([ladicí smyčka](#ladicí-smyčka)).
+**Whatever already exists is left alone.** The config, the PKI and the unit are never
+overwritten after the first write — so your edits survive every subsequent run, and the same
+command is also the procedure for reinstalling after a code change
+([the debugging loop](#the-debugging-loop)).
 
-Přepínače, které se hodí: `-b` jiný `backup_dir`, `-p` jiný prefix (třeba druhá instance
-vedle), `-n` suchý běh.
+Handy flags: `-b` for a different `backup_dir`, `-p` for a different prefix (a second instance
+alongside, say), `-n` for a dry run.
 
-> **`-a petr` platí jen při zakládání PKI.** Je to jméno v klientském certifikátu pro volání
-> API ze shellu (`pki/admin-petr.pem` a `.key`) — do prohlížeče se nepoužívá, tam je jméno
-> a heslo. Když PKI už existuje, instalátor ji nechá být a `-a` se **neprojeví**; na tomhle
-> stroji je proto certifikát `admin-admin.*`. Další si vydáš kdykoli:
+> **`-a petr` only applies when the PKI is being created.** It is the name in the client
+> certificate for calling the API from a shell (`pki/admin-petr.pem` and `.key`) — it is not
+> used in a browser, where a username and password apply. When the PKI already exists, the
+> installer leaves it alone and `-a` **has no effect**; on this machine the certificate is
+> therefore `admin-admin.*`. You can issue another one at any time:
 >
 > ```sh
 > arcatum-ca admin -dir /opt/arcatum/pki -name petr
 > ```
 
-Na konci vypíše instalátor cestu ke klientskému certifikátu a sekci `Check:` s tím, co
-chybí. Přečti si ji.
+At the end the installer prints the path to the client certificate and a `Check:` section with
+what is missing. Read it.
 
-## 3. První start na popředí
+## 3. The first start in the foreground
 
-Instalátor službu **nespouští**. První start patří na popředí, kde je hned vidět, jestli
-config a PKI drží:
+The installer does **not** start the service. The first start belongs in the foreground, where
+it is immediately visible whether the config and the PKI hold together:
 
 ```sh
 cd /root && arcatum-server -instances /dev/null
 ```
 
-`-config` tu schválně není: server si config najde sám — nejdřív `./server.toml`, pak
-`/etc/arcatum/server.toml`. `cd /root` je ujištění, že se spouští odjinud než z adresáře
-s vlastním `server.toml` (checkout jeden takový pro vývoj má v `local/`).
+`-config` is deliberately absent here: the server finds its config itself — first
+`./server.toml`, then `/etc/arcatum/server.toml`. The `cd /root` is a reassurance that it is
+started from somewhere other than a directory with its own `server.toml` (the checkout has one
+such for development in `local/`).
 
-Chceš vidět tohle:
+This is what you want to see:
 
 ```
 configuration from /etc/arcatum/server.toml
@@ -156,12 +161,12 @@ arcatum-server listening on 0.0.0.0:8443
   web UI (plain HTTP, password login) on 0.0.0.0:8080
 ```
 
-**První řádek kontroluj vždycky** — jsou-li certifikáty jiné, než čekáš, obvykle je jiný
-i config. Žádné `WARNING` tam být nesmí; `no [tls]` nebo `no [secrets] master_key` znamená,
-že server jede nezabezpečeně a config je špatně.
+**Always check the first line** — if the certificates are different from what you expect, the
+config is usually different too. There must be no `WARNING` there; `no [tls]` or
+`no [secrets] master_key` means the server is running insecurely and the config is wrong.
 
-Když je databáze **prázdná** (první start vůbec), vypíše se tady jednou vygenerované heslo
-webového účtu `admin` — opiš si ho:
+When the database is **empty** (the very first start), the generated password of the `admin`
+web account is printed here once — write it down:
 
 ```
   ┌─ first start: created the web account ─────────────────────
@@ -169,33 +174,33 @@ webového účtu `admin` — opiš si ho:
   │   password: k4m2ftq7hn3bwzla
 ```
 
-Když už databáze existuje (na tomhle stroji ano, běhy z minula v ní leží), účet tam je
-a nic se nevypisuje. Heslo si přenastav:
+When the database already exists (on this machine it does, with runs from earlier in it), the
+account is there and nothing is printed. Reset the password:
 
 ```sh
-arcatum-server -passwd admin                      # vygeneruje a vypíše nové
-ARCATUM_PASSWORD='tajneheslo' arcatum-server -passwd admin   # nebo konkrétní
+arcatum-server -passwd admin                      # generates and prints a new one
+ARCATUM_PASSWORD='secretpass' arcatum-server -passwd admin   # or a specific one
 ```
 
-Ctrl-C ukončí.
+Ctrl-C ends it.
 
-> Server bez configu **nenastartuje vůbec** a je to záměr — vestavěné výchozí hodnoty
-> znamenají plain HTTP a hesla instancí v plaintextu, takže překlep v cestě nemá tiše
-> zapnout nezabezpečený server. Fatální je i vadný manifest ve `scripts/`. Naopak
-> **zapomenutý celý adresář `scripts/` start nezastaví**: katalog jen zůstane prázdný
-> a pozná se to tím, že web nenabízí žádný skript.
+> A server without a config **does not start at all**, and that is intentional — the built-in
+> defaults mean plain HTTP and instance passwords in plaintext, so a typo in a path must not
+> silently bring up an insecure server. A broken manifest under `scripts/` is fatal too.
+> Forgetting the whole `scripts/` directory, on the other hand, **does not stop the startup**:
+> the catalogue simply stays empty, which shows up as the web UI offering no scripts.
 
-## 4. Pustit to jako službu
+## 4. Run it as a service
 
 ```sh
 systemctl enable --now arcatum-server
 journalctl -u arcatum-server -n 30
 ```
 
-Unit už na disku je, napsal ho instalátor ([obsah a proč](#systemd-unit)). V logu hledej
-totéž co v kroku 3.
+The unit is already on disk, written by the installer ([contents and why](#the-systemd-unit)).
+Look for the same things in the log as in step 3.
 
-## 5. Ověřit
+## 5. Verify
 
 ```sh
 A=(--cacert /opt/arcatum/pki/ca.pem
@@ -203,66 +208,71 @@ A=(--cacert /opt/arcatum/pki/ca.pem
    --key /opt/arcatum/pki/admin-admin.key)
 
 curl "${A[@]}" https://172.24.0.60:8443/api/v1/whoami     # {"role":"admin","secured":true,…}
-curl "${A[@]}" https://172.24.0.60:8443/status            # textový přehled + katalog skriptů
-curl "${A[@]}" https://172.24.0.60:8443/api/v1/scripts    # co načetl ze scripts/
-curl -k       https://172.24.0.60:8443/api/v1/runs        # MUSÍ selhat na handshaku
-curl -sS      http://172.24.0.60/                         # bootstrap: nápověda k runneru
+curl "${A[@]}" https://172.24.0.60:8443/status            # a text overview + the script catalogue
+curl "${A[@]}" https://172.24.0.60:8443/api/v1/scripts    # what it loaded from scripts/
+curl -k       https://172.24.0.60:8443/api/v1/runs        # MUST fail at the handshake
+curl -sS      http://172.24.0.60/                         # bootstrap: runner instructions
 ```
 
-Že volání **bez** certifikátu selže, je stejně důležité jako že s ním projde — je to důkaz,
-že mTLS opravdu platí. Prázdná odpověď z `/api/v1/scripts` znamená zapomenutý `scripts/`,
-ne chybu v logu.
+That a call **without** a certificate fails matters just as much as that one with it goes
+through — it is the proof that mTLS really applies. An empty response from `/api/v1/scripts`
+means a forgotten `scripts/`, not an error in the log.
 
-## 6. Web
+## 6. The web UI
 
 ```
 http://172.24.0.60:8080/
 ```
 
-Účet `admin` a heslo z kroku 3. Do prohlížeče se nic neinstaluje ani neimportuje — web je
-plain HTTP s přihlášením jménem a heslem, admin certifikát je jen na `curl` na port 8443.
+The `admin` account and the password from step 3. Nothing is installed or imported into the
+browser — the web UI is plain HTTP with username-and-password login, the admin certificate is
+only for `curl` against port 8443.
 
-Na testovacím stroji to takhle stačí. Pro ostrý provoz platí, že web patří do vnitřní sítě,
-a když má být vidět dál, staví se před něj HTTPS reverse proxy a zapíná `[web]
-secure_cookie = true` (bez proxy tu volbu nezapínej, přihlášení by přestalo fungovat).
+On a test machine this is enough as it is. For real operation the rule is that the web UI
+belongs on the internal network, and when it has to be visible further out, an HTTPS reverse
+proxy goes in front of it and `[web] secure_cookie = true` is enabled (do not enable that
+option without a proxy, logging in would stop working).
 
-## 7. Runner na tomtéž stroji
+## 7. A runner on the same machine
 
-Aby bylo co zkoušet, potřebuješ runner. Na testovacím stroji klidně tentýž počítač:
+To have something to try, you need a runner. On a test machine the same computer will happily
+do:
 
 ```sh
 curl -LsSf http://172.24.0.60/arcatum_runner/install.sh | sh
 ```
 
-Skript stáhne binárku pro tuhle platformu, `ca.pem` a podepisovací veřejný klíč, napíše
-`/etc/arcatum-runner/runner.toml`, nainstaluje systemd službu a spustí ji. Adresu
-bootstrapu si odvodí z URL, ze které se sám stáhl; adresu API bere z `[bootstrap] api_url`
-v configu serveru — proto tam musí být adresa, která je zároveň v SAN certifikátu.
+The script downloads the binary for this platform, `ca.pem` and the signing public key, writes
+`/etc/arcatum-runner/runner.toml`, installs a systemd service and starts it. It derives the
+bootstrap address from the URL it was downloaded from; it takes the API address from
+`[bootstrap] api_url` in the server config — which is why that has to be an address that is
+also in the certificate's SAN.
 
-Runner si vygeneruje **vlastní** klíč (nikdy neopustí hostitele) a pošle jen žádost
-o podpis. Pak čeká, a to je správný stav:
+The runner generates **its own** key (it never leaves the host) and sends only a signing
+request. Then it waits, and that is the correct state:
 
 ```sh
 systemctl status arcatum-runner
 journalctl -u arcatum-runner -f
 ```
 
-Ve webu v záložce **Runnery** žádost **schval**. Jeho `runner_id` je `hostname -s`, tedy
-`backup-central` — tohle jméno pak patří do `runner_id` instancí.
+In the web UI, on the **Runners** tab, **approve** the request. Its `runner_id` is
+`hostname -s`, i.e. `backup-central` — that name then belongs in the `runner_id` of the
+instances.
 
 ```sh
-curl "${A[@]}" https://172.24.0.60:8443/api/v1/runners   # stav, platforma, verze, last_seen
+curl "${A[@]}" https://172.24.0.60:8443/api/v1/runners   # status, platform, version, last_seen
 ```
 
-## 8. Testovací instance a první běh
+## 8. A test instance and the first run
 
-Ve webu **Instance → nová instance**, skript `hello`. Formulář se sestaví z parametrů
-manifestu ([`scripts/example/hello.toml`](../scripts/example/hello.toml)), takže stačí
-vyplnit `name`, `target` a `token` a jako runner vybrat `backup-central`. `hello` schválně
-nepotřebuje žádný externí nástroj — projde celou cestou od rozvrhu po zachycený výstup,
-takže když doběhne, funguje řetěz, ne skript.
+In the web UI, **Instances → new instance**, script `hello`. The form is assembled from the
+manifest parameters ([`scripts/example/hello.toml`](../scripts/example/hello.toml)), so it is
+enough to fill in `name`, `target` and `token` and pick `backup-central` as the runner.
+`hello` deliberately needs no external tool — it goes the whole way from the schedule to the
+captured output, so when it finishes, it is the chain that works, not the script.
 
-Pak **spustit teď** a sleduj živý tail v detailu běhu. Totéž ze shellu:
+Then **run now** and watch the live tail in the run detail. The same from a shell:
 
 ```sh
 curl "${A[@]}" -X POST https://172.24.0.60:8443/api/v1/instances/hello-demo/run
@@ -270,20 +280,21 @@ curl "${A[@]}" https://172.24.0.60:8443/api/v1/runs?limit=5
 curl "${A[@]}" https://172.24.0.60:8443/api/v1/runs/run-1/output
 ```
 
-ID běhu má tvar `run-1` — s holým číslem vrátí endpointy výstupu prázdné tělo, ne chybu.
-Výstup leží i na disku v `/central_backup/arcatum/runs/<run_id>/{stdout,stderr}.log`.
+A run ID has the form `run-1` — with a bare number the output endpoints return an empty body,
+not an error. The output is also on disk in
+`/central_backup/arcatum/runs/<run_id>/{stdout,stderr}.log`.
 
-Až tohle projde, zkus `files-backup` — ten už sahá na restic a je to první věc, která
-opravdu něco zálohuje.
+Once this passes, try `files-backup` — that one already reaches for restic and is the first
+thing that really backs anything up.
 
 ---
 
-## Ladicí smyčka
+## The debugging loop
 
-Tohle budeš pouštět nejčastěji. Co se změnilo, určuje, kolik toho musíš udělat:
+This is what you will be running most often. What changed determines how much you have to do:
 
-**Změna v Go kódu** — přestavět, přeinstalovat, restartovat. Instalátor si běžící službu
-restartuje sám:
+**A change in the Go code** — rebuild, reinstall, restart. The installer restarts a running
+service itself:
 
 ```sh
 cd /root/src/backup_central
@@ -292,42 +303,45 @@ deploy/install-server.sh
 journalctl -u arcatum-server -n 30
 ```
 
-`-H` se už nepíše, PKI i config existují. Přes běžící binárku se přímo psát nedá
-(`Text file busy`), proto ji instalátor ukládá vedle a přejmenovává na místo.
+`-H` is no longer written, the PKI and the config exist. A running binary cannot be written to
+directly (`Text file busy`), which is why the installer stores it alongside and renames it into
+place.
 
-**Změna ve `scripts/*.toml` nebo ve skriptu** — katalog se čte při startu, takže je potřeba
-`deploy/install-server.sh` (nakopíruje je do `/opt/arcatum/scripts`) **a restart**:
+**A change in `scripts/*.toml` or in a script** — the catalogue is read at startup, so
+`deploy/install-server.sh` (which copies them into `/opt/arcatum/scripts`) **and a restart**
+are needed:
 
 ```sh
 deploy/install-server.sh && systemctl restart arcatum-server
 ```
 
-Nový nebo změněný skript se dřív neprojeví. Vadný manifest naopak start zastaví, tak se po
-restartu vždycky podívej do logu.
+A new or changed script does not take effect earlier. A broken manifest, by contrast, stops the
+startup, so always look into the log after a restart.
 
-**Změna instance, parametrů nebo rozvrhu** — nic. Platí to hned, restart není potřeba.
+**A change to an instance, its parameters or schedule** — nothing. It takes effect immediately,
+no restart needed.
 
-**Změna `server.toml`** — jen restart, instalátor na config nesahá:
+**A change to `server.toml`** — a restart only, the installer does not touch the config:
 
 ```sh
 systemctl restart arcatum-server
 ```
 
-**Runner** se aktualizuje sám z `dist/`, když se změní `VERSION`; při ladění je rychlejší ho
-restartovat rovnou:
+**The runner** updates itself from `dist/` when `VERSION` changes; while debugging it is faster
+to restart it directly:
 
 ```sh
 systemctl restart arcatum-runner
 journalctl -u arcatum-runner -f
 ```
 
-Restart serveru mimochodem **přeskočí** běh, který měl v tu chvíli padnout — scheduler je
-v paměti a rozvrhy se po startu počítají od aktuálního času. Na testu je to jedno, na ostrém
-stroji ne.
+A server restart, incidentally, **skips** a run that was due at that moment — the scheduler is
+in memory and schedules are computed from the current time after a start. On a test machine
+that does not matter; on a production one it does.
 
-## Začít znovu od nuly
+## Starting again from scratch
 
-Když chceš čistý stůl (nová PKI, prázdná databáze, žádné instance):
+When you want a clean slate (a new PKI, an empty database, no instances):
 
 ```sh
 systemctl disable --now arcatum-server arcatum-runner
@@ -335,132 +349,138 @@ systemctl disable --now arcatum-server arcatum-runner
 rm -rf /opt/arcatum /etc/arcatum /central_backup/arcatum
 rm -f /etc/systemd/system/arcatum-server.service /usr/local/bin/arcatum-{server,ca}
 
-# runner na tomhle stroji, pokud jsi ho instaloval
+# the runner on this machine, if you installed it
 rm -rf /etc/arcatum-runner /var/lib/arcatum-runner /usr/local/bin/arcatum-runner
 rm -f /etc/systemd/system/arcatum-runner.service
 
 systemctl daemon-reload
 ```
 
-Pak zpátky na [krok 1](#1-postavit-binárky). Instalace je jeden adresář právě proto, aby
-tohle šlo — nikde nezůstane ležet binárka z minulé verze.
+Then back to [step 1](#1-build-the-binaries). The installation is a single directory precisely
+so this works — no binary from a previous version is left lying anywhere.
 
-> Smazáním `/opt/arcatum/pki` zahodíš i `secrets-master.key`, kterým jsou zašifrovaná hesla
-> instancí, a `ca.key`, kterému věří všechny už schválené runnery. Na testovacím stroji je
-> to přesně to, co chceš. Na ostrém by to znamenalo, že se k datům v restic repozitářích už
-> nedostaneš — proto se tyhle tři klíče (`secrets-master.key`, `ca.key`,
-> `dispatch-signing.key`) při ostrém nasazení odnášejí zašifrovaně mimo stroj.
+> Deleting `/opt/arcatum/pki` also throws away `secrets-master.key`, which the instance
+> passwords are encrypted with, and `ca.key`, which every already-approved runner trusts. On a
+> test machine that is exactly what you want. On a production one it would mean you can no
+> longer get at the data in the restic repositories — which is why these three keys
+> (`secrets-master.key`, `ca.key`, `dispatch-signing.key`) are carried off the machine
+> encrypted in a real deployment.
 
-Když chceš nechat PKI a vyhodit jen data, stačí `rm -rf /central_backup/arcatum` — server si
-databázi i adresáře založí znovu při startu.
+When you want to keep the PKI and throw away only the data, `rm -rf /central_backup/arcatum` is
+enough — the server creates the database and the directories again at startup.
 
-## Kde co leží
+## Where things live
 
 ```
-/opt/arcatum/                     instalace                              instalátor
-  bin/                            arcatum-server, arcatum-ca             instalátor
-  pki/                            CA, certifikáty, podpisový a master klíč (0700)
-  dist/                           binárky runneru + VERSION              instalátor
-  scripts/                        DEFINICE skriptů — server je čte za běhu
+/opt/arcatum/                     the installation                       installer
+  bin/                            arcatum-server, arcatum-ca             installer
+  pki/                            CA, certificates, signing and master key (0700)
+  dist/                           runner binaries + VERSION              installer
+  scripts/                        script DEFINITIONS — the server reads them at runtime
 
-/etc/arcatum/server.toml          konfigurace                            instalátor
-/usr/local/bin/arcatum-server     symlink na /opt/arcatum/bin/
-/usr/local/bin/arcatum-ca         symlink na /opt/arcatum/bin/
+/etc/arcatum/server.toml          configuration                          installer
+/usr/local/bin/arcatum-server     symlink into /opt/arcatum/bin/
+/usr/local/bin/arcatum-ca         symlink into /opt/arcatum/bin/
 
-/central_backup/arcatum/          backup_dir — nic než data
-  data/arcatum.db                 SQLite (instance, běhy, runnery, účty)  server
-  runs/<run_id>/{stdout,stderr}.log   zachycený výstup běhů               server
-  restic/<instance>/              restic repozitář každé instance         server
-  config-backups/                 konfigurace uložená před každým importem  server
+/central_backup/arcatum/          backup_dir — nothing but data
+  data/arcatum.db                 SQLite (instances, runs, runners, accounts)  server
+  runs/<run_id>/{stdout,stderr}.log   the captured output of runs             server
+  restic/<instance>/              the restic repository of each instance       server
+  config-backups/                 the configuration saved before every import  server
 ```
 
-Dělicí čára je jednoduchá: **do `backup_dir` ručně nesaháš.** Všechno pod ním si zakládá
-a píše server sám. Co tam kopíruješ ty, tam nepatří — patří to do `/opt/arcatum`.
+The dividing line is simple: **you never touch `backup_dir` by hand.** Everything under it is
+created and written by the server itself. What you copy there does not belong there — it
+belongs in `/opt/arcatum`.
 
-Runner do `bin/` nejde: centrální server ho **neinstaluje**, jen rozdává, a proto leží
-v `dist/` pod jménem `arcatum-runner-linux-<arch>`. Jiné jméno bootstrap nenajde a instalace
-runneru skončí na 404.
+The runner does not go into `bin/`: the central server does **not install** it, it only hands
+it out, which is why it lives in `dist/` under the name `arcatum-runner-linux-<arch>`. The
+bootstrap will not find any other name and installing a runner ends in a 404.
 
-PKI schválně není v `backup_dir`: `secrets-master.key` dešifruje hesla restic repozitářů,
-takže na stejném svazku jako `restic/` by jedna odnesená kopie znamenala zašifrovaná data
-i klíč k nim v jednom balíku.
+The PKI is deliberately not in `backup_dir`: `secrets-master.key` decrypts the passwords of the
+restic repositories, so on the same volume as `restic/` a single carried-off copy would mean
+the encrypted data and the key to it in one package.
 
-### Co zálohovat ze samotného Arcatum
+### What to back up from Arcatum itself
 
-Dvě věci, a každou jinak:
+Two things, each differently:
 
-1. **`/opt/arcatum/pki/`** — CA klíč, podepisovací klíč a `secrets-master.key`. Ručně, mimo
-   tenhle stroj, a s vědomím, že kdo tohle má, má přístup ke všem repozitářům. Bez
-   `secrets-master.key` nejsou hesla instancí k ničemu, takže **tohle je ta část, jejíž
-   ztráta je nevratná**.
-2. **Konfigurace** — web, záložka **Administrace** → *stáhnout konfiguraci*, nebo
-   `GET /api/v1/config/export`. Jeden zip s instancemi, účty a runnery, bez klíčů a bez dat
-   záloh. Ten samý soubor se dá kdykoli nahrát zpátky a konfiguraci tím nahradit; podrobnosti
-   v [README](../README.md#záloha-konfigurace-a-reset-serveru).
+1. **`/opt/arcatum/pki/`** — the CA key, the signing key and `secrets-master.key`. By hand, off
+   this machine, and in the knowledge that whoever has this has access to every repository.
+   Without `secrets-master.key` the instance passwords are worthless, so **this is the part
+   whose loss is irreversible**.
+2. **The configuration** — the web UI, the **Administration** tab → *download configuration*,
+   or `GET /api/v1/config/export`. A single zip with the instances, accounts and runners, with
+   no keys and no backup data. That same file can be uploaded back at any time to replace the
+   configuration; the details are in the
+   [README](../README.md#config-backup-and-server-reset).
 
-Dělba je záměrná: klíče se mění jednou za rotaci a nepatří do žádného automatického exportu,
-konfigurace se mění průběžně a stáhnout si ji smí být otázka jednoho kliknutí. Obnova na
-novém stroji je tedy: nakopírovat `pki/`, nastavit `server.toml`, naimportovat zip.
+The split is deliberate: keys change once per rotation and do not belong in any automatic
+export, the configuration changes continuously and downloading it may well be a matter of one
+click. Recovery on a new machine is therefore: copy `pki/` over, set up `server.toml`, import
+the zip.
 
-Data záloh (`runs/`, `restic/`) jsou to největší. Buď se zálohují na úrovni svazku, nebo
-— a to je doporučená cesta — se zapne **odlehlá replika** níž, která je průběžně odlévá
-na druhý stroj i s klíči a snapshotem databáze. Bez ní je Arcatum pro ně poslední místo,
-kde leží.
+The backup data (`runs/`, `restic/`) is the largest part. It is either backed up at the volume
+level or — and this is the recommended route — the **off-site replica** below is enabled, which
+pours it continuously onto a second machine together with the keys and a database snapshot.
+Without it, Arcatum is the last place it sits.
 
-## Off-site replika
+## Off-site replica
 
-Druhý stroj, na který průběžně odtéká všechno, co server uloží. Návrh a chování jsou
-v [README](../README.md#odlehlá-kopie) a [architecture.md](architecture.md#21-odlehlá-kopie);
-tady je jen postup, jak to nachystat.
+A second machine everything the server stores flows onto continuously. The design and the
+behaviour are in the [README](../README.md#off-site-replica) and
+[architecture.md](architecture.md#21-off-site-replica); this is only the procedure for setting
+it up.
 
-### Na replice
+### On the replica
 
 ```sh
-# vyhrazený účet, který nemá dělat nic jiného
+# a dedicated account that should do nothing else
 useradd -r -m -d /var/lib/arcatum-replica -s /bin/sh arcatum
 install -d -o arcatum -g arcatum -m 700 /data
-apt-get install -y rsync                       # nebo dnf install rsync
+apt-get install -y rsync                       # or dnf install rsync
 ```
 
-Mód `0700` není kosmetika: při `include_keys = true` leží v `/data/keys/` master klíč
-i klíč CA, takže kdo se tam dostane, otevře každý repozitář a vydá certifikát libovolnému
-hostu. Ideálně na šifrovaném svazku.
+Mode `0700` is not cosmetic: with `include_keys = true` the master key and the CA key sit in
+`/data/keys/`, so whoever gets there opens every repository and can issue a certificate to any
+host. Ideally on an encrypted volume.
 
-### Klíč a jeho omezení
+### The key and its restrictions
 
-Na **Arcatum serveru** vyrob vyhrazený klíč jen pro tohle (bez passphrase — přenos běží
-bez obsluhy):
+On the **Arcatum server** create a dedicated key just for this (without a passphrase — the
+transfer runs unattended):
 
 ```sh
 ssh-keygen -t ed25519 -N '' -C arcatum-replica -f /opt/arcatum/pki/replica-ssh.key
 chmod 600 /opt/arcatum/pki/replica-ssh.key
 ```
 
-Veřejnou část zapiš na replice do `~arcatum/.ssh/authorized_keys` **omezenou**:
+Write the public part into `~arcatum/.ssh/authorized_keys` on the replica, **restricted**:
 
 ```
 from="172.26.0.1",restrict,command="rrsync /data" ssh-ed25519 AAAA… arcatum-replica
 ```
 
-- `restrict` vypne port forwarding, agenta i pty — klíč umí jen spustit `command`.
-- `command="rrsync /data"` udrží přenos uvnitř `/data`, i kdyby někdo ovládl Arcatum
-  server. (`rrsync` bývá v `/usr/share/rsync/scripts/` nebo `/usr/share/doc/rsync/scripts/`.)
-- `from=` omezí použití na adresu uvnitř WireGuard tunelu.
+- `restrict` turns off port forwarding, the agent and a pty — the key can only run `command`.
+- `command="rrsync /data"` keeps the transfer inside `/data`, even if someone took over the
+  Arcatum server. (`rrsync` is usually in `/usr/share/rsync/scripts/` or
+  `/usr/share/doc/rsync/scripts/`.)
+- `from=` limits its use to an address inside the WireGuard tunnel.
 
-Pak si přišpendli hostitelský klíč repliky, ať přenos nikdy nezůstane viset na otázce:
+Then pin the replica's host key so a transfer never hangs on a prompt:
 
 ```sh
 ssh-keyscan -H 172.26.0.2 > /opt/arcatum/pki/replica-known_hosts
-# fingerprint porovnej s tím, co hlásí replika: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+# compare the fingerprint with what the replica reports: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 ssh -i /opt/arcatum/pki/replica-ssh.key \
     -o UserKnownHostsFile=/opt/arcatum/pki/replica-known_hosts \
     arcatum@172.26.0.2 true && echo OK
 ```
 
-### V `server.toml`
+### In `server.toml`
 
-Sekci `[replica]` vezmi z [`config/server.example.toml`](../config/server.example.toml).
-Minimum, které dává smysl u nás:
+Take the `[replica]` section from [`config/server.example.toml`](../config/server.example.toml).
+The minimum that makes sense for us:
 
 ```toml
 [replica]
@@ -475,41 +495,42 @@ max_delete   = 100
 include_keys = true
 ```
 
-Server potřebuje mít nainstalovaný `rsync`; když chybí, replikace se vypne s hláškou
-v logu a jinak běží všechno dál.
+The server needs `rsync` installed; when it is missing, replication turns itself off with a
+message in the log and everything else keeps running.
 
-Po restartu se ve startovním logu objeví cíl a dvě varování, která nejsou chyby, jen
-připomínka toho, co jsi zapnul (klíče na replice, případně nepřišpendlený hostitelský
-klíč). Průběh je vidět v Administraci → **Odlehlá kopie**.
+After a restart the startup log shows the target and two warnings that are not errors, just a
+reminder of what you enabled (keys on the replica, and possibly an unpinned host key).
+Progress is visible under Administration → **Off-site replica**.
 
-### Na co si dát pozor
+### What to watch out for
 
-- **`max_delete`** musí být vyšší než kolik souborů odmaže běžná retence za hodinu,
-  a nižší než kolik jich je v celém `backup_dir`. Sto je rozumný začátek. Průchod nad
-  stropem se odmítne celý a je vidět jako chybná položka — je to zamýšlené chování, ne
-  porucha, a znamená „zkontroluj, že `backup_dir` je namountovaný a plný".
-- **Místo na replice.** Při `mirror = true` drží zhruba tolik, co `backup_dir`; při
-  vypnutém zrcadlení roste bez omezení.
-- **Obnova z repliky** je: nakopírovat `/data/keys/` do `pki/`, `/data/meta/arcatum.db`
-  do `data_dir`, `/data/restic/` a `/data/runs/` do `backup_dir`, upravit `server.toml`
-  a nastartovat. Vyzkoušej to nanečisto dřív, než to budeš potřebovat.
+- **`max_delete`** must be higher than the number of files ordinary retention deletes in an
+  hour, and lower than the number of them in the whole `backup_dir`. A hundred is a reasonable
+  start. A pass above the ceiling is refused as a whole and shows up as a failing item — that
+  is intended behaviour, not a fault, and it means "check that `backup_dir` is mounted and
+  full".
+- **Space on the replica.** With `mirror = true` it holds roughly as much as `backup_dir`;
+  with mirroring off it grows without limit.
+- **Restoring from the replica** goes: copy `/data/keys/` into `pki/`, `/data/meta/arcatum.db`
+  into `data_dir`, `/data/restic/` and `/data/runs/` into `backup_dir`, adjust `server.toml`
+  and start it. Try it as a dry run before you need it.
 
 ## `server.toml`
 
-Napsal ho instalátor a od té chvíle na něj nesahá. Ukázka s popisem každé volby je
-v [`config/server.example.toml`](../config/server.example.toml). Tohle je, co je na tomhle
-stroji:
+The installer wrote it and does not touch it from then on. An example with every option
+described is in [`config/server.example.toml`](../config/server.example.toml). This is what is
+on this machine:
 
 ```toml
 [server]
-listen    = "0.0.0.0:8443"                  # API pro runnery (mTLS)
-scripts   = "/opt/arcatum/scripts"          # absolutní cesta, ne relativní
+listen    = "0.0.0.0:8443"                  # API for runners (mTLS)
+scripts   = "/opt/arcatum/scripts"          # an absolute path, not a relative one
 data_dir  = "/central_backup/arcatum/data"
 timezone  = "Europe/Prague"
 log_level = "info"
 
 [web]
-listen      = "0.0.0.0:8080"                # web UI: plain HTTP, jméno a heslo
+listen      = "0.0.0.0:8080"                # web UI: plain HTTP, username and password
 session_ttl = "12h"
 
 [storage]
@@ -529,32 +550,34 @@ master_key = "/opt/arcatum/pki/secrets-master.key"
 [bootstrap]
 listen   = "0.0.0.0:80"
 dist_dir = "/opt/arcatum/dist"
-api_url  = "https://172.24.0.60:8443"       # tuhle adresu dostane runner do runner.toml
+api_url  = "https://172.24.0.60:8443"       # this is the address the runner gets in runner.toml
 ca_key   = "/opt/arcatum/pki/ca.key"
 ```
 
-**Kde se config hledá** bez `-config`: nejdřív `./server.toml`, pak
-`/etc/arcatum/server.toml`. Nenajde-li se ani jeden, server skončí chybou. Do `/opt/arcatum`
-proto `server.toml` **nedávej** — služba tam má `WorkingDirectory` a takový soubor by
-konfiguraci služby přebil.
+**Where the config is looked for** without `-config`: first `./server.toml`, then
+`/etc/arcatum/server.toml`. If neither is found, the server exits with an error. So do **not**
+put a `server.toml` into `/opt/arcatum` — the service has its `WorkingDirectory` there and such
+a file would override the service configuration.
 
-Co config **odmítne** už při startu, místo aby to tiše obešel:
+What the config **refuses** at startup instead of silently working around it:
 
-- `[tls]` vyplněné napůl — všechny tři cesty patří k sobě, jinak by to spadlo na plain HTTP,
-- `[tls]` bez `[signing] key` — runnery by neměly co ověřovat,
-- `[tls]` bez `[secrets] master_key` — hesla by ležela v `arcatum.db` v plaintextu,
-- `[bootstrap]` bez `api_url` nebo `ca_key`, případně bez `[tls]`,
-- dva listenery na stejné adrese (`[web]`, `[server]`, `[bootstrap]`),
-- nesmyslné `[web] session_ttl` — chybný údaj by tiše znamenal „nikdy nevyprší".
+- `[tls]` filled in halfway — all three paths belong together, otherwise it would fall back to
+  plain HTTP,
+- `[tls]` without `[signing] key` — the runners would have nothing to verify,
+- `[tls]` without `[secrets] master_key` — passwords would sit in `arcatum.db` in plaintext,
+- `[bootstrap]` without `api_url` or `ca_key`, or without `[tls]`,
+- two listeners on the same address (`[web]`, `[server]`, `[bootstrap]`),
+- a nonsensical `[web] session_ttl` — a wrong value would silently mean "never expires".
 
-Dvě věci, které se snadno popletou:
+Two things that are easy to mix up:
 
-- **`listen` vs. `api_url`.** `listen` je, kde server naslouchá; `api_url` je adresa, kterou
-  server zapíše do generovaného `runner.toml`. Svou vlastní dosažitelnou adresu nezná —
-  musíš mu ji říct.
-- **`log_level`** se načte, ale server dnes loguje jednou úrovní; `debug` víc nevypíše.
+- **`listen` vs. `api_url`.** `listen` is where the server listens; `api_url` is the address
+  the server writes into the generated `runner.toml`. It does not know its own reachable
+  address — you have to tell it.
+- **`log_level`** is read, but the server currently logs at a single level; `debug` prints no
+  more.
 
-## Systemd unit
+## The systemd unit
 
 ```ini
 [Unit]
@@ -581,65 +604,71 @@ ReadOnlyPaths=/opt/arcatum
 WantedBy=multi-user.target
 ```
 
-- **`-instances /dev/null`** — instance se spravují z webu a žijí v DB. Prázdný i chybějící
-  soubor server přejde bez chyby.
-- **`-config` je uvedený explicitně**, i když by ho hledání našlo samo: unit má
-  `WorkingDirectory=/opt/arcatum` a soubor podstrčený do pracovního adresáře nesmí
-  konfiguraci služby přebít. Při ladění ze shellu naopak `-config` vynechávej — dostaneš
-  tentýž config a nemáš co přepsat.
-- **`ReadOnlyPaths=/opt/arcatum`** — server odsud jen čte a zapisuje výhradně do
-  `backup_dir`. Aktualizaci to nebrání, instalátor běží mimo službu. Jiný `backup_dir` chce
-  i úpravu `ReadWritePaths`.
-- Bez `User=` běží služba jako root: čte privátní klíče a naváže port 80.
-  `AmbientCapabilities` je připravené na to, až poběží pod vlastním uživatelem.
+- **`-instances /dev/null`** — instances are managed from the web UI and live in the DB. The
+  server passes over an empty or missing file without an error.
+- **`-config` is given explicitly**, even though the lookup would find it anyway: the unit has
+  `WorkingDirectory=/opt/arcatum` and a file slipped into the working directory must not
+  override the service configuration. While debugging from a shell, leave `-config` out
+  instead — you get the same config and there is nothing to overwrite.
+- **`ReadOnlyPaths=/opt/arcatum`** — the server only reads from here and writes exclusively
+  into `backup_dir`. This does not prevent updates, the installer runs outside the service. A
+  different `backup_dir` also needs `ReadWritePaths` adjusted.
+- Without `User=` the service runs as root: it reads private keys and binds port 80.
+  `AmbientCapabilities` is prepared for when it runs under its own user.
 
-## Když to nejede
+## When it does not work
 
-**`TLS handshake error` v logu je normální.** Zapnuté mTLS znamená, že každý pokus
-o připojení bez správného certifikátu vypadá jako chyba. Server tím nehlásí nic o sobě —
-hlásí, co se mu nepovedlo od klienta:
+**`TLS handshake error` in the log is normal.** mTLS being on means every attempt to connect
+without the right certificate looks like an error. The server is not reporting anything about
+itself — it reports what went wrong on the client's side:
 
-| Text v logu | Příčina | Náprava |
+| Text in the log | Cause | Fix |
 |---|---|---|
-| `client sent an HTTP request to an HTTPS server` | `http://` na port 8443 | používej `https://` |
-| `remote error: tls: unknown certificate authority` | klient nezná `ca.pem` | `--cacert /opt/arcatum/pki/ca.pem` |
-| `tls: client didn't provide a certificate` | došlo to k mTLS, ale bez admin certifikátu | `--cert/--key` |
-| `remote error: tls: unknown certificate` | **klient odmítl certifikát serveru** — adresa není v jeho SAN | viz níž |
-| `remote error: tls: bad certificate` | certifikát vydala jiná CA (typicky po `rm -rf pki`) | vydej nový: `arcatum-ca admin …` |
+| `client sent an HTTP request to an HTTPS server` | `http://` against port 8443 | use `https://` |
+| `remote error: tls: unknown certificate authority` | the client does not know `ca.pem` | `--cacert /opt/arcatum/pki/ca.pem` |
+| `tls: client didn't provide a certificate` | it got to mTLS, but without an admin certificate | `--cert/--key` |
+| `remote error: tls: unknown certificate` | **the client rejected the server certificate** — the address is not in its SAN | see below |
+| `remote error: tls: bad certificate` | the certificate was issued by a different CA (typically after `rm -rf pki`) | issue a new one: `arcatum-ca admin …` |
 
-`remote error` znamená, že alert poslal **klient** — chyba je v tom, čemu nevěří on.
+`remote error` means the alert was sent by the **client** — the problem is in what it does not
+trust.
 
-**Adresa není v SAN certifikátu.** Co v něm je:
+**The address is not in the certificate's SAN.** What is in it:
 
 ```sh
 openssl x509 -in /opt/arcatum/pki/server.pem -noout -ext subjectAltName -dates
 ```
 
-Vydáš-li certifikát jen na IP, přes DNS jméno se nepřipojíš ani s CA — a naopak. Doplnit jde
-kdykoli, certifikát se prostě vydá znovu:
+If you issue the certificate for an IP only, you will not connect over the DNS name even with
+the CA — and vice versa. It can be added at any time, the certificate is simply reissued:
 
 ```sh
 arcatum-ca server -dir /opt/arcatum/pki -hosts 172.24.0.60,backup-central
 systemctl restart arcatum-server
 ```
 
-Runnerům se tím nic nerozbije, ověřují CA, která zůstává stejná. Změň ale i `[bootstrap]
-api_url`, míří-li na adresu, kterou jsi přidával.
+This breaks nothing for the runners, they verify the CA, which stays the same. Do change
+`[bootstrap] api_url` as well, though, if it points at the address you were adding.
 
-**Web nenabízí žádný skript** — `/opt/arcatum/scripts` je prázdný nebo `[server] scripts`
-míří jinam. Prázdný katalog start nezastaví; ověř `curl "${A[@]}" …/api/v1/scripts`.
+**The web UI offers no scripts** — `/opt/arcatum/scripts` is empty or `[server] scripts` points
+somewhere else. An empty catalogue does not stop the startup; check with
+`curl "${A[@]}" …/api/v1/scripts`.
 
-**Smazaný skript pořád svítí** — na tomhle stroji chybí `rsync`, takže instalátor kopíruje
-bez `--delete`. Smaž ho z `/opt/arcatum/scripts` ručně (nebo `apt install rsync`).
+**A deleted script is still showing** — `rsync` is missing on this machine, so the installer
+copies without `--delete`. Delete it from `/opt/arcatum/scripts` by hand (or
+`apt install rsync`).
 
-**Instalace runneru končí na 404** — v `dist/` není `arcatum-runner-linux-<arch>` pro danou
-architekturu. `ls /opt/arcatum/dist`, případně znovu `just dist-runner bin` a instalátor.
+**Installing a runner ends in a 404** — there is no `arcatum-runner-linux-<arch>` in `dist/`
+for that architecture. `ls /opt/arcatum/dist`, and if need be `just dist-runner bin` and the
+installer again.
 
-**Runnerům se nenabízí aktualizace** — chybí `/opt/arcatum/dist/VERSION`. Samotné binárky
-vydání neznamenají; je to schválně, aby šlo kopírovat a vydat zvlášť.
+**No update is offered to the runners** — `/opt/arcatum/dist/VERSION` is missing. The binaries
+alone do not constitute a release; that is deliberate, so that copying and releasing can be
+done separately.
 
-**`Text file busy` při instalaci** — přes běžící binárku se psát nedá. Instalátor to řeší
-sám (ukládá vedle a přejmenovává); když to potkáš ručně, zastav službu.
+**`Text file busy` during installation** — a running binary cannot be written to. The installer
+handles this itself (it stores alongside and renames); when you hit it by hand, stop the
+service.
 
-Související: [architektura](architecture.md) · [vývoj backendu](backend-development.md) ·
-[vývoj skriptů](script-development.md)
+Related: [architecture](architecture.md) · [backend development](backend-development.md) ·
+[script development](script-development.md)

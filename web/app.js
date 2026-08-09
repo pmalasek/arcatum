@@ -14,11 +14,11 @@ let tailTimer = null;
 let currentView = 'runs';
 let currentRun = null;
 let tailOffset = 0;
-let me = null; // identita z /whoami: kdo jsem a co smím
+let me = null; // identity from /whoami: who I am and what I may do
 
 // --- helpers ----------------------------------------------------------------
 
-// ApiError nese HTTP kód, aby volající poznal 401 (nepřihlášen) od ostatních chyb.
+// ApiError carries the HTTP code so callers can tell 401 (not logged in) from other errors.
 class ApiError extends Error {
   constructor(status, message) {
     super(message);
@@ -26,14 +26,14 @@ class ApiError extends Error {
   }
 }
 
-// errorText vytáhne z odpovědi text, který má smysl ukázat: „parameter "password" is
-// required" je použitelnější než „400 Bad Request". Část API odpovídá {"error": "..."},
-// část prostým textem z http.Error — čte se tedy tělo a JSON se zkusí až z něj, aby se
-// důvod neztratil ani u jednoho z nich.
+// errorText pulls the text worth showing out of a response: `parameter "password" is
+// required` is more useful than `400 Bad Request`. Part of the API answers with
+// {"error": "..."}, part with plain text from http.Error — so the body is read first and
+// JSON only attempted from it, and neither reason gets lost.
 async function errorText(res) {
   const raw = (await res.text().catch(() => '')).trim();
-  // Prázdné tělo nic neřekne, a stránka s chybou od reverzní proxy je na tomhle místě
-  // spíš šum než vysvětlení; v obou případech zbývá stavový kód.
+  // An empty body says nothing, and an error page from a reverse proxy is noise here
+  // rather than an explanation; in both cases the status code is what is left.
   if (!raw || raw.length > 500) return `${res.status} ${res.statusText}`;
   try {
     const body = JSON.parse(raw);
@@ -47,17 +47,17 @@ async function errorText(res) {
 async function api(path, opts) {
   const res = await fetch(API + path, opts);
   if (res.status === 401) {
-    // Sezení vypršelo (nebo ještě nezačalo) — přihlašovací obrazovka je užitečnější
-    // než tabulky se starými daty.
-    showLogin('Sezení vypršelo, přihlas se znovu.');
-    throw new ApiError(401, 'nepřihlášen');
+    // The session expired (or never started) — the login screen is more useful than
+    // tables with stale data.
+    showLogin('Your session expired, please sign in again.');
+    throw new ApiError(401, 'not signed in');
   }
   if (!res.ok) throw new ApiError(res.status, await errorText(res));
   conn.textContent = '';
   return res.status === 204 ? null : res.json();
 }
 
-// api s tělem v JSON, pro POST/PUT.
+// api with a JSON body, for POST/PUT.
 function apiSend(path, method, payload) {
   return api(path, {
     method,
@@ -69,7 +69,7 @@ function apiSend(path, method, payload) {
 // A failed request usually means the server is unreachable or refused the action, so
 // say that instead of leaving stale tables on screen.
 function showError(err) {
-  conn.textContent = 'nedostupné: ' + err.message;
+  conn.textContent = 'unavailable: ' + err.message;
 }
 
 function esc(s) {
@@ -82,7 +82,7 @@ const ZERO_TIME = '0001-01-01T00:00:00Z';
 function fmtTime(iso) {
   if (!iso || iso.startsWith('0001-01-01')) return '—';
   const d = new Date(iso);
-  return d.toLocaleString('cs-CZ', { dateStyle: 'short', timeStyle: 'medium' });
+  return d.toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'medium' });
 }
 
 function fmtDuration(startIso, endIso) {
@@ -110,19 +110,19 @@ function badge(status) {
   return `<span class="badge ${esc(status)}">${esc(status)}</span>`;
 }
 
-// Jak daleko je záloha na cestě na odlehlý server. Prázdná hodnota není porucha, ale
-// „nevíme": replikace může být vypnutá, nebo je běh starší než ona — proto pomlčka,
-// ne červená. Slova místo stavů z API, aby se ve sloupci dalo číst, co znamenají.
+// How far along a backup is on its way to the off-site server. An empty value is not a
+// fault but "we do not know": replication may be off, or the run may be older than it —
+// hence a dash, not red. Words instead of the API's states, so the column can be read.
 const REPLICA_LABEL = {
-  done: ['success', 'přeneseno', 'záloha je na odlehlém serveru'],
-  syncing: ['running', 'přenáší se', 'přenos právě probíhá'],
-  pending: ['pending', 've frontě', 'čeká na přenos na odlehlý server'],
-  failed: ['failed', 'chyba', 'přenos selhal, opakuje se automaticky'],
+  done: ['success', 'sent', 'the backup is on the off-site server'],
+  syncing: ['running', 'sending', 'the transfer is in progress'],
+  pending: ['pending', 'queued', 'waiting to be sent to the off-site server'],
+  failed: ['failed', 'error', 'the transfer failed, it is retried automatically'],
 };
 
 function replicaBadge(status) {
   const cell = REPLICA_LABEL[status];
-  if (!cell) return '<span class="muted" title="replikace neprobíhá">—</span>';
+  if (!cell) return '<span class="muted" title="no replication">—</span>';
   return `<span class="badge ${cell[0]}" title="${esc(cell[2])}">${esc(cell[1])}</span>`;
 }
 
@@ -132,7 +132,7 @@ async function loadRuns() {
   const runs = await api('/runs?limit=100');
   const body = el('runs-body');
   if (!runs || runs.length === 0) {
-    body.innerHTML = '<tr><td colspan="9" class="empty">žádné běhy</td></tr>';
+    body.innerHTML = '<tr><td colspan="9" class="empty">no runs</td></tr>';
     return;
   }
   body.innerHTML = runs.map((r) => `
@@ -146,27 +146,28 @@ async function loadRuns() {
       <td>${fmtTime(r.started_at)}</td>
       <td class="num">${fmtDuration(r.started_at, r.ended_at)}</td>
       <td>
-        <button class="action" data-open="${esc(r.id)}">výstup</button>
+        <button class="action" data-open="${esc(r.id)}">output</button>
         ${stopButton(r)}
       </td>
     </tr>`).join('');
 }
 
-// stopButton se nabízí jen u nedokončeného běhu a jen adminovi. Po požádání zůstane
-// vidět jako neaktivní: runner se ptá po pár sekundách, takže mezi kliknutím a koncem
-// běhu je prodleva a bez téhle zpětné vazby vypadá tlačítko, že nic neudělalo.
+// stopButton is offered only for an unfinished run and only to an admin. After being
+// asked for it stays visible but inactive: the runner asks every few seconds, so there is
+// a delay between the click and the end of the run, and without this feedback the button
+// looks like it did nothing.
 function stopButton(run) {
   if (run.status !== 'running' && run.status !== 'pending') return '';
   if (run.cancel_requested) {
-    return '<button class="action admin-only" disabled>zastavuji…</button>';
+    return '<button class="action admin-only" disabled>stopping…</button>';
   }
-  return `<button class="action admin-only" data-cancel="${esc(run.id)}">zastavit</button>`;
+  return `<button class="action admin-only" data-cancel="${esc(run.id)}">stop</button>`;
 }
 
-// cancelRun požádá o zastavení běhu. Potvrzení je tu schválně: rozdělaná záloha se
-// zahodí a příští proběhne až podle rozvrhu.
+// cancelRun asks for a run to be stopped. The confirmation is deliberate: the backup in
+// progress is discarded and the next one happens on schedule.
 async function cancelRun(runID) {
-  if (!confirm(`Zastavit běh ${runID}? Rozdělaná záloha se zahodí.`)) return;
+  if (!confirm(`Stop run ${runID}? The backup in progress will be discarded.`)) return;
   try {
     await api(`/runs/${encodeURIComponent(runID)}/cancel`, { method: 'POST' });
   } catch (err) {
@@ -179,16 +180,18 @@ async function cancelRun(runID) {
   }
 }
 
-// syncRows překreslí tělo tabulky po řádcích místo toho, aby ho celé zahodilo a postavilo
-// znovu. Řádek, jehož obsah se nezměnil, tak zůstane i s tlačítkem — obnovování každých
-// pár sekund jinak mizí a znovu vzniká přesně pod kurzorem, kterým na to tlačítko míříš.
+// syncRows redraws the table body row by row instead of throwing it away and building it
+// again. A row whose content has not changed therefore stays put together with its button
+// — refreshing every few seconds otherwise makes it disappear and reappear right under
+// the cursor you are aiming at that button with.
 //
-// keyOf říká, co je tentýž řádek napříč obnoveními; htmlOf vyrábí jeho buňky; initRow
-// dostane nově vzniklý řádek, aby mu doplnil to, co se s obsahem nemění (třída, data-*).
+// keyOf says what counts as the same row across refreshes; htmlOf produces its cells;
+// initRow receives a newly created row so it can add what does not change with the
+// content (class, data-*).
 function syncRows(body, items, keyOf, htmlOf, initRow) {
   const existing = new Map();
   for (const tr of [...body.children]) {
-    if (tr.dataset.key === undefined) tr.remove(); // „načítám…" a podobné výplně
+    if (tr.dataset.key === undefined) tr.remove(); // "loading…" and similar filler
     else existing.set(tr.dataset.key, tr);
   }
   let prev = null;
@@ -216,21 +219,21 @@ function syncRows(body, items, keyOf, htmlOf, initRow) {
   for (const tr of existing.values()) tr.remove();
 }
 
-// markRowStale zahodí zapamatované html řádku, do kterého se sáhlo ručně — třeba když se
-// vypnulo tlačítko. Bez toho by ho syncRows viděl jako nezměněný a nechal ho tak už
-// natrvalo.
+// markRowStale drops the remembered html of a row that was touched by hand — when a
+// button was disabled, for instance. Without it syncRows would see the row as unchanged
+// and leave it that way for good.
 function markRowStale(node) {
   const tr = node.closest('tr');
   if (tr) delete tr.dataset.html;
 }
 
-// Údaj o repozitáři je zvláštní dotaz na každou instanci a trvá tak dlouho, jak dlouho
-// trvá sáhnout na repozitář. Drží se proto stranou a obnovuje se vlastním, pomalejším
-// tempem: znovu ho tahat s každým obnovením seznamu znamenalo, že sloupec projel přes
-// „…" zpátky na hodnotu a tabulka u toho přeskakovala na šířku.
+// The repository figure is a separate request per instance and takes as long as reaching
+// the repository takes. It is therefore kept aside and refreshed at its own, slower pace:
+// fetching it with every list refresh meant the column flicked through "…" back to the
+// value with the table jumping about in width.
 const REPO_REFRESH_MS = 60000;
 const repoCache = new Map(); // instance id -> { text, at }
-let instanceList = [];       // poslední načtený seznam, aby šel překreslit i bez dotazu
+let instanceList = [];       // the last loaded list, so it can be redrawn without a request
 
 async function loadInstances() {
   instanceList = (await api('/instances')) || [];
@@ -241,7 +244,7 @@ async function loadInstances() {
 function renderInstances() {
   const body = el('instances-body');
   if (instanceList.length === 0) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">žádné instance</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" class="empty">no instances</td></tr>';
     return;
   }
   syncRows(body, instanceList, (i) => i.id, (i) => {
@@ -253,8 +256,8 @@ function renderInstances() {
       <td>${fmtTime(i.next_run)}</td>
       <td class="mono repo">${esc(repo ? repo.text : '…')}</td>
       <td class="actions">
-        <button class="action" data-trigger="${esc(i.id)}">spustit teď</button>
-        <button class="action admin-only" data-copy="${esc(i.id)}">kopírovat</button>
+        <button class="action" data-trigger="${esc(i.id)}">run now</button>
+        <button class="action admin-only" data-copy="${esc(i.id)}">copy</button>
       </td>`;
   }, (tr, i) => {
     tr.className = 'clickable';
@@ -267,13 +270,14 @@ function refreshRepoInfo() {
   for (const inst of instanceList) {
     const cached = repoCache.get(inst.id);
     if (cached && now - cached.at < REPO_REFRESH_MS) continue;
-    // Zapsat hned, ať se na tutéž instanci nezeptáme znovu, dokud odpověď letí.
+    // Record it right away so the same instance is not asked about again while the answer
+    // is still in flight.
     repoCache.set(inst.id, { text: cached ? cached.text : '…', at: now });
     api(`/instances/${encodeURIComponent(inst.id)}/repo`)
       .then((info) => setRepoText(inst.id, storedSummary(info)))
       .catch(() => setRepoText(inst.id, '—'));
   }
-  // Smazané instance nemá smysl držet v paměti.
+  // There is no point keeping deleted instances in memory.
   const live = new Set(instanceList.map((i) => i.id));
   for (const id of [...repoCache.keys()]) {
     if (!live.has(id)) repoCache.delete(id);
@@ -285,22 +289,23 @@ function setRepoText(id, text) {
   if (currentView === 'instances') renderInstances();
 }
 
-// storedSummary popisuje, co má instance uloženo. Souborové zálohy mají restic
-// repozitář, databázové rotované dumpy — bez druhé větve vypadá instance, která má
-// každou zálohu, jakou si vyžádala, jako by neměla žádnou.
+// storedSummary describes what an instance has stored. File backups have a restic
+// repository, database ones rotated dumps — without the second branch an instance that
+// has every backup it ever asked for looks as if it had none.
 function storedSummary(info) {
   if (info.exists) return `${fmtBytes(info.bytes)} · ${info.snapshots} snap.${offsiteSuffix(info.replica)}`;
   const d = info.dumps;
   if (d && d.count > 0) {
-    return `${fmtBytes(d.bytes)} · ${d.count} dump${d.count === 1 ? '' : 'ů'}${offsiteSuffix(info.replica)}`;
+    return `${fmtBytes(d.bytes)} · ${d.count} dump${d.count === 1 ? '' : 's'}${offsiteSuffix(info.replica)}`;
   }
   return '—';
 }
 
-// U souborové zálohy nevisí stav přenosu na jednom běhu, ale na repozitáři — bez tohohle
-// dovětku by instance zálohovaná resticem o replikaci mlčela. Čistý text, protože buňka
-// se escapuje (id instance je uživatelský vstup); barvu a podrobnosti nese karta
-// v Administraci a varování nad tabulkou.
+// For a file backup the transfer status does not hang off a single run but off the
+// repository — without this suffix an instance backed up by restic would say nothing
+// about replication. Plain text, because the cell is escaped (the instance id is user
+// input); the colour and the details are carried by the card under Administration and the
+// warning above the table.
 const OFFSITE_MARK = { done: '✓', syncing: '⇅', pending: '⏳', failed: '✗' };
 
 function offsiteSuffix(status) {
@@ -329,19 +334,20 @@ function daysUntil(iso) {
 function fmtExpiry(iso) {
   const days = daysUntil(iso);
   if (days === null) return '<span class="muted">—</span>';
-  const date = new Date(iso).toLocaleDateString('cs-CZ');
-  if (days < 0) return `<span class="expiry alert">vypršel ${esc(date)}</span>`;
+  const date = new Date(iso).toLocaleDateString('en-GB');
+  if (days < 0) return `<span class="expiry alert">expired ${esc(date)}</span>`;
   const cls = days <= EXPIRY_ALERT_DAYS ? 'alert' : (days <= EXPIRY_WARN_DAYS ? 'warn' : '');
   return `<span class="expiry ${cls}">${esc(date)}<span class="days"> (${days} d)</span></span>`;
 }
 
-// Instalace runneru je ta jedna věc, kvůli které se jinak leze do dokumentace: příkaz
-// obsahuje adresu serveru a tu zná server líp než člověk, co ji opisuje. Návod tedy patří
-// na stránku, kde se runner stejně schvaluje.
+// Installing a runner is the one thing that otherwise sends you into the documentation:
+// the command contains the server address, and the server knows it better than a person
+// copying it down. The instructions therefore belong on the page where the runner is
+// approved anyway.
 let installInfo = null;
 
 async function renderInstallGuide() {
-  if (installInfo) return; // tabulka se obnovuje každých 5 s, tohle je statické
+  if (installInfo) return; // the table refreshes every 5 s, this is static
   const box = el('install-body');
   try {
     installInfo = await api('/install');
@@ -350,36 +356,38 @@ async function renderInstallGuide() {
     return;
   }
   if (!installInfo.enabled) {
-    box.innerHTML = '<p class="empty">Bootstrap listener neběží — v <span class="mono">server.toml</span> '
-      + 'chybí <span class="mono">[bootstrap] listen</span>. Nový stroj si bez něj nemá odkud '
-      + 'stáhnout instalátor: na mTLS port se bez certifikátu nedostane.</p>';
+    box.innerHTML = '<p class="empty">The bootstrap listener is not running — '
+      + '<span class="mono">[bootstrap] listen</span> is missing from '
+      + '<span class="mono">server.toml</span>. Without it a new machine has nowhere to '
+      + 'download the installer from: it cannot reach the mTLS port without a certificate.</p>';
     return;
   }
   box.innerHTML = `
     <ol>
-      <li>Na cílovém stroji spusť jako root:
+      <li>On the target machine run as root:
         <div class="cmd">${esc(installInfo.command)}</div>
-        <div class="hint">Stáhne binárku, vygeneruje na místě privátní klíč, nainstaluje
-          systemd službu <span class="mono">arcatum-runner</span> a odešle žádost o certifikát.
-          Klíč stroj neopustí, posílá se jen žádost.</div>
+        <div class="hint">It downloads the binary, generates a private key on the spot,
+          installs the <span class="mono">arcatum-runner</span> systemd service and sends a
+          certificate request. The key never leaves the machine, only the request is sent.</div>
       </li>
-      <li>Runner se objeví v tabulce nahoře jako ${badge('pending')}. Jeho id je
-        <span class="mono">hostname -s</span> toho stroje.</li>
-      <li>Než ho schválíš, ověř, že sedí: otisk certifikátu ukáže najetí myší na id, IP adresa
-        žádosti je ve sloupci vedle stavu. Obojí porovnej se strojem, který jsi právě
-        instaloval — schválením mu vydáváš certifikát.</li>
-      <li>Pak mu v záložce <b>Instance</b> přiřaď, co má zálohovat.</li>
+      <li>The runner appears in the table above as ${badge('pending')}. Its id is the
+        <span class="mono">hostname -s</span> of that machine.</li>
+      <li>Before approving it, check that it matches: hovering over the id shows the
+        certificate fingerprint, the source IP of the request is in the column next to the
+        status. Compare both against the machine you have just installed — approving it
+        issues it a certificate.</li>
+      <li>Then assign it what to back up on the <b>Instances</b> tab.</li>
     </ol>
-    <p class="hint">Do té doby služba jen opakuje pokusy, což je v pořádku. Průběh na stroji:
-      <span class="mono">journalctl -u arcatum-runner -f</span></p>`;
+    <p class="hint">Until then the service just keeps retrying, which is fine. Progress on the
+      machine: <span class="mono">journalctl -u arcatum-runner -f</span></p>`;
 }
 
 async function loadRunners() {
-  renderInstallGuide(); // bez await: tabulka na návod nečeká
+  renderInstallGuide(); // no await: the table does not wait for the instructions
   const list = await api('/runners');
   const body = el('runners-body');
   if (!list || list.length === 0) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">žádné runnery</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" class="empty">no runners</td></tr>';
     return;
   }
   body.innerHTML = list.map((r) => {
@@ -389,11 +397,11 @@ async function loadRunners() {
     // Revoking is the compromise response: it drops the runner back to pending, so its
     // certificate stops working everywhere and it has to be re-established.
     const actions = pending
-      ? `<button class="action" data-approve="${esc(r.id)}">schválit</button>
-         <button class="action" data-reject="${esc(r.id)}">zamítnout</button>`
-      : `<button class="action" data-revoke="${esc(r.id)}">zneplatnit</button>`;
+      ? `<button class="action" data-approve="${esc(r.id)}">approve</button>
+         <button class="action" data-reject="${esc(r.id)}">reject</button>`
+      : `<button class="action" data-revoke="${esc(r.id)}">revoke</button>`;
     const ident = pending
-      ? (r.enroll_ip ? `z ${esc(r.enroll_ip)}` : '')
+      ? (r.enroll_ip ? `from ${esc(r.enroll_ip)}` : '')
       : (r.version ? esc(r.version) : '<span class="muted">—</span>');
     return `
     <tr>
@@ -415,9 +423,9 @@ async function loadRunners() {
   });
   setWarning('runners', expiring.length === 0 ? null : {
     level: expiring.some((r) => daysUntil(r.cert_not_after) <= EXPIRY_ALERT_DAYS) ? 'alert' : 'warn',
-    text: `Certifikát vyprší u ${expiring.length} runner${expiring.length === 1 ? 'u' : 'ů'}: `
+    text: `The certificate expires on ${expiring.length} runner${expiring.length === 1 ? '' : 's'}: `
       + expiring.map((r) => `${r.id} (${daysUntil(r.cert_not_after)} d)`).join(', ')
-      + '. Vydej nový: arcatum-ca runner -id <id>, nebo runner zamítni a nech ho znovu požádat.',
+      + '. Issue a new one: arcatum-ca runner -id <id>, or reject the runner and let it ask again.',
   });
 }
 
@@ -456,8 +464,8 @@ function certWarnings(id) {
   if (!id.secured) {
     setWarning('dev', {
       level: 'warn',
-      text: 'Server běží bez mTLS — runnery se neověřují a úlohy nejsou podepsané. '
-        + 'Určeno jen pro vývoj.',
+      text: 'The server is running without mTLS — runners are not authenticated and jobs '
+        + 'are not signed. Intended for development only.',
     });
     return;
   }
@@ -465,23 +473,24 @@ function certWarnings(id) {
   setWarning('me', (id.auth !== 'certificate' || id.days_left > EXPIRY_WARN_DAYS) ? null : {
     level: id.days_left <= EXPIRY_ALERT_DAYS ? 'alert' : 'warn',
     text: id.days_left < 0
-      ? `Tvůj certifikát (${id.name}) vypršel.`
-      : `Tvůj certifikát (${id.name}) vyprší za ${id.days_left} d. Vydej nový: `
+      ? `Your certificate (${id.name}) has expired.`
+      : `Your certificate (${id.name}) expires in ${id.days_left} d. Issue a new one: `
         + `arcatum-ca admin -name ${id.name}`,
   });
   setWarning('server', id.server_days_left > EXPIRY_WARN_DAYS ? null : {
     level: id.server_days_left <= EXPIRY_ALERT_DAYS ? 'alert' : 'warn',
     text: id.server_days_left < 0
-      ? 'Certifikát serveru vypršel — runnery mu přestanou věřit.'
-      : `Certifikát serveru vyprší za ${id.server_days_left} d. Vydej nový: `
-        + 'arcatum-ca server -hosts <adresy>',
+      ? 'The server certificate has expired — runners will stop trusting it.'
+      : `The server certificate expires in ${id.server_days_left} d. Issue a new one: `
+        + 'arcatum-ca server -hosts <addresses>',
   });
 }
 
 // --- login ------------------------------------------------------------------
 
-// Runnery se hlásí certifikátem, lidé jménem a heslem: web tedy začíná dotazem
-// „kdo jsem" a podle odpovědi ukáže aplikaci, nebo přihlášení.
+// Runners authenticate with a certificate, people with a username and password: the web
+// UI therefore starts by asking "who am I" and, depending on the answer, shows either the
+// application or the login screen.
 
 function showLogin(message) {
   stopPolling();
@@ -499,10 +508,10 @@ function showApp() {
   el('app').classList.remove('hidden');
 }
 
-// startSession načte identitu a rozjede aplikaci. Používá se po přihlášení i při
-// otevření stránky s platnou cookie.
+// startSession loads the identity and starts the application. Used both after logging in
+// and when opening the page with a valid cookie.
 async function startSession() {
-  const id = await api('/whoami'); // 401 → showLogin, viz api()
+  const id = await api('/whoami'); // 401 → showLogin, see api()
   applyIdentity(id);
   showApp();
   certWarnings(id);
@@ -510,8 +519,8 @@ async function startSession() {
   startPolling();
 }
 
-// Přihlášení nejde přes api(): 401 tady znamená „špatné jméno nebo heslo", ne
-// „vypršelo sezení", a nemá tedy překreslovat obrazovku.
+// Logging in does not go through api(): a 401 here means "wrong username or password",
+// not "the session expired", and must therefore not redraw the screen.
 async function submitLogin(event) {
   event.preventDefault();
   const btn = el('login-submit');
@@ -539,12 +548,12 @@ async function logout() {
   try {
     await api('/logout', { method: 'POST' });
   } catch (err) {
-    if (err.status !== 401) showError(err); // 401 = už odhlášen, není co řešit
+    if (err.status !== 401) showError(err); // 401 = already signed out, nothing to do
   }
-  showLogin('Odhlášeno.');
+  showLogin('Signed out.');
 }
 
-// --- účet: vlastní heslo -----------------------------------------------------
+// --- account: your own password ----------------------------------------------
 
 async function changeOwnPassword() {
   const btn = el('pw-save');
@@ -553,15 +562,15 @@ async function changeOwnPassword() {
   const again = el('pw-again').value;
   el('account-error').textContent = '';
   if (next !== again) {
-    el('account-error').textContent = 'nová hesla se neshodují';
+    el('account-error').textContent = 'the new passwords do not match';
     return;
   }
   btn.disabled = true;
   try {
     await apiSend('/password', 'POST', { current, new: next });
     for (const id of ['pw-current', 'pw-new', 'pw-again']) el(id).value = '';
-    // Server ukončil všechna sezení včetně tohoto — přihlášením se nové heslo potvrdí.
-    showLogin('Heslo změněno. Přihlas se novým heslem.');
+    // The server ended all sessions including this one — signing in confirms the new password.
+    showLogin('Password changed. Sign in with the new password.');
   } catch (err) {
     if (err.status !== 401) el('account-error').textContent = err.message;
   } finally {
@@ -569,10 +578,10 @@ async function changeOwnPassword() {
   }
 }
 
-// --- uživatelé ---------------------------------------------------------------
+// --- users -------------------------------------------------------------------
 
-// userNote ukazuje výsledek akce pod tabulkou: chybu, nebo vygenerované heslo, které
-// server pošle jen jednou a nikde ho nedrží v čitelné podobě.
+// userNote shows the result of an action below the table: an error, or the generated
+// password the server sends only once and keeps nowhere in readable form.
 function userNote(html, isError) {
   const box = el('users-error');
   box.classList.toggle('hidden', !html);
@@ -584,7 +593,7 @@ async function loadUsers() {
   const list = await api('/users');
   const body = el('users-body');
   if (!list || list.length === 0) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">žádní uživatelé</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" class="empty">no users</td></tr>';
     return;
   }
   body.innerHTML = list.map((u) => {
@@ -592,31 +601,31 @@ async function loadUsers() {
     const toRole = u.role === 'admin' ? 'viewer' : 'admin';
     return `
     <tr>
-      <td class="mono">${esc(u.username)}${self ? ' <span class="muted">(to jsi ty)</span>' : ''}</td>
+      <td class="mono">${esc(u.username)}${self ? ' <span class="muted">(that is you)</span>' : ''}</td>
       <td>${badge(u.role)}</td>
-      <td>${u.disabled ? '<span class="expiry alert">vypnutý</span>' : '<span class="expiry">aktivní</span>'}</td>
+      <td>${u.disabled ? '<span class="expiry alert">disabled</span>' : '<span class="expiry">active</span>'}</td>
       <td>${fmtTime(u.created_at)}</td>
       <td>${fmtTime(u.last_login)}</td>
       <td>
-        <button class="action" data-reset="${esc(u.username)}">nové heslo</button>
-        <button class="action" data-role="${esc(u.username)}" data-to="${toRole}">na ${toRole}</button>
+        <button class="action" data-reset="${esc(u.username)}">new password</button>
+        <button class="action" data-role="${esc(u.username)}" data-to="${toRole}">to ${toRole}</button>
         ${u.disabled
-          ? `<button class="action" data-enable="${esc(u.username)}">zapnout</button>`
-          : `<button class="action" data-disable="${esc(u.username)}">vypnout</button>`}
-        ${self ? '' : `<button class="action danger" data-deluser="${esc(u.username)}">smazat</button>`}
+          ? `<button class="action" data-enable="${esc(u.username)}">enable</button>`
+          : `<button class="action" data-disable="${esc(u.username)}">disable</button>`}
+        ${self ? '' : `<button class="action danger" data-deluser="${esc(u.username)}">delete</button>`}
       </td>
     </tr>`;
   }).join('');
 }
 
-// createUser přidá účet. Bez zadaného hesla ho vygeneruje server a vrátí ho — je to
-// jediný okamžik, kdy heslo z Arcatum vyleze.
+// createUser adds an account. Without a password given, the server generates one and
+// returns it — that is the only moment a password ever leaves Arcatum.
 async function createUser() {
   const name = el('new-user-name').value.trim();
   const role = el('new-user-role').value;
   const password = el('new-user-pass').value;
   if (!name) {
-    userNote('zadej jméno uživatele', true);
+    userNote('enter a user name', true);
     return;
   }
   const btn = el('new-user');
@@ -626,9 +635,9 @@ async function createUser() {
     el('new-user-name').value = '';
     el('new-user-pass').value = '';
     userNote(res.password
-      ? `Uživatel <b>${esc(res.username)}</b> vytvořen. Heslo (zobrazí se jen teď): `
+      ? `User <b>${esc(res.username)}</b> created. Password (shown only now): `
         + `<span class="generated">${esc(res.password)}</span>`
-      : `Uživatel <b>${esc(res.username)}</b> vytvořen.`);
+      : `User <b>${esc(res.username)}</b> created.`);
     await loadUsers();
   } catch (err) {
     if (err.status !== 401) userNote(esc(err.message), true);
@@ -637,12 +646,12 @@ async function createUser() {
   }
 }
 
-// updateUser pošle jednu změnu (role, vypnutí, nové heslo) a překreslí tabulku.
+// updateUser sends one change (role, disabling, a new password) and redraws the table.
 async function updateUser(name, payload, note) {
   try {
     const res = await apiSend(`/users/${encodeURIComponent(name)}`, 'PUT', payload);
     userNote(res.password
-      ? `Nové heslo uživatele <b>${esc(name)}</b> (zobrazí se jen teď): `
+      ? `New password for user <b>${esc(name)}</b> (shown only now): `
         + `<span class="generated">${esc(res.password)}</span>`
       : note || '');
     await loadUsers();
@@ -651,8 +660,8 @@ async function updateUser(name, payload, note) {
   }
 }
 
-// Formulář pro nové heslo cizího účtu. Heslo se dá zadat ručně — vygenerování serverem
-// je jen jedna z možností, ne jediná cesta.
+// The form for a new password on someone else's account. The password can be typed in —
+// having the server generate it is one option, not the only route.
 function openPasswordReset(name) {
   el('pw-reset-user').textContent = name;
   el('pw-reset').dataset.user = name;
@@ -668,26 +677,27 @@ function closePasswordReset() {
   el('pw-reset-value').value = '';
 }
 
-// submitPasswordReset pošle zadané heslo, nebo si o vygenerování řekne serveru. Delší
-// kontrolu (minimální délku) dělá server, aby platila stejně pro API i UI.
+// submitPasswordReset sends the password given, or asks the server to generate one. The
+// longer check (the minimum length) is done by the server, so it applies equally to the
+// API and the UI.
 async function submitPasswordReset(generate) {
   const name = el('pw-reset').dataset.user;
   if (!name) return;
   const value = el('pw-reset-value').value;
   if (!generate && !value) {
-    userNote('zadej heslo, nebo ho nech vygenerovat', true);
+    userNote('enter a password, or have one generated', true);
     el('pw-reset-value').focus();
     return;
   }
   const payload = generate ? { generate_password: true } : { password: value };
   closePasswordReset();
-  await updateUser(name, payload, `Heslo uživatele <b>${esc(name)}</b> změněno.`);
+  await updateUser(name, payload, `The password of user <b>${esc(name)}</b> was changed.`);
 }
 
 async function deleteUser(name) {
   try {
     await api(`/users/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    userNote(`Uživatel <b>${esc(name)}</b> smazán.`);
+    userNote(`User <b>${esc(name)}</b> deleted.`);
     await loadUsers();
   } catch (err) {
     if (err.status !== 401) userNote(esc(err.message), true);
@@ -704,18 +714,18 @@ async function loadRestore() {
   const sel = el('restore-instance');
   if (sel.options.length <= 1) {
     const list = await api('/instances');
-    sel.innerHTML = '<option value="">— vyber —</option>'
+    sel.innerHTML = '<option value="">— pick —</option>'
       + list.map((i) => `<option value="${esc(i.id)}">${esc(i.id)}</option>`).join('');
   }
   if (!restore.instance) {
-    el('restore-body').innerHTML = '<tr><td colspan="5" class="empty">vyber instanci</td></tr>';
+    el('restore-body').innerHTML = '<tr><td colspan="5" class="empty">pick an instance</td></tr>';
   }
 }
 
-// loadSnapshots rozhoduje, co se vlastně obnovuje. Souborová instance má restic
-// repozitář, který se prochází; databázová má rotované dumpy, kde je „obnova" prostě
-// stažení jednoho souboru. Bez téhle výhybky se u databáze jen ukázala chyba nad
-// repozitářem, který nikdy neexistoval.
+// loadSnapshots decides what is actually being restored. A file instance has a restic
+// repository to browse; a database one has rotated dumps, where a "restore" is simply
+// downloading a single file. Without this switch a database instance only showed an error
+// about a repository that never existed.
 async function loadSnapshots() {
   const sel = el('restore-snapshot');
   el('restore-info').textContent = '';
@@ -724,13 +734,13 @@ async function loadSnapshots() {
     sel.innerHTML = '<option value="">…</option>';
     return;
   }
-  sel.innerHTML = '<option value="">načítám…</option>';
-  sel.disabled = false; // mohl ho vypnout předchozí výběr databázové instance
+  sel.innerHTML = '<option value="">loading…</option>';
+  sel.disabled = false; // a previous pick of a database instance may have disabled it
 
   let info = null;
   try {
     info = await api(`/instances/${encodeURIComponent(restore.instance)}/repo`);
-  } catch (_) { /* rozhodne se podle snapshotů níž */ }
+  } catch (_) { /* decided by the snapshots below */ }
   if (info && !info.exists && info.dumps && info.dumps.count > 0) {
     await loadDumps();
     return;
@@ -745,9 +755,9 @@ async function loadSnapshots() {
     return;
   }
   if (!snaps || snaps.length === 0) {
-    sel.innerHTML = '<option value="">žádné snapshoty</option>';
+    sel.innerHTML = '<option value="">no snapshots</option>';
     el('restore-body').innerHTML =
-      '<tr><td colspan="5" class="empty">tato instance ještě nic nezálohovala</td></tr>';
+      '<tr><td colspan="5" class="empty">this instance has not backed anything up yet</td></tr>';
     return;
   }
   sel.innerHTML = snaps.map((s) =>
@@ -755,16 +765,16 @@ async function loadSnapshots() {
   restore.snapshot = snaps[0].id;
   // Start at the directory the snapshot was taken from rather than at "/".
   restore.path = (snaps[0].paths && snaps[0].paths[0]) || '/';
-  el('restore-info').textContent = `${snaps.length} snapshot${snaps.length === 1 ? '' : 'ů'}`;
+  el('restore-info').textContent = `${snaps.length} snapshot${snaps.length === 1 ? '' : 's'}`;
   await loadRestoreDir();
 }
 
-// loadDumps vypíše uložené dumpy instance. Dump je jeden neprůhledný artefakt — dovnitř
-// se nechodí, obnova je stáhnout ho celý — takže tu není co procházet.
+// loadDumps lists an instance's stored dumps. A dump is one opaque artifact — nobody goes
+// inside it, a restore means downloading the whole thing — so there is nothing to browse.
 async function loadDumps() {
   const sel = el('restore-snapshot');
   const body = el('restore-body');
-  sel.innerHTML = '<option value="">— dumpy —</option>';
+  sel.innerHTML = '<option value="">— dumps —</option>';
   sel.disabled = true;
 
   let dumps;
@@ -775,19 +785,19 @@ async function loadDumps() {
     return;
   }
   if (!dumps || dumps.length === 0) {
-    body.innerHTML = '<tr><td colspan="5" class="empty">tato instance zatím nemá uložený žádný dump</td></tr>';
+    body.innerHTML = '<tr><td colspan="5" class="empty">this instance has no stored dump yet</td></tr>';
     return;
   }
   const total = dumps.reduce((sum, d) => sum + d.bytes, 0);
   el('restore-info').textContent =
-    `${dumps.length} dump${dumps.length === 1 ? '' : 'ů'} · ${fmtBytes(total)}`;
+    `${dumps.length} dump${dumps.length === 1 ? '' : 's'} · ${fmtBytes(total)}`;
   body.innerHTML = dumps.map((d) => `
     <tr>
       <td class="mono">${esc(d.run_id)}</td>
       <td>dump</td>
       <td class="num">${fmtBytes(d.bytes)}</td>
       <td>${fmtTime(d.ended_at)}</td>
-      <td><a class="action" href="${API}/runs/${encodeURIComponent(d.run_id)}/data" download>stáhnout</a></td>
+      <td><a class="action" href="${API}/runs/${encodeURIComponent(d.run_id)}/data" download>download</a></td>
     </tr>`).join('');
 }
 
@@ -806,7 +816,7 @@ async function loadRestoreDir() {
   if (!restore.instance || !restore.snapshot) return;
   renderCrumbs();
   const body = el('restore-body');
-  body.innerHTML = '<tr><td colspan="5" class="empty">načítám…</td></tr>';
+  body.innerHTML = '<tr><td colspan="5" class="empty">loading…</td></tr>';
 
   const base = `/instances/${encodeURIComponent(restore.instance)}`
     + `/snapshots/${encodeURIComponent(restore.snapshot)}`;
@@ -824,26 +834,26 @@ async function loadRestoreDir() {
   // Offer the current directory as a tar, which is how you get a whole tree back.
   if (restore.path && restore.path !== '/') {
     rows.push(`<tr>
-      <td class="mono">.</td><td>adresář</td><td></td><td></td>
-      <td><a class="action" href="${esc(dl(restore.path, true))}">stáhnout jako .tar</a></td>
+      <td class="mono">.</td><td>directory</td><td></td><td></td>
+      <td><a class="action" href="${esc(dl(restore.path, true))}">download as .tar</a></td>
     </tr>`);
   }
   for (const e of res.entries) {
     const isDir = e.type === 'dir';
     rows.push(`<tr${isDir ? ' class="clickable" data-dir="' + esc(e.path) + '"' : ''}>
       <td class="mono">${isDir ? '📁 ' : ''}${esc(e.name)}</td>
-      <td>${isDir ? 'adresář' : esc(e.type)}</td>
+      <td>${isDir ? 'directory' : esc(e.type)}</td>
       <td class="num">${isDir ? '' : fmtBytes(e.size)}</td>
       <td>${isDir ? '' : fmtTime(e.mtime)}</td>
-      <td><a class="action" href="${esc(dl(e.path, isDir))}">${isDir ? 'stáhnout .tar' : 'stáhnout'}</a></td>
+      <td><a class="action" href="${esc(dl(e.path, isDir))}">${isDir ? 'download .tar' : 'download'}</a></td>
     </tr>`);
   }
   if (rows.length === 0) {
-    body.innerHTML = '<tr><td colspan="5" class="empty">prázdný adresář</td></tr>';
+    body.innerHTML = '<tr><td colspan="5" class="empty">empty directory</td></tr>';
     return;
   }
   if (res.truncated) {
-    rows.push('<tr><td colspan="5" class="empty">výpis je zkrácený — příliš mnoho položek</td></tr>');
+    rows.push('<tr><td colspan="5" class="empty">the listing is truncated — too many entries</td></tr>');
   }
   body.innerHTML = rows.join('');
 }
@@ -887,57 +897,57 @@ function fieldRow(label, inner, hint) {
     + (hint ? `<div class="hint">${esc(hint)}</div>` : '') + '</div></div>';
 }
 
-// runnerField nabídne runnery, které server zná. Opsat id ručně znamená trefit CN
-// certifikátu na první pokus — a překlep nedá chybu, dá instanci, která jen nikdy
-// nepoběží, protože se o ni žádný runner nepřihlásí.
+// runnerField offers the runners the server knows about. Typing an id by hand means
+// hitting the certificate CN on the first try — and a typo does not give an error, it
+// gives an instance that simply never runs, because no runner checks in for it.
 async function runnerField(current) {
   let list;
   try {
     list = await api('/runners');
   } catch (_) {
-    // Nedostupný seznam nesmí zablokovat založení instance.
-    return textRunnerField(current, 'seznam runnerů se nepodařilo načíst — vyplň id ručně, '
-      + 'musí odpovídat CN certifikátu runneru');
+    // An unavailable list must not block creating an instance.
+    return textRunnerField(current, 'the runner list could not be loaded — fill the id in by '
+      + 'hand, it must match the CN of the runner certificate');
   }
-  // Zamítnuté runnery nabízet nemá smysl; čekající ano — instanci lze připravit dřív,
-  // než se stihne schválit.
+  // There is no point offering rejected runners; pending ones yes — an instance can be
+  // prepared before it gets approved.
   const rank = { approved: 0, pending: 1 };
   const opts = (list || [])
     .filter((r) => r.status === 'approved' || r.status === 'pending')
     .sort((a, b) => (rank[a.status] - rank[b.status]) || a.id.localeCompare(b.id))
-    .map((r) => ({ id: r.id, label: r.status === 'approved' ? r.id : `${r.id} (čeká na schválení)` }));
+    .map((r) => ({ id: r.id, label: r.status === 'approved' ? r.id : `${r.id} (awaiting approval)` }));
 
   if (!opts.length && !current) {
-    return textRunnerField(current, 'zatím se nezapsal žádný runner — id musí odpovídat '
-      + 'CN certifikátu runneru');
+    return textRunnerField(current, 'no runner has registered yet — the id must match the CN '
+      + 'of the runner certificate');
   }
-  // Instance může ukazovat na runner, který byl mezitím zamítnut nebo smazán. Přepsat jí
-  // ho jen proto, že zmizel ze seznamu, by bylo horší než ho nabídnout dál.
+  // An instance may point at a runner that has since been rejected or deleted. Overwriting
+  // it just because it disappeared from the list would be worse than keeping it on offer.
   if (current && !opts.some((o) => o.id === current)) {
-    opts.unshift({ id: current, label: `${current} (není v seznamu)` });
+    opts.unshift({ id: current, label: `${current} (not in the list)` });
   }
   const html = '<select id="f-runner">'
-    + (current ? '' : '<option value="">— vyber runner —</option>')
+    + (current ? '' : '<option value="">— pick a runner —</option>')
     + opts.map((o) =>
         `<option value="${esc(o.id)}"${o.id === current ? ' selected' : ''}>${esc(o.label)}</option>`).join('')
     + '</select>';
-  return { html, hint: 'runner, který bude instanci spouštět' };
+  return { html, hint: 'the runner that will execute the instance' };
 }
 
 function textRunnerField(current, hint) {
   return { html: `<input id="f-runner" value="${esc(current)}" placeholder="web-01">`, hint };
 }
 
-// openInstanceForm otevře formulář nad instancí id, nebo prázdný, když je id null.
-// S opts.copy se id bere jako předloha: formulář se vyplní podle ní, ale zakládá se nová
-// instance — druhá databáze na tomtéž serveru se pak liší dvěma políčky, ne celým
-// vyplňováním znovu.
+// openInstanceForm opens the form over instance id, or an empty one when id is null.
+// With opts.copy the id is taken as a template: the form is filled in from it, but a new
+// instance is being created — a second database on the same server then differs by two
+// fields rather than by filling everything in again.
 async function openInstanceForm(id, opts) {
   const copy = !!(opts && opts.copy) && !!id;
   editing = copy ? null : (id || null);
   copyingFrom = copy ? id : null;
   el('form-error').textContent = '';
-  el('form-title').textContent = copy ? `Kopie instance ${id}` : (id || 'Nová instance');
+  el('form-title').textContent = copy ? `Copy of instance ${id}` : (id || 'New instance');
   el('form-delete').classList.toggle('hidden', !editing);
   showView('instance-form');
 
@@ -954,47 +964,47 @@ async function openInstanceForm(id, opts) {
     fieldRow('id', editing
       ? `<input id="f-id" value="${esc(editing)}" disabled>`
       : `<input id="f-id" placeholder="${esc(copy ? id + '-2' : 'mysql-web01')}">`,
-      editing ? 'id nelze změnit'
-        : (copy ? `nové id — zbytek je předvyplněný podle ${id}, včetně hesel`
-          : 'krátký identifikátor, používá se i jako název repozitáře'))
-    + fieldRow('skript', `<select id="f-script">${list.map((sc) =>
+      editing ? 'the id cannot be changed'
+        : (copy ? `a new id — the rest is prefilled from ${id}, passwords included`
+          : 'a short identifier, also used as the repository name'))
+    + fieldRow('script', `<select id="f-script">${list.map((sc) =>
         `<option value="${esc(sc.name)}"${sc.name === chosen ? ' selected' : ''}>${esc(sc.name)} (${esc(sc.type)})</option>`).join('')}</select>`)
     + fieldRow('runner', runner.html, runner.hint)
-    + fieldRow('rozvrh', `
+    + fieldRow('schedule', `
         <select id="f-freq">
           ${['daily', 'weekly', 'monthly'].map((f) =>
             `<option value="${f}"${inst && inst.schedule.frequency === f ? ' selected' : ''}>${f}</option>`).join('')}
         </select>
         <input id="f-time" value="${esc(inst ? inst.schedule.time : '02:00')}" placeholder="02:00" size="6">
         <input id="f-weekdays" value="${esc(inst && inst.schedule.weekdays ? inst.schedule.weekdays.join(',') : '')}" placeholder="mon,thu" size="12">
-        <input id="f-day" value="${inst && inst.schedule.day ? inst.schedule.day : ''}" placeholder="den 1-28" size="8">
+        <input id="f-day" value="${inst && inst.schedule.day ? inst.schedule.day : ''}" placeholder="day 1-28" size="8">
         <input id="f-tz" value="${esc(inst ? inst.schedule.timezone || '' : '')}" placeholder="Europe/Prague" size="16">`,
-        'weekdays platí pro weekly, den pro monthly')
+        'weekdays applies to weekly, day to monthly')
     + fieldRow('timeout', `<input id="f-timeout" value="${esc(inst ? inst.timeout : '')}" placeholder="1h" size="8">`)
-    + fieldRow('retence záloh', `
+    + fieldRow('backup retention', `
         <input id="f-keep-last" type="number" min="0" value="${keepDefault(inst, 'keep_last', 7)}" size="4">
-        <span class="hint">posledních</span>
+        <span class="hint">last</span>
         <input id="f-keep-days" type="number" min="0" value="${keepDefault(inst, 'keep_days', 0)}" size="4">
-        <span class="hint">dnů</span>`,
-        'platí jen pro skripty, které streamují data (dump databáze); 0 = neomezeně, '
-        + 'obojí najednou znamená „aspoň tolik kopií a aspoň tak staré"')
+        <span class="hint">days</span>`,
+        'applies only to scripts that stream data (a database dump); 0 = unlimited, '
+        + 'both at once means "at least this many copies and at least this old"')
     + '<div id="f-params"></div>';
 
   el('f-script').addEventListener('change', () => { renderParams(inst); toggleRetention(); });
   renderParams(inst);
   toggleRetention();
-  if (copy) el('f-id').focus(); // jediné, co kopii ještě chybí
+  if (copy) el('f-id').focus(); // the only thing a copy is still missing
 }
 
-// keepDefault předvyplní retenci u nové instance. U existující se nesahá na to, co je
-// uloženo — jinak by pouhé otevření formuláře začalo mazat zálohy.
+// keepDefault prefills the retention for a new instance. For an existing one the stored
+// value is left alone — otherwise merely opening the form would start deleting backups.
 function keepDefault(inst, field, fallback) {
   if (inst) return inst[field] || 0;
   return fallback;
 }
 
-// toggleRetention schová retenci u skriptů, které žádné dumpy nevyrábějí. U restiku se
-// retence nastavuje parametry keep_daily/keep_weekly, které pouští runner.
+// toggleRetention hides the retention for scripts that produce no dumps. With restic the
+// retention is set through the keep_daily/keep_weekly parameters, which the runner uses.
 async function toggleRetention() {
   const list = await scripts();
   const sc = list.find((s) => s.name === el('f-script').value);
@@ -1009,7 +1019,7 @@ async function renderParams(inst) {
   const sc = list.find((s) => s.name === name);
   const box = el('f-params');
   if (!sc || sc.params.length === 0) {
-    box.innerHTML = '<div class="field"><label>parametry</label><div class="hint">tento skript žádné nedeklaruje</div></div>';
+    box.innerHTML = '<div class="field"><label>parameters</label><div class="hint">this script declares none</div></div>';
     return;
   }
   const same = inst && inst.script === name;
@@ -1022,20 +1032,20 @@ async function renderParams(inst) {
       : (p.default || '');
     const hint = [
       p.type || 'string',
-      p.required ? 'povinné' : 'nepovinné',
+      p.required ? 'required' : 'optional',
       p.secret ? 'secret' : '',
       p.default ? `default ${p.default}` : '',
-      // Hodnotu secretu API ven nepustí, takže i v kopii je na obrazovce jen maska —
-      // tohle říká, že se přesto přenese, a že ji lze přepsat.
-      (p.secret && same && copyingFrom) ? `převezme se z ${copyingFrom}` : '',
+      // The API never lets a secret value out, so even in a copy only the mask is on
+      // screen — this says it will be carried over anyway, and that it can be overwritten.
+      (p.secret && same && copyingFrom) ? `taken over from ${copyingFrom}` : '',
     ].filter(Boolean).join(' · ');
     return fieldRow(p.name,
       `<input data-param="${esc(p.name)}" data-secret="${p.secret}" value="${esc(value)}"`
-      + `${p.secret ? ' placeholder="(nezměněno)"' : ''}>`, hint);
+      + `${p.secret ? ' placeholder="(unchanged)"' : ''}>`, hint);
   }).join('');
 }
 
-// keepValue čte políčko retence; prázdné i nesmyslné znamená 0, tedy neomezeně.
+// keepValue reads a retention field; empty and nonsensical alike mean 0, i.e. unlimited.
 function keepValue(id) {
   const n = parseInt(el(id).value, 10);
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -1058,7 +1068,7 @@ function collectInstance() {
   const day = parseInt(el('f-day').value, 10);
   return {
     id: el('f-id').value.trim(),
-    // Podle předlohy server doplní secrety, které se do formuláře dostaly jen jako maska.
+    // Given a template, the server fills in the secrets that only reached the form as a mask.
     copy_from: copyingFrom || '',
     script: el('f-script').value,
     runner_id: el('f-runner').value.trim(),
@@ -1099,57 +1109,57 @@ async function loadRotation() {
 
   box.innerHTML = `
     <div class="rot">
-      <h3>Secrets — master klíč</h3>
+      <h3>Secrets — master key</h3>
       <dl class="meta">
-        <dt>aktuální klíč</dt><dd>${st.secrets_key_id ? esc(st.secrets_key_id) : '<span class="muted">žádný (plaintext)</span>'}</dd>
-        <dt>načtených klíčů</dt><dd>${st.secrets_keys}${secretsRotating ? ' <span class="expiry warn">rotace probíhá</span>' : ''}</dd>
-        <dt>nepřešifrováno</dt><dd>${st.secrets_pending}${secretsDone ? '' : ' <span class="expiry warn">zbývá přešifrovat</span>'}</dd>
+        <dt>current key</dt><dd>${st.secrets_key_id ? esc(st.secrets_key_id) : '<span class="muted">none (plaintext)</span>'}</dd>
+        <dt>keys loaded</dt><dd>${st.secrets_keys}${secretsRotating ? ' <span class="expiry warn">rotation in progress</span>' : ''}</dd>
+        <dt>not re-encrypted</dt><dd>${st.secrets_pending}${secretsDone ? '' : ' <span class="expiry warn">still to re-encrypt</span>'}</dd>
       </dl>
       ${st.secrets_key_id ? `<div class="section-foot">
-        <button id="rekey" class="action">přešifrovat vším aktuálním klíčem</button>
-        <span class="hint">bezpečné spustit opakovaně — už přešifrované hodnoty přeskočí</span>
+        <button id="rekey" class="action">re-encrypt everything with the current key</button>
+        <span class="hint">safe to run repeatedly — values already re-encrypted are skipped</span>
       </div>` : ''}
     </div>
 
     <div class="rot">
-      <h3>Podpis úloh</h3>
+      <h3>Job signing</h3>
       <dl class="meta">
-        <dt>důvěryhodných klíčů</dt><dd>${st.signing_keys}${st.signing_keys > 1
-          ? ' <span class="expiry warn">rotace probíhá — až runnery přejdou, odeber starý z previous_keys</span>' : ''}</dd>
+        <dt>trusted keys</dt><dd>${st.signing_keys}${st.signing_keys > 1
+          ? ' <span class="expiry warn">rotation in progress — once the runners have moved, remove the old one from previous_keys</span>' : ''}</dd>
       </dl>
     </div>
 
     <div class="rot">
-      <h3>Certifikační autorita</h3>
+      <h3>Certificate authority</h3>
       <dl class="meta">
-        <dt>vydává se pod</dt><dd>${st.signing_ca ? esc(st.signing_ca) : '<span class="muted">—</span>'}</dd>
-        <dt>důvěryhodné CA</dt><dd>${cas.length === 0 ? '<span class="muted">—</span>' : cas.map((c) =>
-          `${esc(c.common_name)}${c.is_signer ? ' <span class="expiry">(vydávající)</span>' : ''}`
-          + ` <span class="days">· platí ${c.days_left} d</span>`).join('<br>')}</dd>
-        ${caRotating || stale.length ? `<dt>runnery na staré CA</dt><dd>${
-          stale.length === 0 ? '<span class="expiry">žádné</span>' : esc(stale.join(', '))}</dd>` : ''}
+        <dt>issuing under</dt><dd>${st.signing_ca ? esc(st.signing_ca) : '<span class="muted">—</span>'}</dd>
+        <dt>trusted CAs</dt><dd>${cas.length === 0 ? '<span class="muted">—</span>' : cas.map((c) =>
+          `${esc(c.common_name)}${c.is_signer ? ' <span class="expiry">(issuing)</span>' : ''}`
+          + ` <span class="days">· valid for ${c.days_left} d</span>`).join('<br>')}</dd>
+        ${caRotating || stale.length ? `<dt>runners on the old CA</dt><dd>${
+          stale.length === 0 ? '<span class="expiry">none</span>' : esc(stale.join(', '))}</dd>` : ''}
       </dl>
       ${caRotating ? `<div class="section-foot">
         ${st.safe_to_drop_old_ca
-          ? '<span class="expiry">Všechny runnery jsou na aktuální CA — starou lze z bundle odebrat.</span>'
-          : '<span class="expiry warn">Starou CA zatím neodebírej: některé runnery na ni ještě spoléhají.</span>'}
+          ? '<span class="expiry">All runners are on the current CA — the old one can be removed from the bundle.</span>'
+          : '<span class="expiry warn">Do not remove the old CA yet: some runners still rely on it.</span>'}
       </div>` : ''}
     </div>`;
 }
 
-// --- administrace -----------------------------------------------------------
+// --- administration ---------------------------------------------------------
 
-// Tři operace, které se týkají Arcatum samotného, ne toho, co zálohuje: stáhnout
-// konfiguraci, nahrát ji zpátky, a vyprázdnit server od všeho nasbíraného.
+// Three operations concerning Arcatum itself rather than what it backs up: download the
+// configuration, upload it back, and empty the server of everything it has collected.
 //
-// Import i reset jsou destruktivní, každý jinak, takže ani jeden nejde spustit jedním
-// kliknutím. Import napřed ukáže, co by udělal, a teprve potom se potvrzuje; reset se
-// potvrzuje slovem. Klíče nejsou ani v jednom z toho — ty leží na disku a z webu se na
-// ně nesahá.
+// The import and the reset are both destructive, each in its own way, so neither can be
+// launched with a single click. The import first shows what it would do and is confirmed
+// only afterwards; the reset is confirmed by typing a word. Keys are in neither of them —
+// those sit on disk and the web UI does not touch them.
 
-// pendingArchive drží nahraný soubor mezi kontrolou a potvrzením. Server dostane
-// stejné bajty dvakrát: podruhé už s confirm, takže potvrzuje se přesně to, co bylo
-// zkontrolováno, ne co mezitím leží ve formuláři.
+// pendingArchive holds the uploaded file between the check and the confirmation. The
+// server receives the same bytes twice: the second time with confirm, so what is
+// confirmed is exactly what was checked, not whatever is in the form by then.
 let pendingArchive = null;
 
 function filenameFrom(header) {
@@ -1157,16 +1167,17 @@ function filenameFrom(header) {
   return m ? m[1] : '';
 }
 
-// exportConfig stahuje přes fetch, ne přes odkaz: kdyby server odpověděl chybou nebo
-// vypršelým sezením, prohlížeč by ji ukázal jako holou stránku místo hlášky ve webu.
+// exportConfig downloads through fetch rather than a link: if the server answered with an
+// error or an expired session, the browser would show it as a bare page instead of a
+// message inside the web UI.
 async function exportConfig(btn) {
   const note = el('config-export-note');
   btn.disabled = true;
-  note.textContent = 'připravuji…';
+  note.textContent = 'preparing…';
   try {
     const res = await fetch(API + '/config/export');
     if (res.status === 401) {
-      showLogin('Sezení vypršelo, přihlas se znovu.');
+      showLogin('Your session expired, please sign in again.');
       return;
     }
     if (!res.ok) throw new Error(await errorText(res));
@@ -1180,9 +1191,9 @@ async function exportConfig(btn) {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    note.textContent = `staženo: ${name} (${fmtBytes(blob.size)})`;
+    note.textContent = `downloaded: ${name} (${fmtBytes(blob.size)})`;
   } catch (err) {
-    note.textContent = 'nepovedlo se: ' + err.message;
+    note.textContent = 'failed: ' + err.message;
   } finally {
     btn.disabled = false;
   }
@@ -1194,18 +1205,18 @@ function clearConfigPlan() {
   if (box) box.innerHTML = '';
 }
 
-// checkConfigArchive pošle archiv bez confirm — server ho ověří a odpoví plánem, ale
-// nic nezmění.
+// checkConfigArchive sends the archive without confirm — the server verifies it and
+// answers with a plan, but changes nothing.
 async function checkConfigArchive(btn) {
   const input = el('config-file');
   const file = input.files && input.files[0];
   const box = el('config-plan');
   if (!file) {
-    box.innerHTML = '<p class="empty">nejdřív vyber soubor s archivem</p>';
+    box.innerHTML = '<p class="empty">pick an archive file first</p>';
     return;
   }
   btn.disabled = true;
-  box.innerHTML = '<p class="empty">kontroluji…</p>';
+  box.innerHTML = '<p class="empty">checking…</p>';
   try {
     const bytes = await file.arrayBuffer();
     const plan = await postArchive(bytes, false);
@@ -1213,13 +1224,14 @@ async function checkConfigArchive(btn) {
     renderConfigPlan(plan, file.name);
   } catch (err) {
     pendingArchive = null;
-    if (err.status !== 401) box.innerHTML = `<p class="empty">archiv odmítnut: ${esc(err.message)}</p>`;
+    if (err.status !== 401) box.innerHTML = `<p class="empty">archive refused: ${esc(err.message)}</p>`;
   } finally {
     btn.disabled = false;
   }
 }
 
-// apply = false je jen kontrola: server archiv ověří, spočítá rozdíl a nic nezapíše.
+// apply = false is a check only: the server verifies the archive, computes the difference
+// and writes nothing.
 function postArchive(bytes, apply) {
   return api('/config/import' + (apply ? '?confirm=replace-all' : ''), {
     method: 'POST',
@@ -1228,39 +1240,39 @@ function postArchive(bytes, apply) {
   });
 }
 
-// diffText popisuje jednu tabulku jednou větou. Jména se vypisují, ne jen počty —
-// „−3 zmizí" nikomu nepomůže, dokud neví které.
+// diffText describes one table in one sentence. The names are listed, not just the counts
+// — "−3 will disappear" helps nobody until they know which.
 function diffText(d) {
   const parts = [];
-  if (d.added.length) parts.push(`<b>+${d.added.length}</b> přibude (${d.added.map(esc).join(', ')})`);
-  if (d.changed.length) parts.push(`<b>~${d.changed.length}</b> se změní (${d.changed.map(esc).join(', ')})`);
+  if (d.added.length) parts.push(`<b>+${d.added.length}</b> added (${d.added.map(esc).join(', ')})`);
+  if (d.changed.length) parts.push(`<b>~${d.changed.length}</b> changed (${d.changed.map(esc).join(', ')})`);
   if (d.removed.length) {
-    parts.push(`<span class="expiry alert"><b>−${d.removed.length}</b> zmizí</span>`
+    parts.push(`<span class="expiry alert"><b>−${d.removed.length}</b> will disappear</span>`
       + ` (${d.removed.map(esc).join(', ')})`);
   }
-  if (d.unchanged) parts.push(`${d.unchanged} beze změny`);
-  return parts.length ? parts.join(' · ') : '<span class="muted">beze změny</span>';
+  if (d.unchanged) parts.push(`${d.unchanged} unchanged`);
+  return parts.length ? parts.join(' · ') : '<span class="muted">unchanged</span>';
 }
 
 function renderConfigPlan(plan, fileName) {
   const m = plan.manifest || {};
   el('config-plan').innerHTML = `
     <dl class="meta">
-      <dt>archiv</dt><dd>${esc(fileName)}</dd>
-      <dt>vytvořen</dt><dd>${fmtTime(m.created_at)}${m.host ? ' na ' + esc(m.host) : ''}
+      <dt>archive</dt><dd>${esc(fileName)}</dd>
+      <dt>created</dt><dd>${fmtTime(m.created_at)}${m.host ? ' on ' + esc(m.host) : ''}
         ${m.arcatum ? `<span class="days">· Arcatum ${esc(m.arcatum)}</span>` : ''}</dd>
-      <dt>instance</dt><dd>${diffText(plan.instances)}</dd>
-      <dt>uživatelé</dt><dd>${diffText(plan.users)}</dd>
-      <dt>runnery</dt><dd>${diffText(plan.runners)}</dd>
+      <dt>instances</dt><dd>${diffText(plan.instances)}</dd>
+      <dt>users</dt><dd>${diffText(plan.users)}</dd>
+      <dt>runners</dt><dd>${diffText(plan.runners)}</dd>
     </dl>
     ${(plan.warnings || []).map((wtext) =>
       `<div class="warning warn">${esc(wtext)}</div>`).join('')}
     <div class="section-foot">
-      <input id="config-confirm" placeholder="NAHRADIT" size="12" autocapitalize="characters"
+      <input id="config-confirm" placeholder="REPLACE" size="12" autocapitalize="characters"
              spellcheck="false" autocomplete="off">
-      <button id="config-apply" class="action danger">nahradit konfiguraci</button>
-      <span class="hint">pro potvrzení napiš NAHRADIT · současná konfigurace se předtím
-        sama uloží do backup_dir/config-backups</span>
+      <button id="config-apply" class="action danger">replace the configuration</button>
+      <span class="hint">to confirm, type REPLACE · the current configuration saves itself
+        into backup_dir/config-backups beforehand</span>
     </div>
     <div id="config-note" class="hint"></div>`;
 }
@@ -1268,30 +1280,30 @@ function renderConfigPlan(plan, fileName) {
 async function applyConfigArchive(btn) {
   const note = el('config-note');
   if (!pendingArchive) {
-    note.textContent = 'archiv už není načtený, zkontroluj ho znovu';
+    note.textContent = 'the archive is no longer loaded, check it again';
     return;
   }
-  if (el('config-confirm').value.trim().toUpperCase() !== 'NAHRADIT') {
-    note.textContent = 'napiš do políčka NAHRADIT';
+  if (el('config-confirm').value.trim().toUpperCase() !== 'REPLACE') {
+    note.textContent = 'type REPLACE into the field';
     return;
   }
   btn.disabled = true;
-  note.textContent = 'nahrazuji…';
+  note.textContent = 'replacing…';
   try {
     const plan = await postArchive(pendingArchive, true);
     clearConfigPlan();
-    // Import smazal všechna sezení, tohle včetně — přihlašovací obrazovka je jediné,
-    // co teď dává smysl ukázat.
-    showLogin(`Konfigurace nahrazena (${plan.instances.added.length + plan.instances.unchanged
-      + plan.instances.changed.length} instancí). Přihlas se znovu.`);
+    // The import deleted every session, this one included — the login screen is the only
+    // thing it makes sense to show now.
+    showLogin(`Configuration replaced (${plan.instances.added.length + plan.instances.unchanged
+      + plan.instances.changed.length} instances). Sign in again.`);
   } catch (err) {
-    if (err.status !== 401) note.textContent = 'nepovedlo se: ' + err.message;
+    if (err.status !== 401) note.textContent = 'failed: ' + err.message;
     btn.disabled = false;
   }
 }
 
-// loadAdmin obnovuje jen souhrn resetu. Rozdělaný plán importu se nechává být — přepsat
-// ho pod rukama uprostřed potvrzování by bylo to poslední, co si tady kdo přeje.
+// loadAdmin only refreshes the reset summary. An import plan in progress is left alone —
+// overwriting it under someone's hands mid-confirmation is the last thing anyone wants here.
 async function loadAdmin() {
   await loadReplicaCard();
   const box = el('reset-summary');
@@ -1304,42 +1316,43 @@ async function loadAdmin() {
   }
   box.innerHTML = `
     <dl class="meta">
-      <dt>smaže se</dt><dd>${st.runs} běhů · ${fmtBytes(st.log_bytes)} logů
-        · ${fmtBytes(st.data_bytes)} dumpů · ${st.repositories} restic repozitářů</dd>
-      <dt>zůstane</dt><dd>${st.kept.instances} instancí · ${st.kept.users} uživatelů
-        · ${st.kept.runners} runnerů · klíče na disku</dd>
+      <dt>will be deleted</dt><dd>${st.runs} runs · ${fmtBytes(st.log_bytes)} of logs
+        · ${fmtBytes(st.data_bytes)} of dumps · ${st.repositories} restic repositories</dd>
+      <dt>will stay</dt><dd>${st.kept.instances} instances · ${st.kept.users} users
+        · ${st.kept.runners} runners · the keys on disk</dd>
     </dl>`;
 }
 
 async function runReset(btn) {
   const note = el('reset-note');
-  if (el('reset-confirm').value.trim().toUpperCase() !== 'SMAZAT') {
-    note.textContent = 'napiš do políčka SMAZAT';
+  if (el('reset-confirm').value.trim().toUpperCase() !== 'DELETE') {
+    note.textContent = 'type DELETE into the field';
     return;
   }
-  if (!confirm('Smazat všechny zálohy, dumpy, logy a historii běhů?\n\n'
-    + 'Zůstanou jen klíče, uživatelé, instance a runnery. Tohle nejde vzít zpět '
-    + 'a data nejsou nikde jinde — Arcatum je to poslední místo, kde leží.')) return;
+  if (!confirm('Delete all backups, dumps, logs and the run history?\n\n'
+    + 'Only the keys, users, instances and runners will stay. This cannot be undone '
+    + 'and the data is nowhere else — Arcatum is the last place it sits.')) return;
   btn.disabled = true;
-  note.textContent = 'mažu…';
+  note.textContent = 'deleting…';
   try {
     const res = await api('/reset?confirm=delete-all-backups', { method: 'POST' });
     el('reset-confirm').value = '';
-    note.textContent = `smazáno: ${res.runs} běhů, ${res.repositories} repozitářů`
-      + `, ${fmtBytes(res.log_bytes + res.data_bytes)} dat`;
+    note.textContent = `deleted: ${res.runs} runs, ${res.repositories} repositories`
+      + `, ${fmtBytes(res.log_bytes + res.data_bytes)} of data`;
     await loadAdmin();
   } catch (err) {
-    if (err.status !== 401) note.textContent = 'nepovedlo se: ' + err.message;
+    if (err.status !== 401) note.textContent = 'failed: ' + err.message;
   } finally {
     btn.disabled = false;
   }
 }
 
-// --- odlehlá kopie ----------------------------------------------------------
+// --- off-site replica -------------------------------------------------------
 
-// Stav repliky se stahuje pořád, ne jen na záložce Administrace: výpadek přenosu má být
-// vidět odkudkoli, jinak by se o něm operátor dozvěděl teprve ve chvíli, kdy by po
-// odlehlé kopii sáhl. Odtud se plní i varování nad tabulkou a důvody v detailu běhu.
+// The replica status is fetched continuously, not only on the Administration tab: a
+// transfer outage should be visible from anywhere, otherwise an operator would learn about
+// it only at the moment they reached for the off-site copy. This also feeds the warning
+// above the table and the reasons in the run detail.
 let replicaState = null;
 
 async function refreshReplica() {
@@ -1347,7 +1360,7 @@ async function refreshReplica() {
     replicaState = await api('/replica');
   } catch (err) {
     if (err.status === 401) return;
-    return; // nedostupné API hlásí showError; tady by druhá hláška jen přebíjela první
+    return; // an unavailable API is reported by showError; a second message would only mask the first
   }
   replicaFailures.clear();
   for (const it of replicaState.failing || []) {
@@ -1356,9 +1369,10 @@ async function refreshReplica() {
   replicaWarning(replicaState);
 }
 
-// Kdy má výpadek křičet. Krátký zádrhel na lince se dožene sám a hlásit ho by jen
-// naučilo lidi varování přehlížet; hodina bez spojení nebo položka, která se opakovaně
-// nepřenesla, už znamená, že zálohy nemají druhou kopii.
+// When an outage should shout. A brief hiccup on the link catches up on its own and
+// reporting it would only teach people to ignore warnings; an hour without a connection,
+// or an item that repeatedly failed to transfer, already means the backups have no second
+// copy.
 const REPLICA_DOWN_ALERT_MS = 3600000;
 const REPLICA_BACKLOG_WARN_MS = 7200000;
 
@@ -1368,19 +1382,19 @@ function replicaWarning(st) {
   if (downMs > 0) {
     setWarning('replica', {
       level: downMs >= REPLICA_DOWN_ALERT_MS ? 'alert' : 'warn',
-      text: `Odlehlá kopie (${st.target}) je nedostupná ${fmtAge(downMs)}`
+      text: `The off-site replica (${st.target}) has been unreachable for ${fmtAge(downMs)}`
         + `${st.counts.pending + st.counts.failed > 0
-          ? ` — ${st.counts.pending + st.counts.failed} položek čeká na přenos` : ''}`
-        + `. Zálohy tady běží dál a fronta se po opravě spojení sama dožene. `
-        + `Poslední chyba: ${st.link.last_err || '—'}`,
+          ? ` — ${st.counts.pending + st.counts.failed} items are waiting to be sent` : ''}`
+        + `. Backups here keep running and the queue catches up once the link is repaired. `
+        + `Last error: ${st.link.last_err || '—'}`,
     });
     return;
   }
   if (st.counts.failed > 0) {
     setWarning('replica', {
       level: 'alert',
-      text: `${st.counts.failed} položek se nedaří přenést na odlehlý server (${st.target}). `
-        + `Poslední chyba: ${st.link.last_err || (st.failing && st.failing[0] && st.failing[0].err) || '—'}`,
+      text: `${st.counts.failed} items are failing to transfer to the off-site server (${st.target}). `
+        + `Last error: ${st.link.last_err || (st.failing && st.failing[0] && st.failing[0].err) || '—'}`,
     });
     return;
   }
@@ -1388,8 +1402,8 @@ function replicaWarning(st) {
   if (oldest > REPLICA_BACKLOG_WARN_MS) {
     setWarning('replica', {
       level: 'warn',
-      text: `Odlehlá kopie zaostává: nejstarší nepřenesená položka čeká ${fmtAge(oldest)} `
-        + `(${st.counts.pending} ve frontě).`,
+      text: `The off-site replica is falling behind: the oldest untransferred item has been `
+        + `waiting ${fmtAge(oldest)} (${st.counts.pending} queued).`,
     });
     return;
   }
@@ -1408,32 +1422,32 @@ async function loadReplicaCard() {
   const box = el('replica-summary');
   await refreshReplica();
   const st = replicaState;
-  if (!st) { box.innerHTML = '<p class="empty">stav se nepodařilo načíst</p>'; return; }
+  if (!st) { box.innerHTML = '<p class="empty">the status could not be loaded</p>'; return; }
   if (!st.enabled) {
-    box.innerHTML = '<p class="empty">Odlehlá kopie není nastavená — viz <code>[replica]</code> '
-      + 'v <code>server.toml</code>.</p>';
+    box.innerHTML = '<p class="empty">The off-site replica is not configured — see '
+      + '<code>[replica]</code> in <code>server.toml</code>.</p>';
     return;
   }
   const health = st.healthy
-    ? '<span class="badge success">dostupná</span>'
-    : `<span class="badge failed">nedostupná</span> <span class="hint">od ${fmtTime(st.link.down_since)}</span>`;
+    ? '<span class="badge success">reachable</span>'
+    : `<span class="badge failed">unreachable</span> <span class="hint">since ${fmtTime(st.link.down_since)}</span>`;
   box.innerHTML = `
     <dl class="meta">
-      <dt>cíl</dt><dd class="mono">${esc(st.target)}</dd>
-      <dt>spojení</dt><dd>${health}</dd>
-      <dt>poslední úspěch</dt><dd>${fmtTime(st.link.last_ok_at)}</dd>
-      <dt>fronta</dt><dd>${st.counts.pending} čeká · ${st.counts.syncing} přenáší se
-        · ${st.counts.done} hotovo · ${st.counts.failed} chybných</dd>
-      <dt>režim</dt><dd>${st.mirror ? 'zrcadlo (maže se i na replice)' : 'jen přidávání'}
-        · ${st.include_keys ? 'včetně klíčů a databáze' : 'bez klíčů'}</dd>
-      ${st.link.last_err ? `<dt>poslední chyba</dt><dd>${esc(st.link.last_err)}</dd>` : ''}
+      <dt>target</dt><dd class="mono">${esc(st.target)}</dd>
+      <dt>link</dt><dd>${health}</dd>
+      <dt>last success</dt><dd>${fmtTime(st.link.last_ok_at)}</dd>
+      <dt>queue</dt><dd>${st.counts.pending} waiting · ${st.counts.syncing} sending
+        · ${st.counts.done} done · ${st.counts.failed} failing</dd>
+      <dt>mode</dt><dd>${st.mirror ? 'mirror (deletions propagate to the replica)' : 'append only'}
+        · ${st.include_keys ? 'including the keys and the database' : 'without the keys'}</dd>
+      ${st.link.last_err ? `<dt>last error</dt><dd>${esc(st.link.last_err)}</dd>` : ''}
     </dl>
     ${replicaFailingList(st)}`;
 }
 
 function replicaFailingList(st) {
   if (!st.failing || st.failing.length === 0) return '';
-  return '<table class="sub"><thead><tr><th>položka</th><th>pokusů</th><th>chyba</th></tr></thead><tbody>'
+  return '<table class="sub"><thead><tr><th>item</th><th>attempts</th><th>error</th></tr></thead><tbody>'
     + st.failing.map((it) => `<tr>
         <td class="mono">${esc(it.kind)}:${esc(it.key)}</td>
         <td class="num">${it.attempts}</td>
@@ -1448,10 +1462,10 @@ async function replicaAction(path, btn, doing) {
   note.textContent = doing;
   try {
     await api(path, { method: 'POST' });
-    note.textContent = 'zařazeno, přenos běží na pozadí';
+    note.textContent = 'queued, the transfer runs in the background';
     await loadReplicaCard();
   } catch (err) {
-    if (err.status !== 401) note.textContent = 'nepovedlo se: ' + err.message;
+    if (err.status !== 401) note.textContent = 'failed: ' + err.message;
   } finally {
     btn.disabled = false;
   }
@@ -1471,12 +1485,12 @@ const VIEWS = ['runs', 'instances', 'instance-form', 'restore', 'runners', 'rota
   'users', 'admin', 'account', 'detail'];
 
 async function refresh() {
-  if (!me) return; // odhlášeno: není za co tahat
-  // Stav odlehlé kopie se tahá při každém obnovení, ať je otevřená kterákoli záložka:
-  // varování na výpadek přenosu nemá čekat, až někdo přijde do Administrace.
+  if (!me) return; // signed out: nothing to fetch for
+  // The off-site replica status is fetched on every refresh whichever tab is open: a
+  // warning about a transfer outage must not wait for someone to visit Administration.
   if (currentView !== 'admin') refreshReplica();
   const load = loaders[currentView];
-  if (!load) return; // detail, formulář a účet se neobnovují periodicky
+  if (!load) return; // the detail, the form and the account do not refresh periodically
   try {
     await load();
   } catch (err) {
@@ -1502,8 +1516,8 @@ function showView(name) {
     tab.classList.toggle('active', tab.dataset.view === name);
   }
   if (name === 'users') userNote('');
-  if (name !== 'admin') clearConfigPlan(); // rozdělaný import se odchodem ze záložky zahazuje
-  closePasswordReset(); // rozdělaná změna hesla se odchodem z tabulky zahazuje
+  if (name !== 'admin') clearConfigPlan(); // an import in progress is dropped when leaving the tab
+  closePasswordReset(); // a password change in progress is dropped when leaving the table
   if (name !== 'detail') {
     stopTail();
     refresh();
@@ -1542,59 +1556,61 @@ function renderRunMeta(run) {
   renderStopButton(run);
   el('detail-meta').innerHTML = `
     <dt>instance</dt><dd>${esc(run.instance_id)}</dd>
-    <dt>skript</dt><dd>${esc(run.script)}</dd>
+    <dt>script</dt><dd>${esc(run.script)}</dd>
     <dt>runner</dt><dd>${esc(run.runner_id)}</dd>
-    <dt>návratový kód</dt><dd>${run.exit_code}</dd>
+    <dt>exit code</dt><dd>${run.exit_code}</dd>
     ${dataRow(run)}
     <dt>log</dt><dd>${fmtBytes(run.bytes)}</dd>
-    <dt>začátek</dt><dd>${fmtTime(run.started_at)}</dd>
-    <dt>trvání</dt><dd>${fmtDuration(run.started_at, run.ended_at)}</dd>
+    <dt>started</dt><dd>${fmtTime(run.started_at)}</dd>
+    <dt>duration</dt><dd>${fmtDuration(run.started_at, run.ended_at)}</dd>
     ${replicaRow(run)}
-    ${run.err ? `<dt>chyba</dt><dd>${esc(run.err)}</dd>` : ''}`;
+    ${run.err ? `<dt>error</dt><dd>${esc(run.err)}</dd>` : ''}`;
 }
 
-// replicaRow říká, jestli tahle konkrétní záloha je i na odlehlém serveru. U čekající
-// nebo chybné položky se ukáže i důvod — bez něj je „ve frontě" jen tvrzení a operátor
-// musí hledat jinde, proč se to nehýbe.
+// replicaRow says whether this particular backup is on the off-site server too. For a
+// waiting or failing item the reason is shown as well — without it "queued" is a mere
+// claim and the operator has to look elsewhere for why nothing is moving.
 function replicaRow(run) {
   const status = run.replica_status;
   if (!status) return '';
-  // Data běhu nese buď jeho vlastní adresář (dump), nebo repozitář instance (restic),
-  // takže se hledá v obojím — ve stejném pořadí, v jakém stav vybírá server.
+  // A run's data is carried either by its own directory (a dump) or by the instance's
+  // repository (restic), so both are looked up — in the same order the server picks the
+  // status in.
   const it = replicaFailures.get(`run:${run.id}`) || replicaFailures.get(`repo:${run.instance_id}`);
   let detail = '';
   if (status !== 'done' && it) {
     detail = ` <span class="hint">${esc(it.err || '')}</span>`;
-    if (it.attempts > 1) detail += ` <span class="hint">(pokus ${it.attempts})</span>`;
+    if (it.attempts > 1) detail += ` <span class="hint">(attempt ${it.attempts})</span>`;
   }
   return `<dt>offsite</dt><dd>${replicaBadge(status)}${detail}</dd>`;
 }
 
-// Chybné položky fronty, aby detail běhu uměl říct proč. Plní se ze stavu repliky,
-// který se stahuje kvůli varování stejně — druhý dotaz na běh by nic nepřidal.
+// The failing queue items, so the run detail can say why. Filled from the replica status,
+// which is fetched for the warning anyway — a second request per run would add nothing.
 const replicaFailures = new Map();
 
-// renderStopButton řídí tlačítko v hlavičce detailu. Skryté u doběhnutého běhu,
-// neaktivní, když už zastavení běží — runner se ptá po pár sekundách.
+// renderStopButton drives the button in the detail header. Hidden for a finished run,
+// inactive once the stop is already under way — the runner asks every few seconds.
 function renderStopButton(run) {
   const btn = el('detail-stop');
   const stoppable = run.status === 'running' || run.status === 'pending';
   btn.classList.toggle('hidden', !stoppable);
   btn.disabled = !!run.cancel_requested;
-  btn.textContent = run.cancel_requested ? 'zastavuji…' : 'zastavit';
+  btn.textContent = run.cancel_requested ? 'stopping…' : 'stop';
   btn.dataset.run = run.id;
 }
 
-// dataRow ukazuje zálohovaná data odděleně od logu. Ke stažení se nabídnou jen po
-// úspěšném běhu — server nedokončený dump zahazuje, takže odkaz by jinak vedl na nic.
+// dataRow shows the backed-up data separately from the log. It is offered for download
+// only after a successful run — the server discards an unfinished dump, so the link would
+// otherwise lead nowhere.
 function dataRow(run) {
   if (!run.data_bytes) return '';
   const size = fmtBytes(run.data_bytes);
   if (run.status !== 'success') {
-    return `<dt>data</dt><dd>${size} <span class="hint">(běh neuspěl, data zahozena)</span></dd>`;
+    return `<dt>data</dt><dd>${size} <span class="hint">(the run failed, the data was discarded)</span></dd>`;
   }
   const href = `${API}/runs/${encodeURIComponent(run.id)}/data`;
-  return `<dt>data</dt><dd>${size} · <a href="${href}" download>stáhnout</a></dd>`;
+  return `<dt>data</dt><dd>${size} · <a href="${href}" download>download</a></dd>`;
 }
 
 // pollTail fetches output from where the last poll stopped, so nothing is re-sent and
@@ -1658,10 +1674,10 @@ el('config-export').addEventListener('click', (e) => exportConfig(e.currentTarge
 el('config-check').addEventListener('click', (e) => checkConfigArchive(e.currentTarget));
 el('reset-run').addEventListener('click', (e) => runReset(e.currentTarget));
 el('replica-sync').addEventListener('click', (e) =>
-  replicaAction('/replica/sync', e.currentTarget, 'zařazuji…'));
+  replicaAction('/replica/sync', e.currentTarget, 'queueing…'));
 el('replica-retry').addEventListener('click', (e) =>
-  replicaAction('/replica/retry', e.currentTarget, 'zkouším znovu…'));
-// Nový soubor znamená nový plán: ten předchozí patřil jinému archivu.
+  replicaAction('/replica/retry', e.currentTarget, 'retrying…'));
+// A new file means a new plan: the previous one belonged to a different archive.
 el('config-file').addEventListener('change', clearConfigPlan);
 
 el('back').addEventListener('click', () => showView('runs'));
@@ -1687,13 +1703,13 @@ document.addEventListener('click', async (e) => {
   }
   const stop = e.target.closest('[data-cancel]');
   if (stop) {
-    e.stopPropagation(); // ať klik neotevře zároveň detail běhu
+    e.stopPropagation(); // so the click does not open the run detail as well
     cancelRun(stop.dataset.cancel);
     return;
   }
   const copy = e.target.closest('[data-copy]');
   if (copy) {
-    e.stopPropagation(); // ať klik zároveň neotevře úpravu předlohy
+    e.stopPropagation(); // so the click does not also open the template for editing
     await openInstanceForm(copy.dataset.copy, { copy: true });
     return;
   }
@@ -1701,8 +1717,8 @@ document.addEventListener('click', async (e) => {
   if (trigger) {
     const id = trigger.dataset.trigger;
     trigger.disabled = true;
-    trigger.textContent = 'zařazeno…';
-    markRowStale(trigger); // ať se řádek při dalším obnovení postaví načisto
+    trigger.textContent = 'queued…';
+    markRowStale(trigger); // so the row is rebuilt from scratch on the next refresh
     try {
       await api(`/instances/${encodeURIComponent(id)}/run`, { method: 'POST' });
       // The job starts at the runner's next check-in; the Runs tab will show it.
@@ -1710,7 +1726,7 @@ document.addEventListener('click', async (e) => {
     } catch (err) {
       showError(err);
       trigger.disabled = false;
-      trigger.textContent = 'spustit teď';
+      trigger.textContent = 'run now';
     }
     return;
   }
@@ -1723,11 +1739,12 @@ document.addEventListener('click', async (e) => {
     const btn = approve || reject || revoke;
     const id = btn.dataset.approve || btn.dataset.reject || btn.dataset.revoke;
     const action = approve ? 'approve' : (reject ? 'reject' : 'revoke');
-    if (reject && !confirm(`Zamítnout runner "${id}"? Žádost bude zahozena.`)) return;
+    if (reject && !confirm(`Reject runner "${id}"? The request will be discarded.`)) return;
     if (revoke && !confirm(
-      `Zneplatnit certifikát runneru "${id}"?\n\n`
-      + 'Jeho certifikát okamžitě přestane platit všude včetně přístupu k zálohám. '
-      + 'Runner přejde do stavu "pending" a sám požádá o nový — pak ho musíš znovu schválit.')) return;
+      `Revoke the certificate of runner "${id}"?\n\n`
+      + 'Its certificate stops being valid everywhere immediately, including access to the '
+      + 'backups. The runner moves to the "pending" state and asks for a new one itself — '
+      + 'you then have to approve it again.')) return;
     btn.disabled = true;
     try {
       await api(`/runners/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
@@ -1738,7 +1755,7 @@ document.addEventListener('click', async (e) => {
     }
     return;
   }
-  // Správa uživatelů: nové heslo, změna role, vypnutí/zapnutí, smazání.
+  // User management: a new password, a role change, disabling/enabling, deletion.
   const reset = e.target.closest('[data-reset]');
   if (reset) {
     openPasswordReset(reset.dataset.reset);
@@ -1748,24 +1765,24 @@ document.addEventListener('click', async (e) => {
   if (roleBtn) {
     const name = roleBtn.dataset.role;
     const to = roleBtn.dataset.to;
-    if (!confirm(`Změnit roli uživatele "${name}" na "${to}"?`)) return;
-    await updateUser(name, { role: to }, `Role uživatele <b>${esc(name)}</b> je teď ${esc(to)}.`);
+    if (!confirm(`Change the role of user "${name}" to "${to}"?`)) return;
+    await updateUser(name, { role: to }, `The role of user <b>${esc(name)}</b> is now ${esc(to)}.`);
     return;
   }
   const disable = e.target.closest('[data-disable]');
   const enable = e.target.closest('[data-enable]');
   if (disable || enable) {
     const name = (disable || enable).dataset.disable || enable.dataset.enable;
-    if (disable && !confirm(`Vypnout uživatele "${name}"?\n\n`
-      + 'Nepřihlásí se a jeho současné přihlášení se ukončí. Účet zůstane.')) return;
+    if (disable && !confirm(`Disable user "${name}"?\n\n`
+      + 'They will not be able to sign in and their current sessions end. The account stays.')) return;
     await updateUser(name, { disabled: !!disable },
-      `Uživatel <b>${esc(name)}</b> je ${disable ? 'vypnutý' : 'aktivní'}.`);
+      `User <b>${esc(name)}</b> is ${disable ? 'disabled' : 'active'}.`);
     return;
   }
   const delUser = e.target.closest('[data-deluser]');
   if (delUser) {
     const name = delUser.dataset.deluser;
-    if (!confirm(`Smazat uživatele "${name}"?`)) return;
+    if (!confirm(`Delete user "${name}"?`)) return;
     await deleteUser(name);
     return;
   }
@@ -1797,8 +1814,8 @@ document.addEventListener('click', async (e) => {
     return;
   }
   if (e.target.closest('#form-delete')) {
-    if (!editing || !confirm(`Smazat instanci "${editing}"?\n\n`
-      + 'Zálohy v repozitáři zůstanou — maže se jen konfigurace.')) return;
+    if (!editing || !confirm(`Delete instance "${editing}"?\n\n`
+      + 'The backups in the repository stay — only the configuration is deleted.')) return;
     try {
       await api(`/instances/${encodeURIComponent(editing)}`, { method: 'DELETE' });
       showView('instances');
@@ -1807,7 +1824,8 @@ document.addEventListener('click', async (e) => {
     }
     return;
   }
-  // Potvrzení importu. Tlačítko vzniká až s plánem, takže se na něj čeká tady.
+  // Confirming the import. The button only comes into being with the plan, so it is
+  // waited for here.
   const applyConfig = e.target.closest('#config-apply');
   if (applyConfig) {
     await applyConfigArchive(applyConfig);
@@ -1816,27 +1834,27 @@ document.addEventListener('click', async (e) => {
   if (e.target.closest('#rekey')) {
     const btn = e.target.closest('#rekey');
     btn.disabled = true;
-    btn.textContent = 'přešifrovávám…';
+    btn.textContent = 're-encrypting…';
     try {
       const res = await api('/secrets/rekey', { method: 'POST' });
-      alert(`Přešifrováno hodnot: ${res.secrets}\nJiž aktuálních: ${res.skipped}`
-        + (res.remaining ? `\nNečitelných: ${res.remaining} — chybí starý klíč v previous_keys?` : ''));
+      alert(`Values re-encrypted: ${res.secrets}\nAlready current: ${res.skipped}`
+        + (res.remaining ? `\nUnreadable: ${res.remaining} — is the old key missing from previous_keys?` : ''));
       await loadRotation();
     } catch (err) {
       showError(err);
       btn.disabled = false;
-      btn.textContent = 'přešifrovat vším aktuálním klíčem';
+      btn.textContent = 're-encrypt everything with the current key';
     }
     return;
   }
   if (e.target.closest('#revoke-all')) {
     if (!confirm(
-      'Zneplatnit certifikáty VŠECH runnerů?\n\n'
-      + 'Použij při podezření na kompromitaci CA. Všechny runnery přejdou do stavu '
-      + '"pending" a zálohování se zastaví, dokud je znovu neschválíš.')) return;
+      'Revoke the certificates of ALL runners?\n\n'
+      + 'Use this when the CA is suspected of being compromised. Every runner moves to the '
+      + '"pending" state and backups stop until you approve them again.')) return;
     try {
       const res = await api('/runners/revoke-all', { method: 'POST' });
-      alert(`Zneplatněno certifikátů: ${res.revoked}`);
+      alert(`Certificates revoked: ${res.revoked}`);
       await loadRunners();
     } catch (err) {
       showError(err);
@@ -1863,8 +1881,8 @@ document.addEventListener('click', async (e) => {
 
 // --- start ------------------------------------------------------------------
 
-// Otevření stránky začíná dotazem na identitu: s platnou cookie se rovnou pokračuje,
-// jinak api() ukáže přihlášení.
+// Opening the page starts by asking for the identity: with a valid cookie it carries
+// straight on, otherwise api() shows the login screen.
 startSession().catch((err) => {
   if (err.status !== 401) showLogin(err.message);
 });

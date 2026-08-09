@@ -1,152 +1,154 @@
 # Arcatum
 
-Centrální zálohovací systém pro servery ve vnitřní síti. Monorepo, jazyk Go
-pro server i runner.
+Central backup system for servers on an internal network. Monorepo, written in Go
+for both the server and the runner.
 
-Arcatum spouští zálohovací skripty na vzdálených serverech podle rozvrhu, sbírá jejich
-výstup a ukládá ho **centrálně** — na zálohovaném serveru nemá zůstávat nic.
+Arcatum runs backup scripts on remote servers on a schedule, collects their output and
+stores it **centrally** — nothing is supposed to stay behind on the backed-up server.
 
 ---
 
-## Obsah
+## Contents
 
-- [Jak to funguje](#jak-to-funguje)
-- [Klíčové koncepty](#klíčové-koncepty)
-- [Struktura repozitáře](#struktura-repozitáře)
-- [Rychlý start (lokální vyzkoušení)](#rychlý-start-lokální-vyzkoušení)
-- [Konfigurace](#konfigurace)
-- [Zabezpečení (mTLS a podpis úloh)](#zabezpečení-mtls-a-podpis-úloh)
-- [Rotace klíčů](#rotace-klíčů)
-- [Zálohování souborů (restic)](#zálohování-souborů-restic)
+- [How it works](#how-it-works)
+- [Key concepts](#key-concepts)
+- [Repository layout](#repository-layout)
+- [Quick start (trying it locally)](#quick-start-trying-it-locally)
+- [Configuration](#configuration)
+- [Security (mTLS and job signing)](#security-mtls-and-job-signing)
+- [Key rotation](#key-rotation)
+- [File backups (restic)](#file-backups-restic)
 - [Web UI](#web-ui)
-- [Záloha konfigurace a reset serveru](#záloha-konfigurace-a-reset-serveru)
-- [Jak napsat vlastní zálohovací skript](#jak-napsat-vlastní-zálohovací-skript)
-- [Jak přidat instanci](#jak-přidat-instanci)
+- [Config backup and server reset](#config-backup-and-server-reset)
+- [Writing your own backup script](#writing-your-own-backup-script)
+- [Adding an instance](#adding-an-instance)
 - [HTTP API](#http-api)
-- [Ladění skriptů](#ladění-skriptů)
-- [Instalace runneru na zálohovaný server](#instalace-runneru-na-zálohovaný-server)
-- [Aktualizace runnerů](#aktualizace-runnerů)
-- [Vývoj](#vývoj)
-- [Návody](#návody)
-- [Stav a roadmapa](#stav-a-roadmapa)
+- [Debugging scripts](#debugging-scripts)
+- [Installing the runner on a backed-up server](#installing-the-runner-on-a-backed-up-server)
+- [Updating runners](#updating-runners)
+- [Development](#development)
+- [Guides](#guides)
+- [Status and roadmap](#status-and-roadmap)
 
 ---
 
-## Návody
+## Guides
 
-README je referenční přehled. Postupy krok za krokem mají vlastní dokumenty:
+The README is a reference overview. Step-by-step procedures have their own documents:
 
-| Návod | Kdy ho otevřít |
+| Guide | When to open it |
 |---|---|
-| [Nasazení produkční verze](docs/production.md) | od čistého serveru k běžícímu Arcatum se zapnutým zabezpečením — PKI, systemd, publikování buildů, rollout runnerů, provoz, záloha samotného Arcatum |
-| [Vývoj a ladění backendu](docs/backend-development.md) | práce na Go kódu: lokální prostředí, tok dat jedním během, kam co přidat, testy, ladění, mTLS lokálně |
-| [Vývoj a ladění skriptů](docs/script-development.md) | psaní zálohovacích skriptů: manifest, předání parametrů, vývojová smyčka, katalog chyb |
-| [Obnova databáze z dumpu](docs/restore.md) | jak dump dostat zpět do MySQL nebo PostgreSQL, co v něm není, a zkušební obnova |
+| [Production deployment](docs/production.md) | from a clean server to a running Arcatum with security enabled — PKI, systemd, publishing builds, runner rollout, operations, backing up Arcatum itself |
+| [Backend development and debugging](docs/backend-development.md) | working on the Go code: local environment, the flow of data through a single run, where to add things, tests, debugging, mTLS locally |
+| [Script development and debugging](docs/script-development.md) | writing backup scripts: manifest, passing parameters, the development loop, error catalogue |
+| [Restoring a database from a dump](docs/restore.md) | how to get a dump back into MySQL or PostgreSQL, what is not in it, and a trial restore |
 
 ---
 
-## Jak to funguje
+## How it works
 
-Dvě komponenty:
+Two components:
 
-- **arcatum-server** — centrální mozek. Drží rozvrh, definice skriptů, databázi běhů
-  a úložiště zálohovaných dat. Poskytuje API (a později web UI).
-- **arcatum-runner** — lehká služba na každém zálohovaném serveru. Spouští skripty
-  a streamuje výsledek na server.
+- **arcatum-server** — the central brain. Holds the schedule, script definitions, the run
+  database and the storage for backed-up data. Provides the API (and later the web UI).
+- **arcatum-runner** — a lightweight service on every backed-up server. Runs scripts and
+  streams the result to the server.
 
-Komunikace je **pull** — runner si o práci říká sám:
+Communication is **pull** — the runner asks for work itself:
 
 ```
  runner                                    server
-   │  1. POST /api/v1/checkin               │  „jsem web-01, máš pro mě něco?"
+   │  1. POST /api/v1/checkin               │  "I'm web-01, got anything for me?"
    │ ─────────────────────────────────────► │
-   │  2. seznam úloh k spuštění             │
+   │  2. list of jobs to run                │
    │ ◄───────────────────────────────────── │
-   │  3. spustí skript lokálně              │
-   │  4. streamuje stdout/stderr + status   │
-   │ ─────────────────────────────────────► │  ukládá do DB + backup_dir
+   │  3. runs the script locally            │
+   │  4. streams stdout/stderr + status     │
+   │ ─────────────────────────────────────► │  stores into DB + backup_dir
 ```
 
-**Proč pull:** zálohované servery nemusí otevírat žádný příchozí port (jen odchozí
-spojení), což je přátelské k firewallu a zmenšuje útočnou plochu.
+**Why pull:** backed-up servers don't have to open any inbound port (outbound connections
+only), which is firewall-friendly and shrinks the attack surface.
 
 ---
 
-## Klíčové koncepty
+## Key concepts
 
-### Skript vs. instance
+### Script vs. instance
 
-Nejdůležitější rozdělení v celém systému — **šablona** a její **nasazení**:
+The most important distinction in the whole system — a **template** and its **deployment**:
 
-| | **Skript** (definice) | **Instance** (nasazení) |
+| | **Script** (definition) | **Instance** (deployment) |
 |---|---|---|
-| Co to je | šablona: kód/binárka + manifest parametrů | konkrétní nasazení na jeden cíl |
-| Kde žije | `scripts/` — verzováno v gitu | databáze (SQLite) |
-| Obsahuje secrets | **ne, nikdy** | ano (šifrované v DB) |
-| Rozvrh | ne | **ano** |
-| Příklad | `mysql-backup` | `mysql-web01`, `mysql-web02`, … |
+| What it is | template: code/binary + parameter manifest | a concrete deployment onto a single target |
+| Where it lives | `scripts/` — versioned in git | database (SQLite) |
+| Contains secrets | **no, never** | yes (encrypted in the DB) |
+| Schedule | no | **yes** |
+| Example | `mysql-backup` | `mysql-web01`, `mysql-web02`, … |
 
-Jeden skript „záloha MySQL" tak obsluhuje libovolný počet MySQL serverů — každý jako
-samostatná instance s vlastními přihlašovacími údaji, databází a časem spouštění.
+So a single "MySQL backup" script serves any number of MySQL servers — each as a separate
+instance with its own credentials, database and run time.
 
-Instance míří na **právě jeden runner**. Jeden runner může hostit víc instancí.
-**Víc databází = víc instancí** (dá to nezávislý rozvrh, status a retry na každou).
+An instance targets **exactly one runner**. One runner can host multiple instances.
+**More databases = more instances** (that gives each one an independent schedule, status
+and retry).
 
-### Tři úrovně konfigurace
+### Three levels of configuration
 
-1. **Definice skriptu** — `scripts/<name>/<name>.toml` (git, bez secrets)
-2. **Instance** — v DB, seedovaná z `data/instances.json`
-3. **Host-level** — `config/server.toml` a `config/runner.toml`
+1. **Script definition** — `scripts/<name>/<name>.toml` (git, no secrets)
+2. **Instance** — in the DB, seeded from `data/instances.json`
+3. **Host level** — `config/server.toml` and `config/runner.toml`
 
 ---
 
-## Struktura repozitáře
+## Repository layout
 
 ```
-cmd/server            binárka arcatum-server
-cmd/runner            binárka arcatum-runner
-cmd/arcatum-ca        správa PKI (CA, certifikáty, podepisovací klíč)
-internal/server       HTTP API, scheduler, SQLite store, autorizace, restic REST backend
-internal/runner       checkin smyčka, executor, ověření podpisu, orchestrace resticu
-pkg/proto             zprávy protokolu + kanonická serializace pro podpis
-pkg/jobspec           parser manifestu skriptu + validace
-pkg/schedule          výpočet „next run" (denní/týdenní/měsíční)
-pkg/config            config serveru (server.toml) i runneru (runner.toml)
-pkg/crypto            PKI, mTLS konfigurace, podpisy úloh, šifrování secrets
-web/                  web UI zabalené do binárky (embed.FS)
-scripts/              DEFINICE skriptů — kód + manifest, bez secrets
+cmd/server            arcatum-server binary
+cmd/runner            arcatum-runner binary
+cmd/arcatum-ca        PKI management (CA, certificates, signing key)
+internal/server       HTTP API, scheduler, SQLite store, authorization, restic REST backend
+internal/runner       checkin loop, executor, signature verification, restic orchestration
+pkg/proto             protocol messages + canonical serialization for signing
+pkg/jobspec           script manifest parser + validation
+pkg/schedule          "next run" computation (daily/weekly/monthly)
+pkg/config            server config (server.toml) and runner config (runner.toml)
+pkg/crypto            PKI, mTLS configuration, job signatures, secret encryption
+web/                  web UI embedded into the binary (embed.FS)
+scripts/              script DEFINITIONS — code + manifest, no secrets
 data/                 instances.example.json
 config/               server.example.toml, runner.example.toml
-deploy/gen-certs.sh   vygeneruje celé PKI jedním příkazem
-justfile              zkratky pro build, testy a lokální běh (viz Vývoj)
-docs/architecture.md  architektura a rozhodnutí
+deploy/gen-certs.sh   generates the whole PKI with a single command
+justfile              shortcuts for build, tests and local runs (see Development)
+docs/architecture.md  architecture and decisions
 ```
 
 ---
 
-## Rychlý start (lokální vyzkoušení)
+## Quick start (trying it locally)
 
-Předpoklad: Go 1.26+. Pokud Go není na `PATH`:
+Prerequisite: Go 1.26+. If Go is not on `PATH`:
 
 ```sh
 export PATH=/usr/local/go/bin:$PATH
 ```
 
-**1) Připravit config a instanci**
+**1) Prepare the config and an instance**
 
 ```sh
 cp config/server.example.toml server.toml
 cp data/instances.example.json data/instances.json
-# v instances.json nastav "runner_id" na hostname stroje, kde poběží runner:
+# in instances.json set "runner_id" to the hostname of the machine where the runner will run:
 hostname
 ```
 
-Config patří do kořene checkoutu: server hledá `./server.toml` a až pak
-`/etc/arcatum/server.toml`, takže spuštění z repozitáře vezme tenhle. Do gitu nepatří
-(je v `.gitignore`) — verzovaný je jen `config/server.example.toml`.
+The config belongs in the root of the checkout: the server looks for `./server.toml` first
+and only then `/etc/arcatum/server.toml`, so running from the repository picks up this one.
+It does not belong in git (it's in `.gitignore`) — only `config/server.example.toml` is
+versioned.
 
-Pro lokální test uprav v `server.toml` cesty, ať se nesahá do `/opt/arcatum`
-a `/central_backup`:
+For a local test, adjust the paths in `server.toml` so nothing touches `/opt/arcatum` and
+`/central_backup`:
 
 ```toml
 [server]
@@ -161,255 +163,264 @@ listen = "127.0.0.1:8080"
 backup_dir = "./local/backup"
 ```
 
-**2) Spustit server**
+**2) Start the server**
 
 ```sh
 go run ./cmd/server -instances data/instances.json
 ```
 
-V logu se při prvním startu objeví vygenerované heslo účtu `admin` — s ním se přihlásíš do
-webu na `http://127.0.0.1:8080/`.
+On the first start the log prints the generated password for the `admin` account — use it to
+log into the web UI at `http://127.0.0.1:8080/`.
 
-**3) Spustit úlohu ručně a nechat runner doběhnout**
+**3) Trigger a job manually and let the runner finish it**
 
 ```sh
-# v jiném terminálu — vynutí spuštění při nejbližším checkinu
+# in another terminal — forces a run at the next checkin
 curl -X POST http://127.0.0.1:8443/api/v1/instances/hello-demo/run
 
-# runner se jednou přihlásí, úlohu spustí a odešle výsledek
+# the runner checks in once, runs the job and submits the result
 go run ./cmd/runner -server http://127.0.0.1:8443 -once
 ```
 
-**4) Zkontrolovat výsledek**
+**4) Check the result**
 
 ```sh
-curl http://127.0.0.1:8443/                              # textová status stránka
-curl http://127.0.0.1:8443/api/v1/runs                   # seznam běhů
-curl http://127.0.0.1:8443/api/v1/runs/run-1/output      # zachycený výstup
+curl http://127.0.0.1:8443/                              # plain-text status page
+curl http://127.0.0.1:8443/api/v1/runs                   # list of runs
+curl http://127.0.0.1:8443/api/v1/runs/run-1/output      # captured output
 ```
 
-Nebo ve webu na `http://127.0.0.1:8080/` — záložka **Běhy** a klik na běh.
+Or in the web UI at `http://127.0.0.1:8080/` — the **Runs** tab, then click a run.
 
-Runner jako služba (bez `-once`) se hlásí opakovaně podle `poll_interval`.
+The runner as a service (without `-once`) checks in repeatedly according to `poll_interval`.
 
-> **Se `just`** je celý tenhle postup na čtyři příkazy — `just dev-init` (připraví `local/`
-> s configem i seedem), `just server`, `just trigger` a `just runner-once`. Viz
-> [Zkratky přes just](#zkratky-přes-just).
+> **With `just`** the whole procedure is four commands — `just dev-init` (prepares `local/`
+> with a config and a seed), `just server`, `just trigger` and `just runner-once`. See
+> [just shortcuts](#just-shortcuts).
 
-> Tento rychlý start běží **bez zabezpečení** (plain HTTP, žádné ověřování). Pro reálné
-> nasazení pokračuj sekcí [Zabezpečení](#zabezpečení-mtls-a-podpis-úloh) nebo přímo
-> návodem [Nasazení produkční verze](docs/production.md).
+> This quick start runs **without security** (plain HTTP, no authentication). For a real
+> deployment continue with the [Security](#security-mtls-and-job-signing) section or go
+> straight to the [Production deployment](docs/production.md) guide.
 
 ---
 
-## Konfigurace
+## Configuration
 
 ### Server — `server.toml`
 
-Hledá se `./server.toml`, pak `/etc/arcatum/server.toml`; `-config` obojí přebije. Na
-produkci tedy leží v `/etc/arcatum`, ve vývoji v kořeni checkoutu — a binárka spuštěná
-mimo checkout sáhne po produkční konfiguraci, tedy i po produkční PKI.
+`./server.toml` is looked up first, then `/etc/arcatum/server.toml`; `-config` overrides
+both. In production it therefore lives in `/etc/arcatum`, in development in the root of the
+checkout — and a binary started outside the checkout will reach for the production config,
+and with it the production PKI.
 
 ```toml
 [server]
-listen    = "0.0.0.0:8443"                  # API pro runnery (mTLS)
-scripts   = "/opt/arcatum/scripts"          # adresář s definicemi skriptů
-data_dir  = "/central_backup/arcatum/data"  # zde vzniká arcatum.db
-timezone  = "Europe/Prague"                 # default TZ pro rozvrhy bez vlastní
+listen    = "0.0.0.0:8443"                  # API for runners (mTLS)
+scripts   = "/opt/arcatum/scripts"          # directory with script definitions
+data_dir  = "/central_backup/arcatum/data"  # arcatum.db is created here
+timezone  = "Europe/Prague"                 # default TZ for schedules without their own
 log_level = "info"
 
 [web]
-listen      = "0.0.0.0:8080"                # web UI (plain HTTP, jméno a heslo)
-session_ttl = "12h"                         # jak dlouho vydrží přihlášení bez aktivity
-# secure_cookie = true                      # jen když před webem stojí HTTPS proxy
+listen      = "0.0.0.0:8080"                # web UI (plain HTTP, username and password)
+session_ttl = "12h"                         # how long a login survives without activity
+# secure_cookie = true                      # only when an HTTPS proxy sits in front of the web
 
 [storage]
-backup_dir = "/central_backup/arcatum"      # kam se ukládají zálohovaná data
+backup_dir = "/central_backup/arcatum"      # where backed-up data is stored
 
 [tls]
-# ca_cert / cert / key — mTLS, zapojíme později
+# ca_cert / cert / key — mTLS, wired up later
 ```
 
-Chybějící pole padají na defaulty (`pkg/config.Default`). Chybějící **soubor** ale ne:
-server bez konfigurace skončí chybou, protože vestavěné defaulty znamenají plain HTTP
-a hesla instancí v plaintextu — to není stav, do kterého se má spadnout překlepem v cestě.
+Missing fields fall back to defaults (`pkg/config.Default`). A missing **file** does not:
+a server without a config exits with an error, because the built-in defaults mean plain HTTP
+and instance passwords in plaintext — that is not a state you should fall into because of a
+typo in a path.
 
-**Dva porty, dva druhy volajících.** `[server] listen` je pro runnery a ověřuje je
-certifikátem; `[web] listen` je pro lidi a ověřuje je heslem. Prázdné `[web] listen` web
-vypne. Kolizi adres (dva listenery na jednom portu) config odmítne při startu, i s bootstrap
-portem — jinak by jeden z nich spadl na „address already in use" a nebylo by zřejmé který.
+**Two ports, two kinds of caller.** `[server] listen` is for runners and authenticates them
+by certificate; `[web] listen` is for humans and authenticates them by password. An empty
+`[web] listen` turns the web UI off. The config rejects an address collision (two listeners
+on one port) at startup, including the bootstrap port — otherwise one of them would die on
+"address already in use" and it would not be obvious which.
 
 ### Runner — `runner.toml`
 
 ```toml
 [runner]
-server        = "https://172.24.0.60:8443"   # kam se hlásit
+server        = "https://172.24.0.60:8443"   # where to check in
 poll_interval = "30s"
 data_dir      = "/var/lib/arcatum-runner"
 ```
 
-> **Kde která adresa žije:** `listen` serveru je v `server.toml`; adresu, **kam runner
-> volá**, drží `runner.toml`. Server svou vlastní dosažitelnou adresu nezná ani znát nemá.
-> Při instalaci runneru ji vyplní `install.sh` z URL, ze které se instalátor stáhl.
+> **Which address lives where:** the server's `listen` is in `server.toml`; the address the
+> **runner calls** is held by `runner.toml`. The server does not know its own reachable
+> address and does not need to. When installing a runner, `install.sh` fills it in from the
+> URL the installer was downloaded from.
 
 ---
 
-## Zabezpečení (mTLS a podpis úloh)
+## Security (mTLS and job signing)
 
-Bez sekcí `[tls]` a `[signing]` běží Arcatum **nezabezpečeně** — plain HTTP, server
-neověřuje volající a runner spustí cokoli, co dostane. To je určeno **jen pro lokální
-vývoj**; obě komponenty na to při startu upozorní.
+Without the `[tls]` and `[signing]` sections Arcatum runs **insecurely** — plain HTTP, the
+server does not authenticate callers and the runner executes anything it receives. That is
+meant **for local development only**; both components warn about it at startup.
 
-Ochrana má tři nezávislé vrstvy:
+Protection has three independent layers:
 
-1. **mTLS** — kdo je na drátě. Server i runner mají certifikát od společné Arcatum CA
-   a ověřují se navzájem. Neznámý host neprojde ani TLS handshakem.
-2. **Podpis úloh** — odkud pochází práce. Server podepisuje každou úlohu Ed25519 klíčem
-   a runner podpis **ověří ještě před spuštěním**. Nesouhlasí-li, kód nespustí
-   a nahlásí selhání zpět. Podpis pokrývá i SHA‑256 artefaktu, takže je svázán
-   s konkrétním kódem.
-3. **Šifrování secrets at-rest** — co leží v databázi. Hesla instancí jsou v `arcatum.db`
-   šifrovaná (AES‑256‑GCM), takže kopie databáze sama o sobě žádné přihlašovací údaje
-   neprozradí.
+1. **mTLS** — who is on the wire. The server and the runner both hold a certificate from a
+   shared Arcatum CA and authenticate each other. An unknown host does not even get through
+   the TLS handshake.
+2. **Job signing** — where the work comes from. The server signs every job with an Ed25519
+   key and the runner **verifies the signature before running anything**. If it does not
+   match, it does not execute the code and reports a failure back. The signature also covers
+   the SHA‑256 of the artifact, so it is bound to a specific piece of code.
+3. **Secret encryption at rest** — what sits in the database. Instance passwords are
+   encrypted in `arcatum.db` (AES‑256‑GCM), so a copy of the database on its own reveals no
+   credentials.
 
-Proč to není jedna vrstva: mTLS chrání spojení, podpis chrání *úlohu*, šifrování chrání
-*uložená data*. Kdyby unikl TLS klíč serveru, podepisovací klíč je jiný soubor a útočník
-runneru kód nepodstrčí; kdyby unikla záloha databáze, master klíč je také jiný soubor.
+Why this is not a single layer: mTLS protects the connection, the signature protects the
+*job*, encryption protects the *stored data*. If the server's TLS key leaked, the signing
+key is a different file and the attacker cannot slip code to a runner; if a database backup
+leaked, the master key is a different file too.
 
-**Lidé se ale hlásí jménem a heslem**, ne certifikátem — na to je [web UI](#web-ui)
-a samostatný plain-HTTP port `[web] listen`. Certifikát do prohlížeče se musí vyexportovat,
-naimportovat v každém počítači a po roce vyměnit; heslo je pohodlnější a u operátora, který
-jen kouká na výsledky záloh, ničemu neubírá: web nesahá na klíče a *úlohy* chrání podpis,
-který si server dělá sám. Runnery na certifikátech zůstávají — stroj se instaluje jednou
-a certifikát je to, čím ho server pustí (nebo nepustí) už na TLS handshaku.
+**People, however, log in with a username and password**, not a certificate — that is what
+the [web UI](#web-ui) and the separate plain-HTTP `[web] listen` port are for. A browser
+certificate has to be exported, imported on every computer and replaced after a year; a
+password is more convenient and costs nothing for an operator who only watches backup
+results: the web UI does not touch keys, and *jobs* are protected by a signature the server
+produces itself. Runners stay on certificates — a machine is installed once, and the
+certificate is what makes the server let it in (or not) already at the TLS handshake.
 
-### Přihlášení do webu (jméno a heslo)
+### Logging into the web UI (username and password)
 
-Účty žijí v `arcatum.db` v tabulce `users` a mají dvě role:
+Accounts live in `arcatum.db` in the `users` table and have two roles:
 
-| Role | Co smí |
+| Role | What it may do |
 |---|---|
-| `admin` | všechno — spouštět úlohy, editovat instance, schvalovat runnery, rotovat klíče, spravovat účty |
-| `viewer` | jen čtení — běhy, výstupy, instance, runnery, obnova. Žádná tlačítka, která něco mění |
+| `admin` | everything — trigger jobs, edit instances, approve runners, rotate keys, manage accounts |
+| `viewer` | read only — runs, outputs, instances, runners, restore. No buttons that change anything |
 
-Ukládá se jen **PBKDF2-HMAC-SHA256 verifikátor** (600 000 iterací, samostatná sůl na
-každý účet), nikdy heslo. Kopie databáze tedy nikoho nepřihlásí ani neprozradí, co si kdo
-zvolil — a hádat hashe je pomalé záměrně. Přihlášení drží cookie `arcatum_session`
-(`HttpOnly`, `SameSite=Strict`), v databázi je z ní jen SHA‑256, takže se ani z tabulky
-sezení nedá vydávat za přihlášeného operátora.
+Only a **PBKDF2-HMAC-SHA256 verifier** is stored (600,000 iterations, a separate salt per
+account), never the password. So a copy of the database logs nobody in and does not reveal
+what anyone chose — and guessing hashes is deliberately slow. A login is held by the
+`arcatum_session` cookie (`HttpOnly`, `SameSite=Strict`); the database stores only its
+SHA‑256, so not even the session table lets anyone impersonate a logged-in operator.
 
-**První účet vytvoří server sám.** Když v databázi není žádný, při startu vznikne `admin`
-a jeho vygenerované heslo se **jednou** vypíše do logu:
+**The server creates the first account itself.** When there is none in the database, an
+`admin` is created at startup and its generated password is printed to the log **once**:
 
 ```
   ┌─ first start: created the web account ─────────────────────
   │   user:     admin
   │   password: k4m2ftq7hn3bwzla
-  │ Log in and change it (Účet → změnit heslo). A forgotten
+  │ Log in and change it (Account → change password). A forgotten
   │ password is reset with: arcatum-server -passwd admin
   └───────────────────────────────────────────────────────────
 ```
 
-Další účty se přidávají z webu (záložka **Uživatelé**). Když se heslo ztratí i tomu
-poslednímu adminovi, cesta zpět je ze shellu na serveru:
+Further accounts are added from the web UI (the **Users** tab). If even the last admin loses
+their password, the way back is from a shell on the server:
 
 ```sh
 arcatum-server -passwd petr
-#   → vypíše nové vygenerované heslo; účet vytvoří, pokud neexistuje
-ARCATUM_PASSWORD='vlastní heslo' arcatum-server -passwd petr
-#   → nastaví konkrétní heslo (proměnná prostředí, ať nekončí v historii shellu)
-arcatum-server -passwd kolega -passwd-role viewer
+#   → prints a newly generated password; creates the account if it does not exist
+ARCATUM_PASSWORD='your own password' arcatum-server -passwd petr
+#   → sets a specific password (environment variable, so it does not end up in shell history)
+arcatum-server -passwd colleague -passwd-role viewer
 ```
 
-Co web hlídá sám:
+What the web UI enforces on its own:
 
-- **Změna hesla, vypnutí nebo smazání účtu okamžitě ukončí jeho sezení** — nestačí čekat,
-  než vyprší cookie.
-- **Posledního funkčního admina nelze smazat, vypnout ani degradovat na viewera.** Odemknout
-  systém zpátky by šlo jen ze shellu, tak k tomu web nedá dojít.
-- **Neúspěšná přihlášení se po pěti pokusech zdržují** (1 min, dál se zdvojnásobuje po
-  15 minut) — kontrola hesla je záměrně drahá a nesmí se dát volat ve smyčce.
-- **Neexistující jméno se odmítá stejně dlouho jako špatné heslo**, takže z rychlosti
-  odpovědi nejde vyčíst, které účty existují.
-- **Požadavky, které něco mění, musí přijít z Arcatum** (kontrola `Origin`), aby cizí
-  stránka nemohla jednat cookie přihlášeného operátora.
+- **Changing a password, disabling or deleting an account immediately ends its sessions** —
+  no waiting for the cookie to expire.
+- **The last working admin cannot be deleted, disabled or demoted to viewer.** Unlocking the
+  system again would only be possible from a shell, so the web UI does not let it happen.
+- **Failed logins are throttled after five attempts** (1 min, doubling further for
+  15 minutes) — the password check is deliberately expensive and must not be callable in a
+  loop.
+- **A non-existent username is rejected for just as long as a wrong password**, so response
+  time does not reveal which accounts exist.
+- **Requests that change something must come from Arcatum** (an `Origin` check), so a foreign
+  page cannot act on the cookie of a logged-in operator.
 
-### Šifrování secrets at-rest
+### Secret encryption at rest
 
-Každá hodnota se šifruje samostatně, takže **názvy** secrets zůstávají čitelné (web UI
-umí zobrazit, které jsou nastavené) a **hodnoty** ne. V databázi to vypadá takto:
+Every value is encrypted separately, so the **names** of secrets stay readable (the web UI
+can show which ones are set) and the **values** do not. In the database it looks like this:
 
 ```
 "secrets": {"password": "enc:v1:VzeO2eeBNYagsYJ1HiiMlle5ERZk…"}
 ```
 
-Ciphertext je kryptograficky svázán s **konkrétní instancí a názvem parametru**. Kdo umí
-do databáze zapisovat, nemůže tedy zkopírovat heslo z jedné instance do druhé — ověření
-selže.
+The ciphertext is cryptographically bound to the **specific instance and parameter name**.
+So whoever can write to the database cannot copy a password from one instance to another —
+verification fails.
 
-> **Master klíč si zazálohuj** mimo stroj, který chrání. Jeho ztrátou se všechna uložená
-> hesla stanou nečitelnými. Naopak jeho záměna se pozná okamžitě — čtení skončí chybou,
-> nikoli tichým prázdným heslem.
+> **Back up the master key** off the machine it protects. Losing it makes all stored
+> passwords unreadable. Swapping it, on the other hand, is noticed immediately — reads fail
+> with an error rather than a silently empty password.
 
-Zapnutí šifrování na existující instalaci nic nerozbije: hodnoty uložené dříve
-v plaintextu se dál načtou a při nejbližším importu instancí se zašifrují.
+Turning encryption on for an existing installation breaks nothing: values stored earlier in
+plaintext are still read and get encrypted at the next instance import.
 
-### Role v certifikátech
+### Roles in certificates
 
-Role je v `OU` certifikátu a server podle ní dělí přístup:
+The role sits in the certificate's `OU` and the server splits access by it:
 
-| Role | Kdo | Co smí |
+| Role | Who | What it may do |
 |---|---|---|
-| `runner` | zálohovaný server | jen `checkin` a hlášení **vlastních** běhů |
-| `admin` | operátor volající API ze shellu | ostatní API — spouštění úloh, výpisy, čtení výstupů |
+| `runner` | a backed-up server | only `checkin` and reporting **its own** runs |
+| `admin` | an operator calling the API from a shell | the rest of the API — triggering jobs, listings, reading outputs |
 
-Admin certifikát je dnes potřeba jen pro volání API na portu `[server] listen` (typicky
-z `curl` nebo skriptu). Do prohlížeče ho nikdo naimportovat nemusí — web má
-[vlastní přihlášení](#přihlášení-do-webu-jméno-a-heslo).
+The admin certificate is only needed today for calling the API on the `[server] listen` port
+(typically from `curl` or a script). Nobody has to import it into a browser — the web UI has
+its [own login](#logging-into-the-web-ui-username-and-password).
 
-**Identitu určuje certifikát, ne požadavek.** Runner se identifikuje `CN` svého
-certifikátu, které musí odpovídat `runner_id` v instancích. Když se runner s platným
-certifikátem pokusí vydávat za jiný host, server to odmítne (403) — nemlčí.
+**Identity is determined by the certificate, not by the request.** A runner identifies
+itself by the `CN` of its certificate, which must match the `runner_id` in the instances. If
+a runner with a valid certificate tries to impersonate another host, the server rejects it
+(403) — it does not stay silent.
 
-### Vygenerování certifikátů
+### Generating certificates
 
-Jeden příkaz vytvoří celé PKI — CA, podepisovací klíč, cert serveru, admin cert
-a certifikáty runnerů:
+A single command creates the whole PKI — the CA, the signing key, the server certificate, an
+admin certificate and runner certificates:
 
 ```sh
 deploy/gen-certs.sh -H 172.24.0.60,arcatum.xtuning.local -a petr web-01 db-01
 ```
 
-Vznikne adresář `pki/`:
+A `pki/` directory is created:
 
-| Soubor | Kam patří |
+| File | Where it belongs |
 |---|---|
-| `ca.pem` | server **i každý runner** |
-| `ca.key` | **jen server** — soukromý klíč CA |
-| `server.pem` / `server.key` | server |
-| `dispatch-signing.key` | **jen server** — podepisuje úlohy |
-| `dispatch-signing.pub` | **každý runner** — ověřuje úlohy |
-| `secrets-master.key` | **jen server** — šifruje uložené secrets (**zazálohovat!**) |
-| `admin-petr.pem` / `.key` | tvůj počítač (přístup k API/webu) |
-| `runner-web-01.pem` / `.key` | příslušný runner |
+| `ca.pem` | the server **and every runner** |
+| `ca.key` | **the server only** — the CA private key |
+| `server.pem` / `server.key` | the server |
+| `dispatch-signing.key` | **the server only** — signs jobs |
+| `dispatch-signing.pub` | **every runner** — verifies jobs |
+| `secrets-master.key` | **the server only** — encrypts stored secrets (**back it up!**) |
+| `admin-petr.pem` / `.key` | your computer (API/web access) |
+| `runner-web-01.pem` / `.key` | the runner in question |
 
-> `-H` musí obsahovat **všechny** adresy, na které se runnery připojují (IP i DNS),
-> jinak ověření TLS selže. Opakované spuštění skriptu existující CA ani podepisovací
-> klíč nepřepíše.
+> `-H` must contain **all** addresses the runners connect to (IP and DNS alike), otherwise
+> TLS verification fails. Running the script again overwrites neither an existing CA nor the
+> signing key.
 
-Jemnější kontrola přes `arcatum-ca` (`init`, `server`, `runner`, `admin`, `signing`,
-`master-key`, `sign-csr` — poslední je základ pro budoucí enrollment, kdy si runner klíč
-vygeneruje sám a posílá jen CSR):
+Finer control is available through `arcatum-ca` (`init`, `server`, `runner`, `admin`,
+`signing`, `master-key`, `sign-csr` — the last one is the basis for future enrollment, where
+a runner generates its key itself and only sends a CSR):
 
 ```sh
-go run ./cmd/arcatum-ca runner -dir pki -id web-02      # přidat runner
-go run ./cmd/arcatum-ca admin  -dir pki -name kolega    # přidat operátora
+go run ./cmd/arcatum-ca runner -dir pki -id web-02       # add a runner
+go run ./cmd/arcatum-ca admin  -dir pki -name colleague  # add an operator
 ```
 
-Existující CA, podepisovací klíč ani master klíč se nikdy nepřepíší implicitně — příkaz
-místo toho skončí chybou.
+An existing CA, signing key or master key is never overwritten implicitly — the command
+fails with an error instead.
 
-### Zapojení do konfigurace
+### Wiring it into the configuration
 
 ```toml
 # server.toml
@@ -426,7 +437,7 @@ master_key = "/opt/arcatum/pki/secrets-master.key"
 ```
 
 ```toml
-# runner.toml (na zálohovaném serveru)
+# runner.toml (on the backed-up server)
 [tls]
 ca_cert = "/var/lib/arcatum-runner/pki/ca.pem"
 cert    = "/var/lib/arcatum-runner/pki/runner-web-01.pem"
@@ -436,119 +447,123 @@ key     = "/var/lib/arcatum-runner/pki/runner-web-01.key"
 public_key = "/var/lib/arcatum-runner/pki/dispatch-signing.pub"
 ```
 
-Všechny tři cesty v `[tls]` musí být zadané společně — poloviční konfigurace je chyba,
-kterou server odmítne, aby nedošlo k tichému propadnutí na nezabezpečené HTTP.
+All three paths in `[tls]` must be given together — a half-configuration is an error the
+server rejects, so it cannot silently fall back to insecure HTTP.
 
-### Životní cyklus certifikátů
+### Certificate lifecycle
 
-**Automatická obnova.** Runner si sám vyžádá nový certifikát, když se blíží expirace
-(30 dní předem). Nepotřebuje na to schválení — žádost jde přes mTLS, takže se prokázal
-tím certifikátem, který mění. Bez toho by ti všechny runnery přestaly fungovat naráz
-v den, kdy vyprší původní certifikáty. Obnova zároveň **vymění i klíč**.
+**Automatic renewal.** A runner requests a new certificate itself when expiry approaches
+(30 days ahead). It needs no approval for that — the request goes over mTLS, so it has
+already proven itself with the very certificate it is replacing. Without this, all your
+runners would stop working at once on the day the original certificates expire. Renewal
+**replaces the key as well**.
 
-Runner se pak sám restartuje, aby nový certifikát začal používat (systemd unit má
+The runner then restarts itself so it starts using the new certificate (the systemd unit has
 `Restart=always`).
 
-**Zneplatnění při kompromitaci.** Ve webu u runneru klikneš na **zneplatnit**:
+**Revocation on compromise.** In the web UI, click **revoke** on the runner:
 
-1. Certifikát okamžitě přestane platit **všude** — checkin, hlášení výsledků i přístup
-   k restic repozitáři
-2. Runner přejde do stavu **`pending`**
-3. Runner to při dalším checkinu pozná, zahodí certifikát **i klíč** a sám pošle novou
-   žádost
-4. Ty ho schválíš — nebo mu certifikát předáš ručně (`arcatum-ca runner -id <id>`)
+1. The certificate stops being valid **everywhere** immediately — checkin, result reporting
+   and access to the restic repository
+2. The runner moves to the **`pending`** state
+3. The runner notices at the next checkin, discards the certificate **and the key**, and
+   sends a new request itself
+4. You approve it — or hand it a certificate manually (`arcatum-ca runner -id <id>`)
 
-Při podezření na kompromitaci **CA** je ve spodní části záložky Runnery tlačítko
-**zneplatnit certifikáty všech runnerů**. Zastaví to zálohování, dokud runnery znovu
-neschválíš.
+If the **CA** is suspected of being compromised, there is a **revoke certificates of all
+runners** button at the bottom of the Runners tab. It stops backups until you approve the
+runners again.
 
-> Rozdíl mezi **zneplatnit** a **zamítnout**: zneplatnění znamená „začni znovu" a runner
-> sám požádá o nový certifikát. Zamítnutí je „ne" — runner se pak už neozývá, aby ti
-> nezaplňoval frontu žádostmi.
+> The difference between **revoke** and **reject**: revocation means "start over" and the
+> runner asks for a new certificate itself. Rejection means "no" — the runner then stops
+> calling, so it does not fill your queue with requests.
 
-**Varování před expirací.** Web hlásí nahoře, když se blíží konec platnosti tvého
-admin certifikátu (default **1 rok** — vyprší první), certifikátu serveru, nebo
-certifikátů runnerů. Datum je i ve sloupci u každého runneru.
+**Expiry warnings.** The web UI reports at the top when the validity of your admin
+certificate (default **1 year** — it expires first), the server certificate, or runner
+certificates is coming to an end. The date is also in a column next to every runner.
 
-Obnovu certifikátů, které se neobnovují samy, uděláš takto:
+Certificates that do not renew themselves are renewed like this:
 
 ```sh
-go run ./cmd/arcatum-ca admin  -dir pki -name petr           # tvůj přístup k webu
-go run ./cmd/arcatum-ca server -dir pki -hosts 172.24.0.60   # certifikát serveru
+go run ./cmd/arcatum-ca admin  -dir pki -name petr           # your web access
+go run ./cmd/arcatum-ca server -dir pki -hosts 172.24.0.60   # the server certificate
 ```
 
-### Rotace klíčů
+### Key rotation
 
-Všechny tři dlouhodobé klíče jde vyměnit bez zásahu na jednotlivých hostech. Postup je
-u všech stejný: **okno, kdy platí starý i nový**, runnery si nové převezmou samy, a okno
-zavřeš, až server potvrdí, že jsou všichni přeneseni. Stav sleduje záložka **Klíče**.
+All three long-lived keys can be replaced without touching individual hosts. The procedure
+is the same for all of them: **a window in which both the old and the new key are valid**,
+runners pick the new one up themselves, and you close the window once the server confirms
+everyone has moved over. The **Keys** tab tracks the state.
 
-| Co | Kdo to roznese | Cutover |
+| What | Who distributes it | Cutover |
 |---|---|---|
-| master klíč secrets | nic — jen server | odebrat starý z `previous_keys` |
-| podepisovací klíč úloh | runnery samy (podepsaná sada) | odebrat starý z `previous_keys` |
-| certifikační autorita | runnery samy (podepsaný bundle) | zúžit bundle na novou CA |
+| secrets master key | nobody — the server only | remove the old one from `previous_keys` |
+| job signing key | the runners themselves (a signed set) | remove the old one from `previous_keys` |
+| certificate authority | the runners themselves (a signed bundle) | narrow the bundle down to the new CA |
 
-**Master klíč secrets** — žádná distribuce, celé na serveru:
+**Secrets master key** — no distribution, entirely on the server:
 
 ```sh
-arcatum-ca master-key -dir pki -name secrets-master-2      # 1. nový klíč
-# 2. server.toml: master_key = nový, previous_keys = ["…/secrets-master.key"]
-# 3. restart, pak v UI „Klíče" → přešifrovat (nebo POST /api/v1/secrets/rekey)
-# 4. až je pending 0, odeber previous_keys a restartuj
+arcatum-ca master-key -dir pki -name secrets-master-2      # 1. new key
+# 2. server.toml: master_key = the new one, previous_keys = ["…/secrets-master.key"]
+# 3. restart, then in the UI "Keys" → re-encrypt (or POST /api/v1/secrets/rekey)
+# 4. once pending is 0, remove previous_keys and restart
 ```
 
-Přešifrování je **bezpečné spustit opakovaně** — hodnoty už na aktuálním klíči přeskočí,
-takže přerušený průběh se prostě dokončí dalším spuštěním.
+Re-encryption is **safe to run repeatedly** — values already on the current key are skipped,
+so an interrupted run simply finishes on the next attempt.
 
-**Podepisovací klíč úloh** — runnery si novou sadu vezmou samy:
+**Job signing key** — runners take the new set themselves:
 
 ```sh
 arcatum-ca signing -dir pki -name dispatch-signing-2
-# server.toml: [signing] key = nový, previous_keys = ["…/dispatch-signing.key"]
-# restart → runnery při dalším checkinu sadu přijmou → pak odeber previous_keys
+# server.toml: [signing] key = the new one, previous_keys = ["…/dispatch-signing.key"]
+# restart → runners accept the set at the next checkin → then remove previous_keys
 ```
 
-> `previous_keys` u `[signing]` jsou **privátní** klíče, ne veřejné. Server totiž
-> publikovanou sadu podepisuje **všemi** klíči, které drží — jinak by runner, který zná
-> jen starý klíč, novou sadu odmítl a rotace by se nikdy nerozjela.
+> `previous_keys` under `[signing]` are **private** keys, not public ones. The server signs
+> the published set with **all** the keys it holds — otherwise a runner that only knows the
+> old key would reject the new set and rotation would never get going.
 
-**Certifikační autorita** — nejvíc kroků, protože jde o kotvu důvěry:
+**Certificate authority** — the most steps, because this is the trust anchor:
 
 ```sh
-arcatum-ca init   -dir pki -name ca-new -cn "Arcatum CA 2026"   # 1. nová CA
+arcatum-ca init   -dir pki -name ca-new -cn "Arcatum CA 2026"   # 1. new CA
 arcatum-ca bundle -dir pki -out pki/ca-bundle.pem ca.pem ca-new.pem
-# 2. server.toml: [tls] ca_cert = bundle; [bootstrap] ca_cert/ca_key = ca-new
-#    POZOR: certifikát serveru zatím NECHAT pod starou CA
-# 3. restart → runnery přijmou bundle a při obnově přejdou na novou CA
-# 4. až GET /api/v1/rotation hlásí safe_to_drop_old_ca:
+# 2. server.toml: [tls] ca_cert = the bundle; [bootstrap] ca_cert/ca_key = ca-new
+#    CAREFUL: for now KEEP the server certificate under the old CA
+# 3. restart → runners accept the bundle and move to the new CA on renewal
+# 4. once GET /api/v1/rotation reports safe_to_drop_old_ca:
 arcatum-ca server -dir pki -ca ca-new -hosts 172.24.0.60
 arcatum-ca admin  -dir pki -ca ca-new -name petr
 arcatum-ca bundle -dir pki -out pki/ca-bundle.pem ca-new.pem
 ```
 
-> **Krok 2 je snadné pokazit.** Kdybys certifikát serveru vydal pod novou CA hned, runner,
-> který zná jen starou, se **nepřipojí** — a tím si nemůže stáhnout bundle, který by to
-> spravil. Rotace se zasekne. Server na to upozorní: pole `warning` ve stavu rotace
-> a hlášení v UI.
+> **Step 2 is easy to get wrong.** If you issued the server certificate under the new CA
+> right away, a runner that only knows the old one **will not connect** — and therefore
+> cannot download the bundle that would fix it. Rotation gets stuck. The server warns about
+> it: the `warning` field in the rotation status and a message in the UI.
 
-**Co záměrně není automatické:** zavření okna. Odebrání kotvy důvěry je jediná operace,
-která tě umí zamknout z vlastního systému — neobsluhovaná úloha, která to v noci pokazí,
-nechá runnery, kteří nevěří ani staré, ani nové CA. Rutinní **obnova certifikátů**
-naopak automatická je, protože její selhání je bezpečné: starý certifikát dál platí.
+**What deliberately is not automatic:** closing the window. Removing a trust anchor is the
+one operation that can lock you out of your own system — an unattended job that gets it wrong
+at night leaves you with runners that trust neither the old nor the new CA. Routine
+**certificate renewal**, on the other hand, is automatic, because its failure is safe: the
+old certificate remains valid.
 
-### Proč ne CRL/OCSP
+### Why not CRL/OCSP
 
-Nejsou zavedené — a zvážili jsme to. Zneplatnění se vynucuje **kontrolou stavu
-v databázi** na každém autorizačním bodu, což je pro uzavřený systém lepší než CRL:
-platí okamžitě, nemá cache ani propagační zpoždění.
+They are not in place — and we did consider them. Revocation is enforced by **checking state
+in the database** at every authorization point, which for a closed system is better than a
+CRL: it takes effect immediately and has no cache or propagation delay.
 
-Zbývá jedna mezera: kdyby unikl **TLS klíč serveru**, runnery to samy nezjistí. Ale dopad
-je omezený — podpis úloh je jiný klíč, takže útočník nedokáže podstrčit kód ke spuštění,
-a pack soubory jsou šifrované heslem repozitáře. A hlavně: tuhle mezeru řeší **rotace
-CA** výše, s menším aparátem než CRL infrastruktura.
+One gap remains: if the **server's TLS key** leaked, runners would not detect it themselves.
+But the impact is limited — job signing uses a different key, so an attacker cannot slip code
+in to be executed, and pack files are encrypted with the repository password. And above all:
+this gap is addressed by **CA rotation** above, with less machinery than a CRL
+infrastructure.
 
-### Volání API s certifikátem
+### Calling the API with a certificate
 
 ```sh
 curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
@@ -557,35 +572,36 @@ curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
 
 ---
 
-## Zálohování souborů (restic)
+## File backups (restic)
 
-Pro souborové zálohy Arcatum nevymýšlí vlastní formát — řídí **restic**. Deduplikace,
-inkrementální snapshoty, komprese, šifrování a kontrola integrity jsou přesně ty části,
-které se ladí roky.
+For file backups Arcatum does not invent its own format — it drives **restic**.
+Deduplication, incremental snapshots, compression, encryption and integrity checking are
+exactly the parts that take years to get right.
 
-Repozitář ale **leží na serveru**: Arcatum sám vystavuje restic REST backend, takže pack
-soubory tečou ze zálohovaného hostu na server a nekupí se na něm. Na hostu zůstane jen
-lokální cache resticu.
+The repository, however, **lives on the server**: Arcatum itself exposes a restic REST
+backend, so pack files flow from the backed-up host to the server and do not pile up on it.
+Only restic's local cache stays on the host.
 
 ```
- zálohovaný host                          arcatum-server
+ backed-up host                           arcatum-server
    restic backup                          /restic/<instance>/
-   │  pack soubory (mTLS)                 │
+   │  pack files (mTLS)                   │
    │ ───────────────────────────────────► │ backup_dir/restic/<instance>/
 ```
 
-Každá instance má **vlastní repozitář** a runner se dostane jen k repozitářům instancí,
-které jsou cílené na něj. Jeden zálohovaný server tak nemůže číst ani poškodit zálohy
-jiného.
+Every instance has **its own repository** and a runner only reaches the repositories of
+instances targeted at it. One backed-up server therefore cannot read or damage another's
+backups.
 
-### Předpoklady
+### Prerequisites
 
-Na zálohovaném serveru musí být `restic` (`apt install restic`). Když chybí, úloha selže
-s jasnou zprávou, nikoli záhadně.
+`restic` must be installed on the backed-up server (`apt install restic`). When it is
+missing, the job fails with a clear message rather than mysteriously.
 
-### Definice a instance
+### Definition and instance
 
-Skript typu `restic` nemá entrypoint — runner spouští restic sám podle parametrů. Ukázka:
+A `restic`-type script has no entrypoint — the runner runs restic itself according to the
+parameters. Example:
 [scripts/example/files_backup.toml](scripts/example/files_backup.toml).
 
 ```toml
@@ -594,7 +610,7 @@ type    = "restic"
 timeout = "6h"
 ```
 
-Instance pak určuje, co se zálohuje a jak dlouho se to drží:
+The instance then determines what is backed up and for how long it is kept:
 
 ```json
 {
@@ -608,83 +624,86 @@ Instance pak určuje, co se zálohuje a jak dlouho se to drží:
     "keep_weekly": "4",
     "keep_monthly": "6"
   },
-  "secrets": { "restic_password": "dlouhé-náhodné-heslo" },
+  "secrets": { "restic_password": "long-random-password" },
   "schedule": { "frequency": "daily", "time": "01:30" }
 }
 ```
 
-| Parametr | Význam |
+| Parameter | Meaning |
 |---|---|
-| `paths` | **povinné** — co zálohovat, oddělené čárkou |
-| `excludes` | restic exclude vzory, oddělené čárkou |
-| `tags` | další tagy snapshotu |
-| `keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` | retence (GFS) |
-| `restic_password` | secret — heslo repozitáře; nevyplněné se uloží jako `password` |
+| `paths` | **required** — what to back up, comma-separated |
+| `excludes` | restic exclude patterns, comma-separated |
+| `tags` | additional snapshot tags |
+| `keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` | retention (GFS) |
+| `restic_password` | secret — the repository password; if left empty it is stored as `password` |
 
-Runner repozitář při prvním použití sám inicializuje. Snapshoty dostanou tagy `arcatum`
-a `instance:<id>`.
+The runner initializes the repository itself on first use. Snapshots get the tags `arcatum`
+and `instance:<id>`.
 
-### Retence
+### Retention
 
-Když je nastavený kterýkoli `keep_*`, spustí se po **úspěšné** záloze `forget --prune`,
-omezený tagem na snapshoty téhle instance. Dvě záměrná rozhodnutí: neúspěšná záloha
-nikdy nesmaže staré snapshoty, a politika jedné instance nemůže zlikvidovat snapshoty
-jiné. Prázdná hodnota znamená „nenastaveno", ne „nedrž nic".
+When any `keep_*` is set, `forget --prune` runs after a **successful** backup, restricted by
+tag to this instance's snapshots. Two deliberate decisions: a failed backup never deletes old
+snapshots, and one instance's policy cannot wipe out another's snapshots. An empty value
+means "not set", not "keep nothing".
 
-> **Heslo repozitáře je nenahraditelné.** Restic ho neumí obnovit — bez něj jsou zálohy
-> nečitelné. V DB je šifrované (viz [Zabezpečení](#zabezpečení-mtls-a-podpis-úloh)),
-> ale kopii si ulož i mimo Arcatum.
+> **The repository password cannot be replaced.** Restic cannot recover it — without it the
+> backups are unreadable. It is encrypted in the DB (see
+> [Security](#security-mtls-and-job-signing)), but keep a copy outside Arcatum as well.
 >
-> Výchozí `password` je jen výplň, aby šlo instanci založit bez vymýšlení hesla —
-> repozitář jím sice zašifrovaný je, ale kdokoli se dostane k `backup_dir` na serveru,
-> si ho rozšifruje. U dat, na kterých záleží, nastav vlastní.
+> The default `password` is just a filler so an instance can be created without inventing a
+> password — the repository is indeed encrypted with it, but anyone who reaches `backup_dir`
+> on the server can decrypt it. For data that matters, set your own.
 
-### Obnova dat
+### Restoring data
 
-**Z webu** — záložka **Obnova**: vybereš instanci a snapshot, procházíš strom a stáhneš
-jednotlivý soubor nebo celý adresář jako `.tar`.
+**From the web UI** — the **Restore** tab: you pick an instance and a snapshot, browse the
+tree and download a single file or a whole directory as a `.tar`.
 
-Obnova běží **na serveru** proti repozitáři, který už tam je, a heslo si server
-dešifruje sám. Runner do toho není zapojený — a to je záměr: potřeba obnovy často
-znamená, že zálohovaný stroj je nedostupný, takže obnova na něm nesmí být závislá.
+The restore runs **on the server** against the repository that is already there, and the
+server decrypts the password itself. The runner is not involved — and that is intentional:
+needing a restore often means the backed-up machine is unavailable, so the restore must not
+depend on it.
 
-> Server k tomu potřebuje nainstalovaný `restic` (`apt install restic`). Bez něj vrátí
-> obnova jasnou chybu.
+> The server needs `restic` installed for this (`apt install restic`). Without it a restore
+> returns a clear error.
 
-Data se streamují přímo z repozitáře do prohlížeče (`restic dump`), takže se nikde
-nestagují na disk a velký archiv začne přicházet hned.
+Data is streamed straight from the repository to the browser (`restic dump`), so nothing is
+staged on disk anywhere and a large archive starts arriving immediately.
 
-Totéž přes API:
+The same over the API:
 
 ```sh
 A=(--cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key)
 I=https://172.24.0.60:8443/api/v1/instances/files-web01
 
-curl "${A[@]}" $I/snapshots                                  # co je k dispozici
-curl "${A[@]}" "$I/snapshots/latest/ls?path=/etc"             # procházení
+curl "${A[@]}" $I/snapshots                                  # what is available
+curl "${A[@]}" "$I/snapshots/latest/ls?path=/etc"             # browsing
 curl "${A[@]}" "$I/snapshots/latest/download?path=/etc/nginx/nginx.conf" -o nginx.conf
 curl "${A[@]}" "$I/snapshots/latest/download?path=/etc&archive=tar" -o etc.tar
 ```
 
-Místo `latest` jde použít ID konkrétního snapshotu — tím se vracíš k datům v čase.
+Instead of `latest` you can use a specific snapshot ID — that is how you go back to the data
+at a point in time.
 
-**Chybí:** obnova **zpět na zálohovaný server** (dnes stáhneš data k sobě a nakopíruješ
-je sám). Pro plnou katastrofickou obnovu se dá pořád použít restic přímo:
+**Missing:** restoring **back onto the backed-up server** (today you download the data to
+yourself and copy it over by hand). For a full disaster recovery you can still use restic
+directly:
 
 ```sh
 cat pki/admin-petr.pem pki/admin-petr.key > /tmp/admin-combined.pem
-export RESTIC_PASSWORD='dlouhé-náhodné-heslo'
+export RESTIC_PASSWORD='long-random-password'
 R="restic -r rest:https://172.24.0.60:8443/restic/files-web01/ \
      --cacert pki/ca.pem --tls-client-cert /tmp/admin-combined.pem"
 
-$R snapshots                       # co je k dispozici
-$R ls latest                       # obsah posledního snapshotu
-$R restore latest --target /tmp/obnova
-$R restore latest --target /tmp/obnova --include /etc/nginx   # jen část
-$R check                           # kontrola integrity repozitáře
+$R snapshots                       # what is available
+$R ls latest                       # contents of the latest snapshot
+$R restore latest --target /tmp/restore
+$R restore latest --target /tmp/restore --include /etc/nginx   # only a part
+$R check                           # repository integrity check
 ```
 
-Velikost repozitáře a počet snapshotů zjistíš i z API:
+The repository size and the number of snapshots are available from the API as well:
 
 ```sh
 curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
@@ -695,48 +714,52 @@ curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
 
 ## Web UI
 
-Web má **vlastní port** — otevři `http://172.24.0.60:8080/` a přihlas se jménem a heslem
-(`[web] listen` v configu, viz [Přihlášení do webu](#přihlášení-do-webu-jméno-a-heslo)).
-Je **zabalený v binárce** (`embed.FS`), takže se nic zvlášť neinstaluje a nemůže se rozejít
-s verzí serveru.
+The web UI has **its own port** — open `http://172.24.0.60:8080/` and log in with a username
+and password (`[web] listen` in the config, see
+[Logging into the web UI](#logging-into-the-web-ui-username-and-password)). It is
+**embedded in the binary** (`embed.FS`), so nothing is installed separately and it cannot
+drift apart from the server version.
 
-Přehledy a detail běhu:
+Overviews and run detail:
 
-| Záložka | Co ukazuje |
+| Tab | What it shows |
 |---|---|
-| **Běhy** | historie: stav, **stav přenosu na odlehlý server**, návratový kód, přenesená data, trvání |
-| **Instance** | příští běh, velikost restic repozitáře, **spustit teď**; klik otevře úpravu, tlačítko **nová instance** |
-| **Obnova** | snapshoty, procházení stromu, stažení souboru nebo adresáře jako `.tar` |
-| **Klíče** | stav rotace všech tří klíčů, přešifrování secrets, postup migrace CA |
-| **Runnery** | stav, platforma, **verze buildu**, expirace certifikátu, kdy se naposledy ohlásil; **schválit / zamítnout / zneplatnit** |
-| **Uživatelé** | účty webu: role, stav, poslední přihlášení; **přidat / nové heslo / změnit roli / vypnout / smazat** (jen pro roli `admin`) |
-| **Administrace** | [odlehlá kopie](#odlehlá-kopie), [záloha konfigurace, její obnova a vyprázdnění serveru](#záloha-konfigurace-a-reset-serveru) (jen pro roli `admin`) |
+| **Runs** | history: status, **off-site transfer status**, exit code, transferred data, duration |
+| **Instances** | next run, restic repository size, **run now**; a click opens the editor, plus a **new instance** button |
+| **Restore** | snapshots, tree browsing, downloading a file or directory as a `.tar` |
+| **Keys** | rotation status of all three keys, secret re-encryption, CA migration progress |
+| **Runners** | status, platform, **build version**, certificate expiry, when it last checked in; **approve / reject / revoke** |
+| **Users** | web accounts: role, status, last login; **add / new password / change role / disable / delete** (role `admin` only) |
+| **Administration** | [off-site replica](#off-site-replica), [config backup, its restore and wiping the server](#config-backup-and-server-reset) (role `admin` only) |
 
-Vpravo v hlavičce je přihlášený uživatel, jeho role, **změnit heslo** a **odhlásit**.
-Viewerovi se tlačítka, která něco mění, vůbec nezobrazí — a server je stejně odmítne (403),
-takže shoda UI se skutečnými právy není otázka důvěry v prohlížeč.
+The logged-in user, their role, **change password** and **log out** are on the right in the
+header. A viewer is not shown the buttons that change anything at all — and the server
+rejects them anyway (403), so the UI matching real permissions is not a matter of trusting
+the browser.
 
-Klikem na běh se otevře **detail s živým tailem výstupu** — u probíhající úlohy se log
-dosypává, jak přichází. Přepínač `stdout`/`stderr` a zaškrtávátko „sledovat"
-(automatické odscrollování). Přesně to, na co jsi mířil požadavkem usnadnit ladění
-skriptů: spustit ručně a hned vidět, co skript píše.
+Clicking a run opens a **detail with a live tail of the output** — for a job in progress the
+log keeps filling in as it arrives. There is a `stdout`/`stderr` switch and a "follow"
+checkbox (automatic scrolling). Exactly what you were after when you asked to make script
+debugging easier: run it by hand and see immediately what the script prints.
 
-Živý tail nepoužívá websockety — prohlížeč se ptá `GET /api/v1/runs/{id}/tail?offset=N`
-a server pošle jen to, co od posledního dotazu přibylo. Jednodušší, přežije to odpadnutí
-spojení a nepotřebuje to nic navíc na serveru.
+The live tail does not use websockets — the browser asks
+`GET /api/v1/runs/{id}/tail?offset=N` and the server sends only what has been added since the
+last query. Simpler, it survives a dropped connection, and it needs nothing extra on the
+server.
 
-### Přístup z prohlížeče
+### Access from a browser
 
-Nic instalovat netřeba — otevřít `http://<server>:8080/` a přihlásit se. Web je plain HTTP
-a patří proto do vnitřní sítě; kdo ho chce vystavit dál, ať před něj postaví HTTPS reverse
-proxy a v configu zapne `[web] secure_cookie = true`, aby cookie sezení chodila jen po HTTPS.
+Nothing needs installing — open `http://<server>:8080/` and log in. The web UI is plain HTTP
+and therefore belongs on the internal network; anyone who wants to expose it further should
+put an HTTPS reverse proxy in front of it and enable `[web] secure_cookie = true` in the
+config, so the session cookie only travels over HTTPS.
 
-Port webu je záměrně jiný než port API: mTLS by prohlížeč nutil poslat klientský certifikát,
-a to je přesně ta nepohodlnost, kterou přihlášení heslem odstraňuje. Runnery na port API
-chodí dál s certifikátem.
+The web port is deliberately different from the API port: mTLS would force the browser to
+send a client certificate, and that is exactly the inconvenience password login removes.
+Runners keep going to the API port with a certificate.
 
-Textový přehled pro shell zůstává na `/status` — na webovém portu za přihlášením, na portu
-API s admin certifikátem:
+The plain-text overview for the shell stays at `/status` — on the web port behind a login, on
+the API port with an admin certificate:
 
 ```sh
 curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
@@ -745,13 +768,14 @@ curl --cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key \
 
 ---
 
-## Odlehlá kopie
+## Off-site replica
 
-Arcatum je jinak **poslední místo, kde zálohy leží** — jeden požár, ransomware nebo
-překlep v `rm` a není odkud obnovovat. Replikace posílá všechno, co server uloží, na druhý
-stroj (typicky přes WireGuard) pomocí `rsync` přes `ssh`.
+Otherwise Arcatum is **the last place the backups sit** — one fire, ransomware or a typo in
+`rm` and there is nowhere to restore from. Replication sends everything the server stores to
+a second machine (typically over WireGuard) using `rsync` over `ssh`.
 
-Zapíná se sekcí `[replica]` v `server.toml`; bez ní se nic nemění a nic nového neběží.
+It is enabled by the `[replica]` section in `server.toml`; without it nothing changes and
+nothing new runs.
 
 ```toml
 [replica]
@@ -761,154 +785,162 @@ user         = "arcatum"
 path         = "/data"
 ssh_key      = "/opt/arcatum/pki/replica-ssh.key"
 known_hosts  = "/opt/arcatum/pki/replica-known_hosts"
-mirror       = true      # propagovat i mazání
-max_delete   = 100       # pojistka: víc smazání v jednom průchodu = odmítnout
-include_keys = true      # PKI, master klíč a snapshot databáze
+mirror       = true      # propagate deletions too
+max_delete   = 100       # safety catch: more deletions in one pass = refuse
+include_keys = true      # PKI, master key and a database snapshot
 ```
 
-Příprava druhého stroje je v [docs/production.md](docs/production.md#off-site-replika).
+Preparing the second machine is covered in
+[docs/production.md](docs/production.md#off-site-replica).
 
-### Co tam odtéká
+### What flows over there
 
 ```
-/data/runs/<run-id>/       dumpy databází a logy běhů
-/data/restic/<instance>/   restic repozitáře
-/data/config-backups/      archivy konfigurace
-/data/meta/arcatum.db      konzistentní snapshot databáze (VACUUM INTO, ne kopie souboru)
-/data/meta/server.toml     konfigurace serveru pro referenci
-/data/keys/                PKI, podepisovací klíč, master klíč secrets (při include_keys)
+/data/runs/<run-id>/       database dumps and run logs
+/data/restic/<instance>/   restic repositories
+/data/config-backups/      configuration archives
+/data/meta/arcatum.db      a consistent database snapshot (VACUUM INTO, not a file copy)
+/data/meta/server.toml     the server configuration, for reference
+/data/keys/                PKI, signing key, secrets master key (with include_keys)
 ```
 
-Klíče jsou to, co dělá rozdíl mezi **bodem obnovy** a hromadou nečitelných souborů: bez
-master klíče se hesla repozitářů nedají rozšifrovat a restic repozitář na replice se
-neotevře. Cena za to je, že **replika je stejně citlivá jako tenhle server** — kdo se
-dostane k `/data`, otevře každý repozitář a vydá certifikát libovolnému hostu. Server na
-to při startu hlasitě upozorní. Drž `/data` v módu `0700` pod vyhrazeným účtem.
+The keys are what makes the difference between a **recovery point** and a pile of unreadable
+files: without the master key the repository passwords cannot be decrypted and the restic
+repository on the replica will not open. The price is that **the replica is just as sensitive
+as this server** — whoever reaches `/data` opens every repository and can issue a certificate
+to any host. The server warns loudly about this at startup. Keep `/data` in mode `0700` under
+a dedicated account.
 
-### Když linka vypadne
+### When the link goes down
 
-Jednotkou práce je **řádek ve frontě, ne událost**. Položka, která se nepřenesla, si své
-místo drží a zkouší se dál (30 s, pak dvojnásobek do 30 min) — takže spravená linka najde
-práci, jak ji nechala. Nic se nezahazuje proto, že přenos selhal.
+The unit of work is **a row in the queue, not an event**. An item that did not transfer keeps
+its place and is retried (30 s, then doubling up to 30 min) — so a repaired link finds the
+work where it left it. Nothing is thrown away because a transfer failed.
 
-Vidět je to na třech místech:
+You can see it in three places:
 
-- **Sloupec „Offsite" u každého běhu** — `přeneseno` / `ve frontě` / `přenáší se` / `chyba`.
-  Pomlčka znamená „neví se" (replikace je vypnutá nebo je běh starší), ne poruchu.
-- **Detail běhu** — kromě stavu i text poslední chyby a počet pokusů.
-- **Varování nad tabulkou** na kterékoli záložce, když je replika nedostupná (s časem,
-  **od kdy**) nebo se položky nedaří přenést.
+- **The "Offsite" column on every run** — `sent` / `queued` / `sending` / `error`. A dash
+  means "unknown" (replication is off or the run is older), not a fault.
+- **Run detail** — besides the status, the text of the last error and the number of attempts.
+- **A warning above the table** on any tab when the replica is unreachable (with the time it
+  has been down **since**) or items are failing to transfer.
 
-Karta **Odlehlá kopie** v Administraci ukazuje cíl, stav linky, velikost fronty a soupis
-chybných položek, plus tlačítka **synchronizovat teď** a **zopakovat chybné**.
+The **Off-site replica** card under Administration shows the target, link status, queue size
+and a list of failing items, plus **sync now** and **retry failed** buttons.
 
-### Proč to nemůže ohrozit zálohy tady
+### Why it cannot endanger the backups here
 
 | | |
 |---|---|
-| Replikace `backup_dir` jen **čte** | zdrojem `rsync`u je vždy lokální cesta, cílem vždy replika — opačný směr v kódu není |
-| Nedokončený dump se nepřenáší | zařazuje se až po `FinishRun`; `data.part` je navíc v `--exclude` |
-| Nejvýš **jeden přenos naráz** | s `nice`/`ionice`, volitelným `--bwlimit` a tvrdým timeoutem, který zabíjí celou procesní skupinu |
-| Selhání replikace **nemění stav běhu** | zapisuje se jen do vlastních tabulek; rozbitá linka neudělá z úspěšné zálohy neúspěšnou |
-| Mazání se nejdřív **spočítá nanečisto** | průchod, který by smazal víc než `max_delete`, se odmítne dřív, než zmizí první soubor |
-| Chybějící `rsync` nebo špatná konfigurace **nezdrží start** | podsystém zůstane nečinný, server naběhne normálně |
+| Replication only **reads** `backup_dir` | the `rsync` source is always a local path and the destination always the replica — the opposite direction is not in the code |
+| An unfinished dump is not transferred | it is queued only after `FinishRun`; `data.part` is in `--exclude` on top of that |
+| At most **one transfer at a time** | with `nice`/`ionice`, an optional `--bwlimit` and a hard timeout that kills the whole process group |
+| A replication failure **does not change the run status** | it is only written to its own tables; a broken link does not turn a successful backup into a failed one |
+| Deletions are **counted in a dry run first** | a pass that would delete more than `max_delete` is refused before the first file disappears |
+| A missing `rsync` or a bad configuration **does not hold up startup** | the subsystem stays idle, the server comes up normally |
 
-Poslední řádek stojí za zdůvodnění: `--max-delete` sám o sobě nestačí, protože `rsync`
-maže až do limitu a teprve pak se zastaví — omezí tedy škodu, ale nezabrání jí. Proto
-každému zrcadlícímu průchodu předchází `--dry-run`, který spočítá plánovaná mazání; při
-překročení stropu se průchod vůbec nespustí. Odpojený svazek nebo špatný `backup_dir` tak
-nemůže vyprázdnit odlehlou kopii.
+The last row deserves an explanation: `--max-delete` on its own is not enough, because
+`rsync` deletes up to the limit and only then stops — so it limits the damage but does not
+prevent it. That is why every mirroring pass is preceded by a `--dry-run` that counts the
+planned deletions; if the ceiling is exceeded, the pass does not start at all. An unmounted
+volume or a wrong `backup_dir` therefore cannot empty the off-site copy.
 
-Restic repozitář se posílá **na dvě fáze**: nejdřív packy a klíče, teprve pak index
-a snapshoty. Přerušený přenos tak nikdy nenechá na replice snapshot odkazující na data,
-která tam ještě nejsou — což je nejhorší možný stav, protože vypadá jako záloha.
-Repozitář, pro jehož instanci zrovna běží úloha, se odloží (není to chyba, jen ne teď).
-
----
-
-## Záloha konfigurace a reset serveru
-
-Záložka **Administrace** ve webu (jen pro roli `admin`) obsluhuje tři věci, které se týkají
-Arcatum samotného, ne toho, co zálohuje.
-
-### Stažení konfigurace
-
-Jeden zip s tím, co dohromady tvoří nastavení serveru:
-
-```
-manifest.json     formát, čas, host, které master klíče secrets potřebují, kontrolní součty
-instances.json    instance včetně secrets — v té podobě, v jaké leží v databázi
-users.json        účty webu včetně ověřovačů hesel (PBKDF2), ne hesel samotných
-runners.json      evidence runnerů: stav enrollmentu, certifikát, otisk
-server.toml       kopie configu — jen pro referenci, import ji nepoužije
-```
-
-Co v archivu **není**: běhy, logy, dumpy, restic repozitáře — a hlavně **žádné klíče**.
-CA klíč, podepisovací klíč ani `secrets-master.key` do něj nepatří: jeden takový soubor by
-odemykal všechny repozitáře a uměl vyrobit certifikát libovolnému hostu. Klíče se zálohují
-zvlášť spolu s `pki/` (viz [docs/production.md](docs/production.md)).
-
-Důsledek toho rozhodnutí: **secrets cestují zašifrované**, takže archiv jde naimportovat
-jen tam, kde je stejný master klíč. Server to zkontroluje předem a jinak import odmítne —
-lepší než zjistit ve tři ráno, že heslo k repozitáři nejde přečíst. Na serveru bez
-`[secrets] master_key` jsou secrets v databázi v plaintextu, a tedy i v archivu.
-
-Archiv přesto obsahuje hashe hesel operátorů. **Není to veřejný soubor.**
-
-### Obnova konfigurace
-
-Import **nahradí celou konfiguraci**: `instances`, `users` a `runners` se vyprázdní a naplní
-obsahem archivu, takže co v archivu není, po importu nebude ani na serveru. Sezení se ruší
-všechna — po importu se všichni včetně tebe přihlásí znovu.
-
-Běhy, logy ani data záloh se **nemažou**. Když z konfigurace zmizí instance, její restic
-repozitář zůstane ležet v `backup_dir` — nic se nemaže samo.
-
-Postup je dvoukrokový. Nahraný archiv se nejdřív jen zkontroluje a web ukáže, **co se
-změní**: co přibude, co se změní, co zmizí, plus varování na následky, které nikdo nečeká —
-třeba že runner, kterého archiv nezná, přijde o přístup a bude se muset znovu naenrollovat.
-Teprve pak se potvrzuje. Než se něco zapíše, server si **současnou konfiguraci sám uloží**
-do `backup_dir/config-backups/` — cesta zpátky je naimportovat ten soubor.
-
-Import odmítne archiv, který by po sobě nechal stav, ze kterého už není cesty ven:
-
-- žádný povolený `admin` účet — nikdo by se do webu nedostal
-- instance odkazující na skript, který na serveru není (server by po restartu nenaběhl)
-- rozvrh, kterému scheduler nerozumí
-- secrets zašifrované klíčem, který tenhle server nemá
-- poškozený archiv (nesedí kontrolní součet)
-
-`server.toml` se **nikdy neaplikuje**. Přepsat si `listen` importem znamená zamknout si
-dveře; kdo ho chce změnit, udělá to ručně a s restartem po ruce.
-
-### Vyprázdnění serveru
-
-Smaže **všechny zálohy, dumpy, logy a celou historii běhů** — tedy `backup_dir/runs`,
-`backup_dir/restic` a cache. Zůstanou klíče, uživatelé, instance i schválené runnery, takže
-server je hned zase provozuschopný, jen bez čehokoli nasbíraného; číslování běhů začne
-znovu od `run-1`.
-
-Uložené konfigurační archivy (`backup_dir/config-backups`) se nemažou — jsou to cesty zpět
-a reset není chvíle, kdy je zahazovat.
-
-Jediná akce v Arcatum, která maže zálohy. Potvrzuje se slovem, běží jen s `confirm` v URL,
-a **nejde vzít zpět** — data odsud nejsou nikde jinde. Dokud běží nějaká úloha, reset se
-odmítne: mazat adresář, do kterého runner právě streamuje, není dobrý nápad.
+A restic repository is sent **in two phases**: packs and keys first, and only then the index
+and snapshots. An interrupted transfer therefore never leaves a snapshot on the replica
+pointing at data that is not there yet — which is the worst possible state, because it looks
+like a backup. A repository whose instance has a job running right now is postponed (not an
+error, just not now).
 
 ---
 
-## Jak napsat vlastní zálohovací skript
+## Config backup and server reset
 
-Skript = dva soubory ve `scripts/<jmeno>/`: **kód** a **manifest**.
+The **Administration** tab in the web UI (role `admin` only) handles three things concerning
+Arcatum itself rather than what it backs up.
 
-### 1) Manifest — deklaruje parametry
+### Downloading the configuration
+
+A single zip with everything that together forms the server's settings:
+
+```
+manifest.json     format, time, host, which secrets master keys are needed, checksums
+instances.json    instances including secrets — exactly as they sit in the database
+users.json        web accounts including password verifiers (PBKDF2), not the passwords
+runners.json      the runner registry: enrollment status, certificate, fingerprint
+server.toml       a copy of the config — for reference only, the import does not use it
+```
+
+What is **not** in the archive: runs, logs, dumps, restic repositories — and above all **no
+keys**. The CA key, the signing key and `secrets-master.key` do not belong in it: one such
+file would unlock every repository and could issue a certificate to any host. Keys are backed
+up separately together with `pki/` (see [docs/production.md](docs/production.md)).
+
+A consequence of that decision: **secrets travel encrypted**, so the archive can only be
+imported where the same master key is present. The server checks this beforehand and
+otherwise refuses the import — better than finding out at three in the morning that a
+repository password cannot be read. On a server without `[secrets] master_key` the secrets are
+in plaintext in the database, and therefore in the archive too.
+
+The archive nevertheless contains operator password hashes. **It is not a public file.**
+
+### Restoring the configuration
+
+The import **replaces the whole configuration**: `instances`, `users` and `runners` are
+emptied and filled with the archive's contents, so whatever is not in the archive will not be
+on the server after the import either. All sessions are invalidated — after the import
+everyone, you included, logs in again.
+
+Runs, logs and backup data are **not deleted**. When an instance disappears from the
+configuration, its restic repository stays put in `backup_dir` — nothing deletes itself.
+
+The procedure has two steps. An uploaded archive is first only checked and the web UI shows
+**what will change**: what will be added, what will change, what will disappear, plus
+warnings about consequences nobody expects — for instance that a runner the archive does not
+know about will lose access and will have to enroll again. Only then do you confirm. Before
+anything is written, the server **saves the current configuration itself** into
+`backup_dir/config-backups/` — the way back is to import that file.
+
+The import refuses an archive that would leave behind a state there is no way out of:
+
+- no enabled `admin` account — nobody could get into the web UI
+- an instance referring to a script that is not on the server (the server would not come up
+  after a restart)
+- a schedule the scheduler does not understand
+- secrets encrypted with a key this server does not have
+- a corrupted archive (the checksum does not match)
+
+`server.toml` is **never applied**. Overwriting your `listen` by an import means locking your
+own door; whoever wants to change it does so by hand, with a restart at the ready.
+
+### Wiping the server
+
+Deletes **all backups, dumps, logs and the entire run history** — that is `backup_dir/runs`,
+`backup_dir/restic` and the cache. Keys, users, instances and approved runners stay, so the
+server is immediately operational again, just without anything collected; run numbering
+starts over from `run-1`.
+
+Stored configuration archives (`backup_dir/config-backups`) are not deleted — they are ways
+back, and a reset is not the moment to throw them away.
+
+The only action in Arcatum that deletes backups. It is confirmed by typing a word, runs only
+with `confirm` in the URL, and **cannot be undone** — this data is nowhere else. As long as
+any job is running, the reset is refused: deleting a directory a runner is streaming into is
+not a good idea.
+
+---
+
+## Writing your own backup script
+
+A script = two files in `scripts/<name>/`: the **code** and the **manifest**.
+
+### 1) Manifest — declares the parameters
 
 ```toml
 # scripts/example/mysql_backup.toml
 name       = "mysql-backup"
-type       = "bash"            # bash | python | binary | restic (viz níže)
-entrypoint = "mysql_backup.sh" # relativně k manifestu
-timeout    = "1h"              # default, instance může přepsat
+type       = "bash"            # bash | python | binary | restic (see below)
+entrypoint = "mysql_backup.sh" # relative to the manifest
+timeout    = "1h"              # default, an instance may override it
 
 [[param]]
 name = "host"
@@ -924,20 +956,20 @@ default = "3306"
 name = "password"
 type = "string"
 required = true
-secret = true                  # hodnota se předá souborem, ne přes env
+secret = true                  # the value is passed in a file, not through env
 ```
 
-Deklarace parametrů není formalita — server z ní validuje instance a (později)
-vygeneruje formulář ve web UI.
+Declaring parameters is not a formality — the server validates instances against it and
+(later) generates the form in the web UI from it.
 
-### 2) Kód — jak dostane parametry
+### 2) The code — how it receives the parameters
 
-- **Non-secret parametry** → env proměnné `ARCATUM_<JMENO>` (velkými písmeny).
-- **Secrets** → dočasný sourcovaný soubor, jeho cesta je v `ARCATUM_SECRETS_FILE`.
-  Runner ho po doběhnutí smaže. Do env se secrets nedávají záměrně — env je čitelné
-  z `/proc/<pid>/environ`.
-- **Výstup na stdout** se streamuje na server. Pište data na stdout, ať nezůstávají
-  na zálohovaném serveru.
+- **Non-secret parameters** → environment variables `ARCATUM_<NAME>` (uppercase).
+- **Secrets** → a temporary sourced file whose path is in `ARCATUM_SECRETS_FILE`. The runner
+  deletes it once the script finishes. Secrets are deliberately kept out of env — env is
+  readable from `/proc/<pid>/environ`.
+- **Output on stdout** is streamed to the server. Write the data to stdout so it does not
+  stay behind on the backed-up server.
 
 ```bash
 #!/usr/bin/env bash
@@ -948,48 +980,50 @@ PORT="${ARCATUM_PORT:-3306}"
 
 # shellcheck disable=SC1090
 [ -n "${ARCATUM_SECRETS_FILE:-}" ] && source "${ARCATUM_SECRETS_FILE}"
-# nyní je k dispozici $ARCATUM_PASSWORD
+# $ARCATUM_PASSWORD is available now
 
 exec mysqldump --host="$ARCATUM_HOST" --port="$PORT" \
   --single-transaction --quick "$ARCATUM_DATABASE"
 ```
 
-Ukázky: [scripts/example/](scripts/example/) — `hello` (demo bez závislostí)
-a `mysql_backup` (realistická šablona).
+Examples: [scripts/example/](scripts/example/) — `hello` (a dependency-free demo) and
+`mysql_backup` (a realistic template).
 
-> **Binární skripty** (`type = "binary"`) fungují taky — runner artefakt spustí přímo.
-> Runner při checkinu hlásí svou platformu (`linux/amd64`), takže server umí vybrat
-> správný artefakt. U binárek je ověření integrity (SHA-256, později podpis) o to důležitější.
+> **Binary scripts** (`type = "binary"`) work too — the runner executes the artifact
+> directly. The runner reports its platform at checkin (`linux/amd64`), so the server can
+> pick the right artifact. With binaries, integrity verification (SHA-256, later a signature)
+> matters all the more.
 >
-> **Typ `restic`** žádný skript nemá — runner řídí restic sám podle parametrů instance.
-> Viz [Zálohování souborů](#zálohování-souborů-restic).
+> **The `restic` type** has no script at all — the runner drives restic itself according to
+> the instance parameters. See [File backups](#file-backups-restic).
 
 ---
 
-## Jak přidat instanci
+## Adding an instance
 
-**Z webu** — záložka **Instance** → **nová instance**. Formulář se sestaví z parametrů,
-které vybraný skript deklaruje, a hodnoty se proti manifestu **zvalidují při uložení**:
-chybějící heslo nebo překlep v názvu parametru se pozná hned, ne až při noční záloze.
+**From the web UI** — the **Instances** tab → **new instance**. The form is assembled from
+the parameters the selected script declares, and the values are **validated against the
+manifest on save**: a missing password or a typo in a parameter name shows up right away, not
+during the nightly backup.
 
-Změny platí **okamžitě, bez restartu serveru** — včetně změny rozvrhu. Hesla se šifrují
-už při uložení, takže nikde nezůstávají v plaintextu.
+Changes take effect **immediately, without restarting the server** — including a schedule
+change. Passwords are encrypted on save, so they are never left in plaintext anywhere.
 
-Klik na řádek instance ji otevře k úpravě. U uloženého secretu se zobrazí `(nezměněno)`;
-když pole necháš prázdné, stará hodnota zůstane.
+Clicking an instance row opens it for editing. A stored secret shows as `(unchanged)`; if you
+leave the field empty, the old value stays.
 
-**Kopie hotové instance** — tlačítko **kopírovat** u řádku otevře formulář předvyplněný
-podle ní. Druhá databáze na stejném serveru je pak otázka dvou políček: nové `id` a jiný
-název databáze. Hesla přebere server ze zdrojové instance — ven je nepustí ani do
-formuláře, takže je není kde opsat.
+**Copying an existing instance** — the **copy** button on a row opens the form prefilled from
+it. A second database on the same server is then a matter of two fields: a new `id` and a
+different database name. The server takes the passwords from the source instance — it does
+not let them out even into the form, so there is nowhere to copy them from.
 
-Totéž přes API:
+The same over the API:
 
 ```sh
 A=(--cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key)
 API=https://172.24.0.60:8443/api/v1
 
-curl "${A[@]}" $API/scripts                    # co skripty deklarují (základ formuláře)
+curl "${A[@]}" $API/scripts                    # what the scripts declare (the basis of the form)
 curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
   "id": "mysql-web01",
   "script": "mysql-backup",
@@ -1000,10 +1034,10 @@ curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
   "schedule": { "frequency": "weekly", "time": "02:30",
                 "weekdays": ["mon","thu"], "timezone": "Europe/Prague" }
 }'
-curl "${A[@]}" -X PUT    $API/instances/mysql-web01 -d '…'   # úprava
-curl "${A[@]}" -X DELETE $API/instances/mysql-web01          # smazání
+curl "${A[@]}" -X PUT    $API/instances/mysql-web01 -d '…'   # edit
+curl "${A[@]}" -X DELETE $API/instances/mysql-web01          # delete
 
-# kopie: "copy_from" doplní secrety ze zdrojové instance, ať je není nutné znát
+# copy: "copy_from" fills in the secrets from the source instance, so you do not need to know them
 curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
   "id": "mysql-web01-orders", "copy_from": "mysql-web01",
   "script": "mysql-backup", "runner_id": "web-01",
@@ -1013,237 +1047,245 @@ curl "${A[@]}" -X POST -H 'Content-Type: application/json' $API/instances -d '{
 }'
 ```
 
-`copy_from` platí jen pro vytvoření. Secret poslaný jako `"***"` nebo prázdný se vezme ze
-zdroje, jakákoli jiná hodnota ho přepíše; secret, který požadavek vůbec nezmíní, se
-nepřebírá (uplatní se default z manifestu, nebo to neprojde validací). Všechno ostatní je
-vždy to, co přišlo v požadavku — kopie tedy může běžet na jiném runneru i jiném rozvrhu.
+`copy_from` applies to creation only. A secret sent as `"***"` or empty is taken from the
+source, any other value overwrites it; a secret the request does not mention at all is not
+carried over (the manifest default applies, or it fails validation). Everything else is
+always what came in the request — so a copy can run on a different runner and a different
+schedule.
 
-Rozvrh: `frequency` je `daily` | `weekly` | `monthly`; `weekdays` platí pro `weekly`,
-`day` (1–28) pro `monthly`. `timezone` je nepovinná — jinak platí default ze `server.toml`.
+Schedule: `frequency` is `daily` | `weekly` | `monthly`; `weekdays` applies to `weekly`,
+`day` (1–28) to `monthly`. `timezone` is optional — otherwise the default from `server.toml`
+applies.
 
-> **Smazání instance nemaže zálohy.** Odstraní se jen konfigurace; restic repozitář
-> zůstane na disku. Když ho chceš opravdu zahodit, smaž ho ručně z
+> **Deleting an instance does not delete the backups.** Only the configuration is removed;
+> the restic repository stays on disk. When you really want it gone, delete it manually from
 > `backup_dir/restic/<instance>/`.
 
-### Seed soubor `data/instances.json`
+### The seed file `data/instances.json`
 
-Zůstává jako **počáteční** naplnění: při startu se z něj vytvoří jen instance, které
-ještě neexistují. Existující se **nepřepisují**, jinak by restart serveru pokaždé vrátil
-změny udělané z webu. Vynutit přepsání jde přepínačem `-import-force`.
+It remains as the **initial** fill: at startup only instances that do not exist yet are
+created from it. Existing ones are **not overwritten**, otherwise a server restart would
+revert changes made from the web UI every time. Overwriting can be forced with the
+`-import-force` flag.
 
-Pozor: soubor obsahuje hesla v plaintextu, proto je v `.gitignore`. Když instance
-spravuješ z webu, můžeš ho po naplnění klidně smazat.
+Careful: the file contains passwords in plaintext, which is why it is in `.gitignore`. When
+you manage instances from the web UI, you can happily delete it once it has been imported.
 
 ---
 
 ## HTTP API
 
-API je na dvou portech a **stejné operátorské endpointy jsou na obou** — liší se jen tím,
-čím se volající prokáže:
+The API is on two ports and **the same operator endpoints are on both** — they differ only in
+how the caller proves who they are:
 
-| Port | Kdo tam chodí | Čím se ověří |
+| Port | Who goes there | How they authenticate |
 |---|---|---|
-| `[server] listen` (mTLS) | runnery a volání ze shellu | certifikát (`OU` = `runner`/`admin`) |
-| `[web] listen` (plain HTTP) | web UI a lidé | cookie sezení po přihlášení jménem a heslem |
+| `[server] listen` (mTLS) | runners and calls from a shell | a certificate (`OU` = `runner`/`admin`) |
+| `[web] listen` (plain HTTP) | the web UI and people | a session cookie after logging in with username and password |
 
-Sloupec „role" tedy znamená: **runner** = certifikát runneru; **admin** = admin certifikát,
-nebo přihlášený uživatel s rolí `admin`; **čtení** = totéž plus role `viewer`. Bez `[tls]`
-se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém portu platí vždy.
+The "role" column therefore means: **runner** = a runner certificate; **admin** = an admin
+certificate, or a logged-in user with the `admin` role; **read** = the same plus the `viewer`
+role. Without `[tls]` nothing is checked on the API port (development mode); a login on the
+web port always applies.
 
-| Metoda a cesta | Role | Účel |
+| Method and path | Role | Purpose |
 |---|---|---|
-| `POST /api/v1/checkin` | runner | runner se hlásí, dostane úlohy k spuštění |
-| `POST /api/v1/runs/updates` | runner | příjem ndjson streamu průběhu a **logu** |
-| `POST /api/v1/runs/{id}/data` | runner | příjem **payloadu zálohy** (surové tělo, jeden request) |
-| `POST /api/v1/instances/{id}/run` | admin | **manuální spuštění** („spusť teď") |
-| `POST /api/v1/runs/{id}/cancel` | admin | **zastavení běhu** — runner ho vyzvedne do pár sekund |
-| `GET /api/v1/runs/{id}/cancel` | runner | dotaz běžící úlohy, jestli má skončit |
-| `GET /api/v1/instances` | čtení | instance včetně `next_run` (secrets maskované) |
-| `POST /api/v1/instances` | admin | vytvoří instanci (validuje se proti manifestu) |
-| `PUT /api/v1/instances/{id}` | admin | upraví instanci |
-| `DELETE /api/v1/instances/{id}` | admin | smaže instanci (zálohy zůstanou) |
-| `GET /api/v1/scripts` | čtení | skripty a jejich deklarované parametry |
-| `GET /api/v1/runs?limit=N` | čtení | historie běhů, nejnovější první |
-| `GET /api/v1/runs/{id}` | čtení | detail jednoho běhu |
-| `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | čtení | zachycený výstup běhu |
-| `GET /api/v1/runs/{id}/tail?offset=N&stream=` | čtení | přírůstek výstupu — základ živého tailu |
-| `GET /api/v1/runs/{id}/data` | čtení | stažení payloadu zálohy (jen po úspěšném běhu) |
-| `GET /api/v1/instances/{id}/dumps` | čtení | uložené dumpy instance — obdoba snapshotů pro databáze |
-| `GET /api/v1/runners` | čtení | evidované runnery (stav, platforma, `last_seen`) |
-| `GET /api/v1/install` | čtení | příkaz, kterým se instaluje nový runner (adresa se skládá z hostu dotazu a bootstrap portu) |
-| `GET /api/v1/whoami` | čtení | kdo jsi, jak jsi se přihlásil, expirace certifikátů |
-| `GET /api/v1/rotation` | čtení | stav rotace všech tří klíčů |
-| `POST /api/v1/secrets/rekey` | admin | přešifruje secrets aktuálním master klíčem |
-| `GET /api/v1/replica` | čtení | stav [odlehlé kopie](#odlehlá-kopie): dostupnost linky, fronta, chybné položky |
-| `POST /api/v1/replica/sync` | admin | zařadí úplný průchod hned, bez čekání na sweep |
-| `POST /api/v1/replica/retry` | admin | vrátí chybné položky do fronty a přeskočí backoff |
-| `GET /api/v1/config/export` | admin | [záloha konfigurace](#záloha-konfigurace-a-reset-serveru) jako zip (bez klíčů a bez dat záloh) |
-| `POST /api/v1/config/import` | admin | archiv v těle requestu; **bez** `?confirm=replace-all` jen vrátí, co by změnil |
-| `GET /api/v1/reset` | admin | co by [vyprázdnění serveru](#vyprázdnění-serveru) smazalo |
-| `POST /api/v1/reset?confirm=delete-all-backups` | admin | smaže všechny zálohy, dumpy, logy a historii běhů |
-| `GET /api/v1/trust` | runner / admin | podepsaná sada podepisovacích klíčů a CA bundle |
-| `GET /api/v1/update` | runner / admin | podepsaný manifest publikovaných buildů runneru |
-| `GET /api/v1/update/{name}` | runner / admin | binárka runneru (jen přes mTLS) |
-| `POST /api/v1/runners/{id}/approve` | admin | schválí žádost a podepíše certifikát |
-| `POST /api/v1/runners/{id}/reject` | admin | zamítne žádost |
-| `POST /api/v1/runners/{id}/revoke` | admin | zneplatní certifikát, runner → `pending` |
-| `POST /api/v1/runners/revoke-all` | admin | zneplatní certifikáty všech runnerů |
-| `POST /api/v1/renew` | runner | obnova certifikátu (bez schvalování) |
-| `GET /api/v1/instances/{id}/repo` | čtení | velikost restic repozitáře a počet snapshotů |
-| `GET /api/v1/instances/{id}/snapshots` | čtení | seznam snapshotů, nejnovější první |
-| `GET /api/v1/instances/{id}/snapshots/{snap}/ls?path=` | čtení | obsah adresáře ve snapshotu |
-| `GET /api/v1/instances/{id}/snapshots/{snap}/download?path=&archive=tar` | čtení | **obnova** — soubor nebo adresář jako tar |
-| `/restic/{instance}/…` | runner (vlastní) / admin | restic REST backend pro souborové zálohy |
-| `GET /status` | čtení | textová status stránka pro shell |
+| `POST /api/v1/checkin` | runner | the runner checks in and receives jobs to run |
+| `POST /api/v1/runs/updates` | runner | receives the ndjson progress and **log** stream |
+| `POST /api/v1/runs/{id}/data` | runner | receives the **backup payload** (raw body, one request) |
+| `POST /api/v1/instances/{id}/run` | admin | **manual trigger** ("run now") |
+| `POST /api/v1/runs/{id}/cancel` | admin | **stops a run** — the runner picks it up within a few seconds |
+| `GET /api/v1/runs/{id}/cancel` | runner | a running job asking whether it should stop |
+| `GET /api/v1/instances` | read | instances including `next_run` (secrets masked) |
+| `POST /api/v1/instances` | admin | creates an instance (validated against the manifest) |
+| `PUT /api/v1/instances/{id}` | admin | edits an instance |
+| `DELETE /api/v1/instances/{id}` | admin | deletes an instance (the backups stay) |
+| `GET /api/v1/scripts` | read | scripts and the parameters they declare |
+| `GET /api/v1/runs?limit=N` | read | run history, newest first |
+| `GET /api/v1/runs/{id}` | read | detail of a single run |
+| `GET /api/v1/runs/{id}/output?stream=stdout\|stderr` | read | captured output of a run |
+| `GET /api/v1/runs/{id}/tail?offset=N&stream=` | read | the increment of the output — the basis of the live tail |
+| `GET /api/v1/runs/{id}/data` | read | download the backup payload (only after a successful run) |
+| `GET /api/v1/instances/{id}/dumps` | read | an instance's stored dumps — the database counterpart of snapshots |
+| `GET /api/v1/runners` | read | registered runners (status, platform, `last_seen`) |
+| `GET /api/v1/install` | read | the command that installs a new runner (the address is composed from the request host and the bootstrap port) |
+| `GET /api/v1/whoami` | read | who you are, how you logged in, certificate expiries |
+| `GET /api/v1/rotation` | read | rotation status of all three keys |
+| `POST /api/v1/secrets/rekey` | admin | re-encrypts secrets with the current master key |
+| `GET /api/v1/replica` | read | status of the [off-site replica](#off-site-replica): link availability, queue, failing items |
+| `POST /api/v1/replica/sync` | admin | queues a full pass right away, without waiting for the sweep |
+| `POST /api/v1/replica/retry` | admin | returns failing items to the queue and skips the backoff |
+| `GET /api/v1/config/export` | admin | [config backup](#config-backup-and-server-reset) as a zip (no keys, no backup data) |
+| `POST /api/v1/config/import` | admin | the archive in the request body; **without** `?confirm=replace-all` it only returns what it would change |
+| `GET /api/v1/reset` | admin | what [wiping the server](#wiping-the-server) would delete |
+| `POST /api/v1/reset?confirm=delete-all-backups` | admin | deletes all backups, dumps, logs and run history |
+| `GET /api/v1/trust` | runner / admin | the signed set of signing keys and the CA bundle |
+| `GET /api/v1/update` | runner / admin | the signed manifest of published runner builds |
+| `GET /api/v1/update/{name}` | runner / admin | the runner binary (over mTLS only) |
+| `POST /api/v1/runners/{id}/approve` | admin | approves a request and signs a certificate |
+| `POST /api/v1/runners/{id}/reject` | admin | rejects a request |
+| `POST /api/v1/runners/{id}/revoke` | admin | revokes the certificate, runner → `pending` |
+| `POST /api/v1/runners/revoke-all` | admin | revokes the certificates of all runners |
+| `POST /api/v1/renew` | runner | certificate renewal (no approval needed) |
+| `GET /api/v1/instances/{id}/repo` | read | restic repository size and snapshot count |
+| `GET /api/v1/instances/{id}/snapshots` | read | list of snapshots, newest first |
+| `GET /api/v1/instances/{id}/snapshots/{snap}/ls?path=` | read | directory contents inside a snapshot |
+| `GET /api/v1/instances/{id}/snapshots/{snap}/download?path=&archive=tar` | read | **restore** — a file or directory as a tar |
+| `/restic/{instance}/…` | runner (its own) / admin | the restic REST backend for file backups |
+| `GET /status` | read | plain-text status page for the shell |
 
-Jen na **webovém portu** (`[web] listen`) — přihlášení a účty:
+Only on the **web port** (`[web] listen`) — login and accounts:
 
-| Metoda a cesta | Role | Účel |
+| Method and path | Role | Purpose |
 |---|---|---|
-| `POST /api/v1/login` | — | přihlášení `{username, password}`, nastaví cookie sezení |
-| `POST /api/v1/logout` | — | ukončí sezení a cookie zneplatní |
-| `POST /api/v1/password` | čtení | změna **vlastního** hesla `{current, new}`; ukončí všechna sezení |
-| `GET /api/v1/users` | admin | seznam účtů (nikdy hesla ani hashe) |
-| `POST /api/v1/users` | admin | nový účet; bez hesla ho server vygeneruje a jednou vrátí |
-| `PUT /api/v1/users/{name}` | admin | role, vypnutí/zapnutí, nové heslo (`generate_password`) |
-| `DELETE /api/v1/users/{name}` | admin | smaže účet |
-| `GET /` | — | [web UI](#web-ui) (zabalené v binárce; přihlášení řeší až API výše) |
+| `POST /api/v1/login` | — | log in with `{username, password}`, sets the session cookie |
+| `POST /api/v1/logout` | — | ends the session and invalidates the cookie |
+| `POST /api/v1/password` | read | change **your own** password `{current, new}`; ends all sessions |
+| `GET /api/v1/users` | admin | list of accounts (never passwords or hashes) |
+| `POST /api/v1/users` | admin | a new account; without a password the server generates one and returns it once |
+| `PUT /api/v1/users/{name}` | admin | role, disable/enable, new password (`generate_password`) |
+| `DELETE /api/v1/users/{name}` | admin | deletes an account |
+| `GET /` | — | the [web UI](#web-ui) (embedded in the binary; login is handled by the API above) |
 
-Na **bootstrap portu** (plain HTTP, viz [instalace runneru](#instalace-runneru-na-zálohovaný-server))
-běží jen tohle — dostupné i bez certifikátu, protože nový host žádný nemá:
+On the **bootstrap port** (plain HTTP, see
+[installing the runner](#installing-the-runner-on-a-backed-up-server)) only this runs —
+available without a certificate too, because a new host does not have one:
 
-| Metoda a cesta | Účel |
+| Method and path | Purpose |
 |---|---|
-| `GET /arcatum_runner/install.sh` | instalátor, generovaný s adresou serveru |
-| `GET /arcatum_runner/arcatum-runner-<os>-<arch>` | binárka runneru |
-| `GET /arcatum_runner/ca.pem`, `…/dispatch-signing.pub` | veřejné trust materiály |
-| `POST /api/v1/enroll` | podání žádosti o certifikát (CSR) |
-| `GET /api/v1/enroll/{id}` | vyzvednutí podepsaného certifikátu |
+| `GET /arcatum_runner/install.sh` | the installer, generated with the server address |
+| `GET /arcatum_runner/arcatum-runner-<os>-<arch>` | the runner binary |
+| `GET /arcatum_runner/ca.pem`, `…/dispatch-signing.pub` | public trust material |
+| `POST /api/v1/enroll` | submitting a certificate request (CSR) |
+| `GET /api/v1/enroll/{id}` | collecting the signed certificate |
 
-Hodnoty secrets API **nikdy nevrací** (jen názvy, maskované `***`). Skutečné hodnoty
-opouštějí server pouze v úloze doručené vlastnímu runneru.
+The API **never returns** secret values (only the names, masked as `***`). Real values leave
+the server only inside a job delivered to the runner they belong to.
 
-Runner smí hlásit průběh jen u běhů, které byly přiděleny jemu — jeden zálohovaný
-server tak nemůže přepsat výsledky jiného.
+A runner may only report progress for runs assigned to it — so one backed-up server cannot
+overwrite another's results.
 
 ---
 
-## Ladění skriptů
+## Debugging scripts
 
-Nejpohodlnější cesta je [web UI](#web-ui): záložka **Instance** → **spustit teď**, pak
-klik na běh a sleduješ živý tail výstupu. Ze shellu totéž:
+The most convenient way is the [web UI](#web-ui): the **Instances** tab → **run now**, then
+click the run and watch the live tail of the output. The same from a shell:
 
 ```sh
-# 1) spustit hned, bez čekání na rozvrh
+# 1) run immediately, without waiting for the schedule
 curl -X POST http://127.0.0.1:8443/api/v1/instances/hello-demo/run
 
-# 2) runner jednorázově, s logem v terminálu
+# 2) the runner once, with the log in the terminal
 go run ./cmd/runner -server http://127.0.0.1:8443 -once
 
-# 3) přečíst přesně to, co skript vypsal
+# 3) read exactly what the script printed
 curl http://127.0.0.1:8443/api/v1/runs/run-1/output
 curl "http://127.0.0.1:8443/api/v1/runs/run-1/output?stream=stderr"
 ```
 
-Se [`just`](#zkratky-přes-just) je to `just trigger hello-demo`, `just runner-once`
-a `just run-output 1` (recept přijme `run-1` i holé číslo — přes API je správný tvar
-`run-1`, protože z ID se skládá cesta k logu).
+With [`just`](#just-shortcuts) that is `just trigger hello-demo`, `just runner-once` and
+`just run-output 1` (the recipe accepts both `run-1` and a bare number — over the API the
+correct form is `run-1`, because the path to the log is built from the ID).
 
-Výstup se ukládá do `backup_dir/runs/<run_id>/{stdout,stderr}.log`, takže do něj lze
-kdykoli nahlédnout i přímo na serveru. Chystá se dry-run režim.
+The output is stored in `backup_dir/runs/<run_id>/{stdout,stderr}.log`, so it can be looked at
+directly on the server at any time. A dry-run mode is on the way.
 
-**Log a data nejsou totéž.** Skript, který má v manifestu `capture = "stream"` (třeba
-`mysql-backup`), píše na stdout samotný dump — ten do logu nepatří a neputuje tam.
-Uloží se vedle něj jako `runs/<run_id>/data.bin` a ve webu se nabídne ke stažení, kdežto
-log obsahuje jen jednu shrnující řádku a stderr. Logy mají strop 4 MiB na stream a mažou
-se podle `[storage] log_retention_success` / `log_retention_failed`. Detaily
-v [architektuře, §17](docs/architecture.md).
+**The log and the data are not the same thing.** A script with `capture = "stream"` in its
+manifest (`mysql-backup`, for instance) writes the dump itself to stdout — that does not
+belong in the log and does not go there. It is stored next to it as `runs/<run_id>/data.bin`
+and offered for download in the web UI, whereas the log contains just one summary line and
+stderr. Logs are capped at 4 MiB per stream and are deleted according to
+`[storage] log_retention_success` / `log_retention_failed`. Details in
+[the architecture, §17](docs/architecture.md).
 
-**Dumpy se rotují, nededuplikují.** Databázová záloha je jeden artefakt, který se
-obnovuje celý, takže se nedává do resticu — drží se posledních N (`keep_last`) a všechno
-mladší než D dnů (`keep_days`), obojí nastavené **na instanci**. Nula u obou znamená
-držet všechno; formulář nové instance předvyplňuje 7. Mazání běží hned po úspěšné záloze
-a pro jistotu ještě jednou za hodinu. Viz [§19](docs/architecture.md).
+**Dumps are rotated, not deduplicated.** A database backup is a single artifact that is
+restored as a whole, so it does not go into restic — the last N are kept (`keep_last`) plus
+everything younger than D days (`keep_days`), both configured **per instance**. Zero for both
+means keep everything; the new instance form prefills 7. Deletion runs right after a
+successful backup and, to be safe, once an hour on top of that. See
+[§19](docs/architecture.md).
 
-Celá vývojová smyčka včetně spuštění skriptu nasucho mimo Arcatum a katalogu chybových
-zpráv: [Vývoj a ladění skriptů](docs/script-development.md).
+The whole development loop, including running a script dry outside Arcatum and a catalogue of
+error messages: [Script development and debugging](docs/script-development.md).
 
 ---
+## Installing the runner on a backed-up server
 
-## Instalace runneru na zálohovaný server
-
-Na zálohovaném serveru stačí jeden příkaz:
+On the backed-up server a single command is enough:
 
 ```sh
 curl -LsSf http://172.24.0.60/arcatum_runner/install.sh | sudo sh
 ```
 
-> Přesné znění včetně adresy tohohle serveru najdeš i ve web UI: záložka **Runnery** →
-> **Přidat runner**. Je to tatáž stránka, na které runner pak schvaluješ.
+> The exact wording, including this server's address, is also in the web UI: the **Runners**
+> tab → **Add runner**. It is the same page where you then approve the runner.
 
-Skript stáhne binárku pro danou platformu, `ca.pem` a podepisovací veřejný klíč, vypíše
-`runner.toml`, nainstaluje systemd službu a spustí ji. **Adresu serveru si odvodí z URL,
-ze které se sám stáhl** — nezadáváš ji tedy dvakrát. Opakované spuštění binárku
-aktualizuje, ale existující `runner.toml` nechá být.
+The script downloads the binary for the given platform, `ca.pem` and the signing public key,
+writes out `runner.toml`, installs a systemd service and starts it. **It derives the server
+address from the URL it was downloaded from** — so you do not enter it twice. Running it
+again updates the binary but leaves an existing `runner.toml` alone.
 
-Pak už zbývá jen **schválit hosta ve webu** (záložka Runnery). Do té doby runner
-opakovaně dotazuje a nic nedělá — to je v pořádku.
+Then all that is left is to **approve the host in the web UI** (the Runners tab). Until then
+the runner keeps polling and does nothing — that is fine.
 
 ```sh
 systemctl status arcatum-runner
 journalctl -u arcatum-runner -f
 ```
 
-### Jak runner získá certifikát (enrollment)
+### How a runner obtains its certificate (enrollment)
 
-Privátní klíč **nikdy neopustí zálohovaný server**:
+The private key **never leaves the backed-up server**:
 
-1. Runner si při prvním startu vygeneruje vlastní klíč a pošle jen **žádost o podpis** (CSR)
-2. Server ji zapíše jako **`pending`** — nic jí zatím nevěří a žádnou práci nepřidělí
-3. Ty ji schválíš ve webu; vidíš přitom **IP adresu a fingerprint žádosti**, takže poznáš,
-   že jde o pravý host
-4. Server CSR podepíše a runner si certifikát vyzvedne
-5. Od té chvíle jde všechno přes mTLS
+1. On first start the runner generates its own key and sends only a **signing request** (CSR)
+2. The server records it as **`pending`** — nothing trusts it yet and no work is assigned
+3. You approve it in the web UI; you see the **IP address and the fingerprint of the
+   request**, so you can tell it is the genuine host
+4. The server signs the CSR and the runner collects its certificate
+5. From that moment everything goes over mTLS
 
-Schválení je hlavní bezpečnostní pojistka. Podvržená žádost bez tvého kliknutí nic nezmůže,
-a **u už schváleného runneru server další žádost odmítne** (HTTP 409) — nikdo ti tedy
-nemůže přepsat certifikát běžícího hosta. Zamítnutí runneru ve webu ho odřízne okamžitě,
-i kdyby ještě držel platný certifikát.
+Approval is the main security safeguard. A forged request achieves nothing without your
+click, and **for an already approved runner the server rejects a further request** (HTTP 409)
+— so nobody can overwrite the certificate of a running host. Rejecting a runner in the web UI
+cuts it off immediately, even if it still holds a valid certificate.
 
-### Co k tomu server potřebuje
+### What the server needs for this
 
-Bootstrap běží na **samostatném plain-HTTP portu**. Nemůže sdílet ten hlavní: mTLS
-listener vyžaduje klientský certifikát a nový host žádný nemá — spojení by neprošlo už
-při handshaku.
+Bootstrap runs on a **separate plain-HTTP port**. It cannot share the main one: the mTLS
+listener requires a client certificate and a new host has none — the connection would not
+even get through the handshake.
 
 ```toml
 # server.toml
 [bootstrap]
 listen   = "0.0.0.0:80"
 dist_dir = "/opt/arcatum/dist"       # arcatum-runner-linux-amd64, …
-api_url  = "https://172.24.0.60:8443"           # kam se runner bude hlásit
-ca_key   = "/opt/arcatum/pki/ca.key" # podepisuje schválené žádosti
+api_url  = "https://172.24.0.60:8443"           # where the runner will check in
+ca_key   = "/opt/arcatum/pki/ca.key" # signs approved requests
 ```
 
-Binárky pro publikování se sestaví takto:
+The binaries for publishing are built like this:
 
 ```sh
 GOOS=linux GOARCH=amd64 go build -o /opt/arcatum/dist/arcatum-runner-linux-amd64 ./cmd/runner
 GOOS=linux GOARCH=arm64 go build -o /opt/arcatum/dist/arcatum-runner-linux-arm64 ./cmd/runner
 ```
 
-Bootstrap port vydává **jen** `install.sh`, binárky, `ca.pem`, podepisovací veřejný klíč
-a enrollment endpointy. Nic z toho není tajné a administrátorské API tam není dostupné.
+The bootstrap port serves **only** `install.sh`, the binaries, `ca.pem`, the signing public
+key and the enrollment endpoints. None of that is secret and the administrative API is not
+available there.
 
-> **Pozor na `curl … | sh`:** zálohovaný server si spustí jako root skript stažený ze
-> sítě. Přes plain HTTP ho může kdokoli s přístupem k provozu vnitřní sítě vyměnit. Pro
-> interní síť Xtuning je to běžný kompromis; kdo chce víc, může `ca.pem` rozdat předem
-> (např. konfiguračním nástrojem) a stahovat přes plně ověřené HTTPS.
+> **Careful with `curl … | sh`:** the backed-up server runs a script downloaded from the
+> network as root. Over plain HTTP anyone with access to internal network traffic can swap it
+> out. For the Xtuning internal network that is a common trade-off; anyone who wants more can
+> distribute `ca.pem` in advance (e.g. with a configuration tool) and download over fully
+> verified HTTPS.
 
-### Ruční vydání certifikátu
+### Issuing a certificate manually
 
-Enrollment nepotřebuješ, když certifikát vydáš sám — pak stačí soubory nakopírovat
-a runner se enrollmentem vůbec nezabývá:
+You do not need enrollment if you issue the certificate yourself — then it is enough to copy
+the files over and the runner does not deal with enrollment at all:
 
 ```sh
 go run ./cmd/arcatum-ca runner -dir pki -id web-01
@@ -1251,10 +1293,10 @@ go run ./cmd/arcatum-ca runner -dir pki -id web-01
 
 ---
 
-## Aktualizace runnerů
+## Updating runners
 
-Runnery se aktualizují samy. Publikování je zkopírovat binárky do `dist_dir` a napsat
-vedle nich verzi:
+Runners update themselves. Publishing means copying the binaries into `dist_dir` and writing
+the version next to them:
 
 ```sh
 V=2026.07.26
@@ -1265,39 +1307,41 @@ done
 echo "$V" > /opt/arcatum/dist/VERSION
 ```
 
-Se [`just`](#zkratky-přes-just) totéž jedním příkazem — postaví obě architektury i soubor
-`VERSION`:
+With [`just`](#just-shortcuts) the same in one command — it builds both architectures and the
+`VERSION` file:
 
 ```sh
 V=2026.07.26 just dist-runner /opt/arcatum/dist
 ```
 
-Runner při dalším checkinu zjistí, že běží na starší verzi, novou stáhne, nahradí sám
-sebe a restartuje se. Aktuální verze každého hostu je vidět v záložce **Runnery** —
-podle toho poznáš, jak daleko je rozjezd.
+At its next checkin the runner finds out it is running an older version, downloads the new
+one, replaces itself and restarts. The current version of every host is visible in the
+**Runners** tab — that is how you tell how far the rollout has got.
 
-**Bez `VERSION` se nic nenabízí.** Binárky v adresáři samy o sobě aktualizaci nespustí;
-verze je to, co říká „tohle je vydané".
+**Without `VERSION` nothing is offered.** Binaries in the directory do not trigger an update
+on their own; the version is what says "this is released".
 
-### Proč je to bezpečné
+### Why this is safe
 
-Nahrazení vlastní binárky je nejrizikovější věc, kterou runner dělá — špatná nebo
-podvržená aktualizace rozbije (nebo ovládne) všechny zálohované servery naráz. Proto:
+Replacing its own binary is the riskiest thing a runner does — a bad or forged update breaks
+(or takes over) all backed-up servers at once. Therefore:
 
-- **Manifest je podepsaný podepisovacím klíčem úloh.** Publikovat build tedy vyžaduje ten
-  klíč, ne jen kontrolu nad serverem — a hlavně ne přístup k plain-HTTP bootstrapu.
-- **Binárka se stahuje přes mTLS**, nikdy z bootstrap portu, a její **SHA‑256 se ověří**
-  proti podepsanému manifestu, teprve pak se cokoli přepisuje.
-- **Nová binárka se zapíše vedle a přejmenuje** (atomicky), předchozí zůstane jako
-  `.old` pro diagnostiku.
-- **Vývojový build se neaktualizuje** — binárka bez vypálené verze hlásí `dev` a nechá se
-  na pokoji.
-- **Jeden pokus na verzi.** Když se po restartu verze nezmění, runner to nezkouší znovu
-  a nahlásí to do logu — rozbitý build tedy nedokáže hosta uvrhnout do restart smyčky.
+- **The manifest is signed with the job signing key.** Publishing a build therefore requires
+  that key, not just control over the server — and definitely not access to the plain-HTTP
+  bootstrap.
+- **The binary is downloaded over mTLS**, never from the bootstrap port, and its **SHA‑256 is
+  verified** against the signed manifest before anything is overwritten.
+- **The new binary is written alongside and renamed** (atomically); the previous one stays as
+  `.old` for diagnostics.
+- **A development build is not updated** — a binary without a baked-in version reports `dev`
+  and is left alone.
+- **One attempt per version.** If the version does not change after a restart, the runner does
+  not try again and reports it to the log — a broken build therefore cannot throw a host into
+  a restart loop.
 
-### Přišpendlení hosta
+### Pinning a host
 
-Když chceš mít nějaký server na pevné verzi:
+When you want a particular server on a fixed version:
 
 ```toml
 # runner.toml
@@ -1305,143 +1349,147 @@ Když chceš mít nějaký server na pevné verzi:
 auto_update = false
 ```
 
-Pak ho aktualizuješ ručně opakovaným `install.sh`.
+You then update it manually by running `install.sh` again.
 
-> **Po rotaci podepisovacího klíče** je `dispatch-signing.pub` na hostu zastaralý —
-> autoritou je stažená sada v `data_dir/pki/signing-keys.pem`. Kdyby se ta sada ztratila
-> (přeinstalace disku, omylem smazaná), runner nedokáže nic ověřit a odmítne pracovat.
-> Náprava je stáhnout aktuální klíč z bootstrapu:
+> **After signing key rotation** the `dispatch-signing.pub` on the host is stale — the
+> authority is the downloaded set in `data_dir/pki/signing-keys.pem`. If that set were lost
+> (a disk reinstall, deleted by mistake), the runner cannot verify anything and refuses to
+> work. The fix is to download the current key from the bootstrap:
 > `curl -LsSf http://172.24.0.60/arcatum_runner/dispatch-signing.pub -o <data_dir>/pki/dispatch-signing.pub`
 
 ---
 
-## Vývoj
+## Development
 
 ```sh
-export PATH=/usr/local/go/bin:$PATH   # Go není v tomto prostředí na PATH
+export PATH=/usr/local/go/bin:$PATH   # Go is not on PATH in this environment
 
-go build ./...      # kompilace
-go vet ./...        # statická kontrola
-go test ./...       # testy
+go build ./...      # compile
+go vet ./...        # static checks
+go test ./...       # tests
 ```
 
-Server běží bez CGO (SQLite přes `modernc.org/sqlite`), takže výsledkem je jeden
-statický binár bez runtime závislostí.
+The server runs without CGO (SQLite via `modernc.org/sqlite`), so the result is a single
+static binary with no runtime dependencies.
 
-### Zkratky přes `just`
+### `just` shortcuts
 
-V kořeni repozitáře je `justfile` — [just](https://just.systems) je task runner, tedy
-„makefile bez závislostí na `make`". Je **nepovinný**: každý recept je jen obal nad
-`go`/`curl` příkazy z tohohle README, takže bez `just` se obejdeš, jen si víc napíšeš.
+There is a `justfile` in the root of the repository — [just](https://just.systems) is a task
+runner, a "makefile without depending on `make`". It is **optional**: every recipe is just a
+wrapper around the `go`/`curl` commands from this README, so you can do without `just`, you
+will just type more.
 
 ```sh
-cargo install just     # nebo: apt install just
-just                   # vypíše všechny recepty i s popisem
+cargo install just     # or: apt install just
+just                   # lists all recipes with their descriptions
 ```
 
-**Build a kontroly**
+**Build and checks**
 
-| Recept | Co dělá |
+| Recipe | What it does |
 |---|---|
 | `just build` | `go build ./...` |
-| `just build-all` | binárky serveru, runneru a `arcatum-ca` do `./bin` |
-| `just release` | totéž, ale s verzí vypálenou přes `-ldflags` |
-| `just dist-runner [dir]` | runner pro `linux/amd64` i `arm64` + soubor `VERSION` (default `local/dist`) |
-| `just bundle` | balík pro produkci: binárky, runnery, `scripts/` a instalátor v jednom `bin/arcatum-<verze>.tar.gz` |
-| `just test` / `just test-race` / `just vet` | testy, testy s race detektorem, `go vet` |
-| `just fmt` | `gofmt -w` nad celým stromem |
-| `just check` | gofmt + vet + test + build — co má projít před odesláním změny |
-| `just clean` | smaže `bin/` a `local/dist` (data ani zálohy nesahá) |
+| `just build-all` | the server, runner and `arcatum-ca` binaries into `./bin` |
+| `just release` | the same, but with the version baked in through `-ldflags` |
+| `just dist-runner [dir]` | the runner for `linux/amd64` and `arm64` + a `VERSION` file (default `local/dist`) |
+| `just bundle` | a production bundle: binaries, runners, `scripts/` and the installer in a single `bin/arcatum-<version>.tar.gz` |
+| `just test` / `just test-race` / `just vet` | tests, tests with the race detector, `go vet` |
+| `just fmt` | `gofmt -w` over the whole tree |
+| `just check` | gofmt + vet + test + build — what must pass before submitting a change |
+| `just clean` | deletes `bin/` and `local/dist` (does not touch data or backups) |
 
-**Lokální běh a ladění**
+**Running and debugging locally**
 
-| Recept | Co dělá |
+| Recipe | What it does |
 |---|---|
-| `just dev-init` | vytvoří `local/{data,backup}`, `local/server.toml` a `local/instances.json`, pokud chybí (a doplní do seedu hostname) |
-| `just server` | spustí server nad `local/` configem |
-| `just runner-once` / `just runner` | jeden cyklus runneru, nebo běh jako služba |
-| `just passwd [user]` | změní heslo účtu webu a vypíše ho (default `admin`) |
-| `just user-add <user> [role]` | vytvoří účet webu a vypíše jeho heslo (default role `viewer`) |
-| `just trigger [instance]` | vynutí spuštění instance (default `hello-demo`) |
-| `just runs`, `just instances`, `just runners`, `just status` | přehledy z API |
-| `just run-output <id> [stream]` | zachycený výstup běhu (přijme `run-1` i `1`) |
-| `just run-tail <id> [offset]` | přírůstek výstupu — totéž, co používá živý tail |
+| `just dev-init` | creates `local/{data,backup}`, `local/server.toml` and `local/instances.json` if missing (and fills the hostname into the seed) |
+| `just server` | starts the server against the `local/` config |
+| `just runner-once` / `just runner` | one runner cycle, or running as a service |
+| `just passwd [user]` | changes a web account password and prints it (default `admin`) |
+| `just user-add <user> [role]` | creates a web account and prints its password (default role `viewer`) |
+| `just trigger [instance]` | forces an instance to run (default `hello-demo`) |
+| `just runs`, `just instances`, `just runners`, `just status` | overviews from the API |
+| `just run-output <id> [stream]` | the captured output of a run (accepts `run-1` and `1` alike) |
+| `just run-tail <id> [offset]` | the increment of the output — the same thing the live tail uses |
 
-**PKI pro lokální vývoj**
+**PKI for local development**
 
-| Recept | Co dělá |
+| Recipe | What it does |
 |---|---|
-| `just dev-certs [hosts] [admin]` | celé PKI do `local/pki` (default `127.0.0.1`, admin `dev`) |
-| `just dev-runner-cert [id]` | certifikát runneru z `local/pki` (default hostname stroje) |
-| `just ca <args…>` | libovolný příkaz `arcatum-ca`, např. `just ca admin -dir local/pki -name kolega` |
+| `just dev-certs [hosts] [admin]` | the whole PKI into `local/pki` (default `127.0.0.1`, admin `dev`) |
+| `just dev-runner-cert [id]` | a runner certificate from `local/pki` (default: the machine hostname) |
+| `just ca <args…>` | any `arcatum-ca` command, e.g. `just ca admin -dir local/pki -name colleague` |
 
-Chování se ladí proměnnými prostředí, ne úpravou souboru:
+Behaviour is tuned with environment variables, not by editing the file:
 
 ```sh
-GO=/usr/local/go/bin/go just build          # Go mimo PATH
-V=2026.07.26 just release                   # verze do binárky (default: dnešní datum)
-SERVER_URL=https://127.0.0.1:8443 just runs # jiný cíl API
+GO=/usr/local/go/bin/go just build          # Go outside PATH
+V=2026.07.26 just release                   # version baked into the binary (default: today's date)
+SERVER_URL=https://127.0.0.1:8443 just runs # a different API target
 SERVER_CONFIG=local/server-mtls.toml just server
-LISTEN=0.0.0.0:8443 just dev-init           # dostupné i z jiného stroje (viz níže)
-WEB_LISTEN=0.0.0.0:8080 just dev-init       # totéž pro web UI
-ARCATUM_PASSWORD=tajneheslo just passwd petr # konkrétní heslo místo vygenerovaného
-ARCATUM_PASSWORD=tajneheslo just user-add kolega viewer # totéž při zakládání účtu
+LISTEN=0.0.0.0:8443 just dev-init           # reachable from another machine too (see below)
+WEB_LISTEN=0.0.0.0:8080 just dev-init       # the same for the web UI
+ARCATUM_PASSWORD=secretpass just passwd petr # a specific password instead of a generated one
+ARCATUM_PASSWORD=secretpass just user-add colleague viewer # the same when creating an account
 ```
 
-> Vývojový config naslouchá jen na `127.0.0.1`, takže z jiného stroje se na server
-> nepřipojíš a v jeho logu po tom nezůstane žádná stopa. `0.0.0.0` ale znamená plain HTTP
-> **bez ověřování volajícího** — pro víc než pokus zapni
-> [zabezpečení](#zabezpečení-mtls-a-podpis-úloh).
+> The development config listens on `127.0.0.1` only, so you cannot connect to the server
+> from another machine and no trace of the attempt is left in its log. `0.0.0.0`, however,
+> means plain HTTP **without authenticating the caller** — for anything more than an
+> experiment, turn [security](#security-mtls-and-job-signing) on.
 
-Recepty, které berou argument, ho přijímají pozičně: `just trigger mysql-web01`,
+Recipes that take an argument accept it positionally: `just trigger mysql-web01`,
 `just run-output 42`, `just dist-runner /opt/arcatum/dist`.
 
-Podrobněji — lokální prostředí, tok dat jedním během, kam přidat endpoint / sloupec /
-typ skriptu, testy a ladění: [Vývoj a ladění backendu](docs/backend-development.md).
+In more detail — the local environment, the flow of data through a single run, where to add
+an endpoint / column / script type, tests and debugging:
+[Backend development and debugging](docs/backend-development.md).
 
 ---
 
-## Stav a roadmapa
+## Status and roadmap
 
-**Hotovo:**
-- Pull protokol end-to-end: checkin → doručení úlohy → spuštění → stream výstupu na server
-- Rozvrh (denní/týdenní/měsíční) + manuální trigger
-- Persistence v SQLite (instance, běhy, evidence runnerů) — přežije restart
-- Tři úrovně konfigurace, manifest s deklarací parametrů
-- **mTLS** mezi serverem a runnery, identita a role z certifikátu, PKI nástroje
-- **Podpis úloh** (Ed25519) — runner ověřuje před spuštěním, jinak odmítne
-- **Šifrování secrets at-rest** (AES-256-GCM, vázané na instanci a název parametru)
-- **Zálohování souborů přes restic** — repozitář na serveru (vlastní restic REST backend),
-  dedup a inkrementální snapshoty, izolace repozitářů mezi runnery
-- **Retence (GFS)** — `forget --prune` po úspěšné záloze, omezené na vlastní snapshoty
-- **Web UI** zabalené v binárce — běhy, instance, runnery, **živý tail výstupu**, „spustit teď"
-- **Přihlášení do webu jménem a heslem** na vlastním portu, role `admin`/`viewer`, správa
-  účtů z webu (PBKDF2 hashe, sezení v cookie); runnery zůstávají na certifikátech
-- **Instalace jedním příkazem** (`install.sh`) a **enrollment** — runner si vygeneruje vlastní
-  klíč, pošle jen CSR a čeká na schválení ve webu
-- **Automatická obnova certifikátů** před expirací (včetně výměny klíče) a **zneplatnění
-  při kompromitaci** — runner přejde do `pending` a sám požádá o nový; varování na
-  blížící se expiraci ve webu
-- **Rotace všech tří dlouhodobých klíčů** (master klíč secrets, podepisovací klíč úloh, CA)
-  s oknem dvojí platnosti; runnery si nový trust materiál převezmou samy
-- **Správa instancí z webu/API** — formulář z deklarace parametrů, validace při uložení,
-  změny platí bez restartu, hesla šifrovaná od uložení
-- **Auto-update runneru** — podepsaný manifest buildů, stažení přes mTLS, ověření SHA-256
-- Bezpečné předání secrets (dočasný soubor, ne env), maskování v API, ověření SHA-256 artefaktu
+**Done:**
+- The pull protocol end to end: checkin → job delivery → execution → output streamed to the server
+- Schedule (daily/weekly/monthly) + manual trigger
+- Persistence in SQLite (instances, runs, the runner registry) — survives a restart
+- Three levels of configuration, a manifest declaring parameters
+- **mTLS** between the server and the runners, identity and role from the certificate, PKI tooling
+- **Job signing** (Ed25519) — the runner verifies before running, and refuses otherwise
+- **Secret encryption at rest** (AES-256-GCM, bound to the instance and parameter name)
+- **File backups through restic** — the repository on the server (our own restic REST
+  backend), dedup and incremental snapshots, repository isolation between runners
+- **Retention (GFS)** — `forget --prune` after a successful backup, restricted to its own snapshots
+- **A web UI** embedded in the binary — runs, instances, runners, a **live tail of the output**, "run now"
+- **Web login with a username and password** on its own port, `admin`/`viewer` roles, account
+  management from the web UI (PBKDF2 hashes, sessions in a cookie); runners stay on certificates
+- **One-command installation** (`install.sh`) and **enrollment** — the runner generates its own
+  key, sends only a CSR and waits for approval in the web UI
+- **Automatic certificate renewal** before expiry (including key replacement) and **revocation
+  on compromise** — the runner moves to `pending` and asks for a new one itself; warnings about
+  approaching expiry in the web UI
+- **Rotation of all three long-lived keys** (secrets master key, job signing key, CA) with a
+  dual-validity window; runners pick up the new trust material themselves
+- **Instance management from the web UI/API** — a form built from the parameter declaration,
+  validation on save, changes take effect without a restart, passwords encrypted from the moment
+  they are stored
+- **Runner auto-update** — a signed build manifest, download over mTLS, SHA-256 verification
+- Safe secret delivery (a temporary file, not env), masking in the API, SHA-256 artifact verification
 
-- **Obnova z webu** — procházení snapshotů a stažení souboru či adresáře, běží na serveru
-  (nezávisle na zálohovaném hostu)
-- **Záloha a obnova konfigurace jedním souborem** — instance, účty a runnery jako zip, import
-  s náhledem změn a automatickou zálohou předchozího stavu; klíče se záměrně nepřenášejí
-- **Vyprázdnění serveru** — smazání všech záloh, dumpů, logů a historie se zachováním
-  konfigurace
-- **[Odlehlá kopie](#odlehlá-kopie)** — všechno, co server uloží, odtéká `rsync`em přes
-  `ssh` na druhý stroj; výpadek linky je vidět u každého běhu i jako varování a fronta se
-  po nápravě sama dožene
+- **Restore from the web UI** — browsing snapshots and downloading a file or directory, runs on
+  the server (independently of the backed-up host)
+- **Config backup and restore in a single file** — instances, accounts and runners as a zip,
+  import with a preview of the changes and an automatic backup of the previous state; keys are
+  deliberately not transferred
+- **Wiping the server** — deleting all backups, dumps, logs and history while keeping the
+  configuration
+- **[Off-site replica](#off-site-replica)** — everything the server stores flows over `rsync`
+  through `ssh` to a second machine; a link outage is visible on every run and as a warning, and
+  the queue catches up on its own once it is fixed
 
-**Chybí (další fáze):**
-- **Obnova zpět na zálohovaný server** (dnes stáhneš data k sobě a nakopíruješ je sám)
-- **Notifikace** při selhání (e-mail/Slack) a **dry-run** režim
-- **CRL/OCSP** — [záměrně nezavedeno](#proč-ne-crlocsp)
+**Missing (later phases):**
+- **Restore back onto the backed-up server** (today you download the data to yourself and copy it over)
+- **Notifications** on failure (e-mail/Slack) and a **dry-run** mode
+- **CRL/OCSP** — [deliberately not implemented](#why-not-crlocsp)
 
-Podrobná architektura a rozhodnutí: [docs/architecture.md](docs/architecture.md).
+Detailed architecture and decisions: [docs/architecture.md](docs/architecture.md).

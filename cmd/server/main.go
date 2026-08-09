@@ -82,7 +82,7 @@ func ensureAdminAccount(store *server.Store, logger *log.Logger) error {
 	logger.Printf("  ┌─ first start: created the web account ─────────────────────")
 	logger.Printf("  │   user:     %s", initialAdmin)
 	logger.Printf("  │   password: %s", password)
-	logger.Printf("  │ Log in and change it (Účet → změnit heslo). A forgotten")
+	logger.Printf("  │ Log in and change it (Account → change password). A forgotten")
 	logger.Printf("  │ password is reset with: arcatum-server -passwd %s", initialAdmin)
 	logger.Printf("  └───────────────────────────────────────────────────────────")
 	logger.Printf("  ")
@@ -379,7 +379,7 @@ func main() {
 		err = httpSrv.ListenAndServeTLS("", "") // certificates come from TLSConfig
 	} else {
 		logger.Printf("  WARNING: no [tls] configured — plain HTTP, callers are not authenticated.")
-		logger.Printf("           Development only. See README: Zabezpečení (mTLS a podpis úloh).")
+		logger.Printf("           Development only. See README: Security (mTLS and job signing).")
 		err = httpSrv.ListenAndServe()
 	}
 	if err != nil {

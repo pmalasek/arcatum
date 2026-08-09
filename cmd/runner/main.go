@@ -112,7 +112,7 @@ func main() {
 		logger.Printf("mTLS enabled; job signatures are verified before execution")
 	} else {
 		logger.Printf("WARNING: no [tls] configured — plain HTTP and job signatures are NOT verified.")
-		logger.Printf("         Development only. See README: Zabezpečení (mTLS a podpis úloh).")
+		logger.Printf("         Development only. See README: Security (mTLS and job signing).")
 	}
 
 	if *once {

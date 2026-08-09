@@ -99,7 +99,7 @@ Done. Files in $PKI_DIR:
 Next: point server.toml at ca.pem, server.pem/.key, dispatch-signing.key and
 secrets-master.key; point each runner.toml at ca.pem, its runner-<id> pair and
 dispatch-signing.pub.
-See README section "Zabezpečení (mTLS a podpis úloh)".
+See README section "Security (mTLS and job signing)".
 
 Losing secrets-master.key makes every stored secret unreadable — keep a backup
 somewhere other than the machine it protects.

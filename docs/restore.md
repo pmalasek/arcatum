@@ -1,234 +1,238 @@
-# Návod: obnova databáze z dumpu
+# Guide: restoring a database from a dump
 
-Jak z Arcatum dostat dump zpět do běžící databáze — MySQL i PostgreSQL. Čte se to nejhůř
-ve chvíli, kdy je to potřeba, takže si celý postup jednou projdi nanečisto dřív, než ho
-budeš potřebovat doopravdy.
+How to get a dump out of Arcatum and back into a running database — MySQL and PostgreSQL
+alike. This is hardest to read at the moment you need it, so walk through the whole procedure
+once as a dry run before you need it for real.
 
-- [1. Co Arcatum garantuje a co ne](#1-co-arcatum-garantuje-a-co-ne)
-- [2. Jak se dostat k dumpu](#2-jak-se-dostat-k-dumpu)
+- [1. What Arcatum guarantees and what it does not](#1-what-arcatum-guarantees-and-what-it-does-not)
+- [2. How to get hold of the dump](#2-how-to-get-hold-of-the-dump)
 - [3. MySQL / MariaDB](#3-mysql--mariadb)
 - [4. PostgreSQL](#4-postgresql)
-- [5. Co v dumpu není](#5-co-v-dumpu-není)
-- [6. Katalog chyb](#6-katalog-chyb)
-- [7. Zkušební obnova](#7-zkušební-obnova)
+- [5. What is not in the dump](#5-what-is-not-in-the-dump)
+- [6. Error catalogue](#6-error-catalogue)
+- [7. A trial restore](#7-a-trial-restore)
 
 ---
 
-## 1. Co Arcatum garantuje a co ne
+## 1. What Arcatum guarantees and what it does not
 
-**Garantuje:** dump ke stažení existuje jen tehdy, když zálohovací skript skončil
-návratovým kódem 0. Server přijatá data píše do `data.part` a přejmenuje je na `data.bin`
-teprve při úspěšném dokončení běhu, takže useknutý přenos ani spadlý `mysqldump` po sobě
-nenechá soubor, který by vypadal jako hotová záloha ([architektura §17](architecture.md)).
+**It guarantees:** a downloadable dump only exists when the backup script finished with exit
+code 0. The server writes the received data into `data.part` and renames it to `data.bin`
+only when the run completes successfully, so neither a truncated transfer nor a crashed
+`mysqldump` leaves behind a file that looks like a finished backup
+([architecture §17](architecture.md)).
 
-**Negarantuje nic o obsahu.** Server do dumpu nekouká: nekontroluje formát, příponu,
-hlavičku ani velikost — přijme jakýkoli proud bajtů. Skript, který skončí nulou a vypíše
-nesmysl, vyrobí zálohu, která je od té správné k nerozeznání až do chvíle, kdy ji budeš
-obnovovat.
+**It guarantees nothing about the contents.** The server does not look inside the dump: it
+checks neither format, extension, header nor size — it accepts any stream of bytes. A script
+that exits zero and prints nonsense produces a backup indistinguishable from a correct one
+right up to the moment you restore it.
 
-> Jediný důkaz, že záloha je obnovitelná, je **provedená obnova**. Ne velikost souboru,
-> ne zelený řádek v přehledu běhů. Viz [§7](#7-zkušební-obnova).
+> The only proof that a backup is restorable is **a restore you have performed**. Not the file
+> size, not a green row in the run overview. See [§7](#7-a-trial-restore).
 
-Dumpy se navíc **rotují** (`keep_last`, `keep_days` na instanci) — starší už nemusí být
-k dispozici, i když řádek běhu v historii zůstává ([architektura §19](architecture.md)).
+Dumps are also **rotated** (`keep_last`, `keep_days` per instance) — older ones may no longer
+be available even though the run's row stays in the history
+([architecture §19](architecture.md)).
 
 ---
 
-## 2. Jak se dostat k dumpu
+## 2. How to get hold of the dump
 
-**Z webu** — záložka **Obnova**, vybereš instanci; u streamované instance se místo
-procházení stromu vypíšou uložené dumpy ke stažení. Soubor se jmenuje
-`<instance>-<run>.dump` bez ohledu na to, co je uvnitř.
+**From the web UI** — the **Restore** tab, where you pick an instance; for a streamed
+instance the stored dumps are listed for download instead of a browsable tree. The file is
+named `<instance>-<run>.dump` regardless of what is inside.
 
-Totéž přes API:
+The same over the API:
 
 ```sh
 A=(--cacert pki/ca.pem --cert pki/admin-petr.pem --key pki/admin-petr.key)
 API=https://172.24.0.60:8443/api/v1
 
-curl "${A[@]}" $API/instances/mysql-web01/dumps        # co je k dispozici, od nejnovějšího
-curl "${A[@]}" -O -J $API/runs/run-42/data             # stažení konkrétního běhu
+curl "${A[@]}" $API/instances/mysql-web01/dumps        # what is available, newest first
+curl "${A[@]}" -O -J $API/runs/run-42/data             # download a specific run
 ```
 
-Stažení jde i **rovnou do klienta databáze**, bez mezikroku na disku — u
-několikagigabajtového dumpu to je rozdíl:
+The download can also go **straight into the database client**, with no intermediate step on
+disk — with a multi-gigabyte dump that makes a difference:
 
 ```sh
 curl "${A[@]}" $API/runs/run-42/data | mysql --host=… --user=… shop
 ```
 
-| Odpověď | Znamená |
+| Response | Means |
 |---|---|
-| `200` | dump je tam |
-| `404 this run has no backup data` | běh žádná data nevyrobil (nebo neskončil úspěšně) |
-| `410 Gone` | dump **byl odrotován** retencí — běh proběhl v pořádku, soubor už neexistuje |
+| `200` | the dump is there |
+| `404 this run has no backup data` | the run produced no data (or did not finish successfully) |
+| `410 Gone` | the dump **was rotated away** by retention — the run went fine, the file no longer exists |
 
-Stahování vyžaduje roli se čtením (klientský certifikát nebo přihlášení do webu) a umí
-`Range`, takže přerušené stahování velkého dumpu jde navázat, ne opakovat od nuly.
+Downloading requires a read role (a client certificate or a web login) and supports `Range`,
+so an interrupted download of a large dump can be resumed rather than restarted from zero.
 
 ---
 
 ## 3. MySQL / MariaDB
 
-Dump ze [scripts/example/mysql_backup.sh](../scripts/example/mysql_backup.sh) je **plain
-SQL jedné databáze**. Neobsahuje `CREATE DATABASE` ani `USE`, takže cílovou databázi si
-volíš při obnově — a můžeš ji obnovit i pod jiným jménem.
+The dump from [scripts/example/mysql_backup.sh](../scripts/example/mysql_backup.sh) is
+**plain SQL for a single database**. It contains neither `CREATE DATABASE` nor `USE`, so you
+choose the target database at restore time — and you can restore it under a different name.
 
 ```sh
-# 1) cílová databáze (musí existovat; kódování podle originálu)
+# 1) the target database (must exist; character set matching the original)
 mysql --host=db01 --user=root -e \
-  "CREATE DATABASE shop_obnova CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+  "CREATE DATABASE shop_restore CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
 
-# 2) obnova; heslo přes MYSQL_PWD, ať není v process listu
+# 2) restore; the password via MYSQL_PWD so it is not in the process list
 export MYSQL_PWD='…'
 mysql --host=db01 --user=root --default-character-set=utf8mb4 \
-      shop_obnova < mysql-web01-run-42.dump
+      shop_restore < mysql-web01-run-42.dump
 echo "exit=$?"
 ```
 
-Dump má ve výchozím stavu `DROP TABLE IF EXISTS` u každé tabulky, takže obnova **přes
-existující databázi projde** a tabulky přepíše. Co v cílové databázi je navíc (tabulka,
-která ve dumpu není), ale zůstane — pro čistou obnovu vždycky prázdná databáze.
+By default the dump has `DROP TABLE IF EXISTS` for every table, so a restore **over an
+existing database works** and overwrites the tables. Anything extra in the target database (a
+table that is not in the dump) stays, though — for a clean restore always use an empty
+database.
 
-`mysql` končí nenulovým kódem na první chybě, takže `exit=0` tady opravdu znamená, že
-prošel celý soubor.
+`mysql` exits with a non-zero code on the first error, so `exit=0` here really does mean the
+whole file went through.
 
-**Pozor na GTID.** Pokud má zdrojový server zapnuté GTID, `mysqldump` vloží do dumpu
-`SET @@GLOBAL.GTID_PURGED=…`. Obnova do serveru, který už nějaké transakce zná, na tom
-skončí chybou. Řešení je dump s `--set-gtid-purged=OFF`, nebo tenhle příkaz z dumpu před
-obnovou odstranit.
+**Careful with GTID.** If the source server has GTID enabled, `mysqldump` puts
+`SET @@GLOBAL.GTID_PURGED=…` into the dump. Restoring into a server that already knows some
+transactions fails on it. The fix is to dump with `--set-gtid-purged=OFF`, or to remove that
+statement from the dump before restoring.
 
 ---
 
 ## 4. PostgreSQL
 
-Postgres se zálohuje **dvěma instancemi**: `postgres-backup` dumpuje jednu databázi,
-`postgres-globals-backup` role a tablespaces celého clusteru. Při obnově na prázdný
-cluster potřebuješ oba dumpy a **v tomhle pořadí** — role musí existovat dřív, než na ně
-dump databáze narazí v `ALTER … OWNER TO`.
+Postgres is backed up by **two instances**: `postgres-backup` dumps a single database and
+`postgres-globals-backup` the roles and tablespaces of the whole cluster. When restoring onto
+an empty cluster you need both dumps, **in that order** — the roles must exist before the
+database dump hits them in `ALTER … OWNER TO`.
 
-Dump ze [scripts/example/postgres_backup.sh](../scripts/example/postgres_backup.sh) je
-**plain SQL jedné databáze** bez `CREATE DATABASE` — obnovuje se přes `psql`
-(ne `pg_restore`, ten umí jen formáty `custom`/`directory`/`tar`).
+The dump from [scripts/example/postgres_backup.sh](../scripts/example/postgres_backup.sh) is
+**plain SQL for a single database** without `CREATE DATABASE` — it is restored with `psql`
+(not `pg_restore`, which only handles the `custom`/`directory`/`tar` formats).
 
 ```sh
 export PGPASSWORD='…'
 
-# 1) role a tablespaces (jen na cluster, kde ještě nejsou)
+# 1) roles and tablespaces (only on a cluster that does not have them yet)
 psql --host=db01 --username=postgres --dbname=postgres \
      --set=ON_ERROR_STOP=1 \
      --file=pg-globals-web01-run-41.dump
 
-# 2) cílová databáze; -T template0 kvůli kódování a collation z dumpu
-createdb --host=db01 --username=postgres --template=template0 --encoding=UTF8 shop_obnova
+# 2) the target database; -T template0 because of the encoding and collation from the dump
+createdb --host=db01 --username=postgres --template=template0 --encoding=UTF8 shop_restore
 
-# 3) obnova dat
-psql --host=db01 --username=postgres --dbname=shop_obnova \
+# 3) restoring the data
+psql --host=db01 --username=postgres --dbname=shop_restore \
      --set=ON_ERROR_STOP=1 --single-transaction \
      --file=postgres-web01-run-42.dump
 echo "exit=$?"
 ```
 
-Krok 1 je psaný pro **prázdný cluster** — tam je `ON_ERROR_STOP=1` na místě, protože
-každá chyba je skutečná. Do clusteru, kde už nějaké role jsou, ho naopak vynech: dump má
-`CREATE ROLE` i pro role, které tam existují (`postgres` prakticky vždycky), a první
-kolize by zbytek zahodila. Pak ale **projdi stderr ručně** — `role "x" already exists`
-je v pořádku, cokoli jiného ne.
+Step 1 is written for an **empty cluster** — there `ON_ERROR_STOP=1` is right, because every
+error is a real one. On a cluster that already has some roles, skip it instead: the dump has
+`CREATE ROLE` even for roles that exist there (`postgres` practically always), and the first
+collision would throw away the rest. But then **go through stderr by hand** — `role "x"
+already exists` is fine, anything else is not.
 
-> Globals dump obsahuje **hashe hesel všech rolí** (`ALTER ROLE … PASSWORD 'SCRAM-…'`).
-> Arcatum payloady nešifruje, takže leží v otevřené podobě na serveru jako každý jiný
-> dump — zachází se s ním jako s citlivým souborem.
+> The globals dump contains **password hashes for all roles**
+> (`ALTER ROLE … PASSWORD 'SCRAM-…'`). Arcatum does not encrypt payloads, so it sits in the
+> open on the server like any other dump — treat it as a sensitive file.
 
-**`ON_ERROR_STOP=1` tam není pro parádu.** `psql` ve výchozím nastavení po chybě
-pokračuje dál a skončí kódem 0 — obnova, které chybí půlka tabulek, tak vypadá jako
-úspěšná. `--single-transaction` k tomu přidá, že se při chybě nic nepřipojí a cílová
-databáze zůstane prázdná místo napůl naplněné.
+**`ON_ERROR_STOP=1` is not there for decoration.** By default `psql` carries on after an
+error and exits with code 0 — so a restore missing half the tables looks successful.
+`--single-transaction` adds to that: on an error nothing is committed and the target database
+stays empty instead of half-filled.
 
-**Vlastníci a práva jsou v dumpu.** `pg_dump` do plain formátu zapisuje
-`ALTER … OWNER TO <role>` a `GRANT`. Do **jiného** clusteru, kde ty role neexistují, se
-takový dump neobnoví — musíš buď role předem vytvořit:
+**Owners and privileges are in the dump.** Into a plain-format file `pg_dump` writes
+`ALTER … OWNER TO <role>` and `GRANT`. Such a dump will not restore into a **different**
+cluster where those roles do not exist — you either have to create the roles beforehand:
 
 ```sh
 psql --host=db01 --username=postgres -c "CREATE ROLE shop_app LOGIN"
 ```
 
-…nebo pořídit dump s `--no-owner --no-privileges`. To je volba **při dumpu**, ne při
-obnově; z hotového plain dumpu se ownership pohodlně vyndat nedá.
+…or take the dump with `--no-owner --no-privileges`. That is a choice **at dump time**, not at
+restore time; ownership cannot conveniently be taken out of a finished plain dump.
 
-Do stejného clusteru, odkud záloha pochází, tenhle problém nenastane.
+Into the same cluster the backup came from, this problem does not arise.
 
-**Verze.** `pg_dump` musí být stejné nebo vyšší verze než zálohovaný server; obnovovat
-dump do **starší** major verze Postgresu spolehlivě nejde.
+**Versions.** `pg_dump` must be the same version as the backed-up server or newer; restoring a
+dump into an **older** major version of Postgres does not work reliably.
 
 ---
 
-## 5. Co v dumpu není
+## 5. What is not in the dump
 
-Dump jedné databáze zachytí databázi, ne server. Tohle v něm nehledej:
+A dump of one database captures the database, not the server. Do not look for these in it:
 
 | | MySQL | PostgreSQL |
 |---|---|---|
-| funkce, procedury, triggery, pohledy | ano | ano |
-| sekvence / AUTO_INCREMENT | ano | ano |
-| naplánované úlohy | ano (`--events`) | n/a |
-| rozšíření | n/a | ano (`CREATE EXTENSION`, musí být na cíli nainstalované) |
-| large objects | n/a | ano |
-| uživatelé, hesla, granty | **ne** (`mysql.user`) | ano, ale **jinou instancí** — `postgres-globals-backup` |
-| ostatní databáze na serveru | ne | ne |
-| `CREATE DATABASE` | ne | ne (chybí `--create`) |
-| konfigurace serveru | ne (`my.cnf`) | ne (`postgresql.conf`, `pg_hba.conf`) |
-| point-in-time recovery | ne (binlogy) | ne (WAL archiv) |
+| functions, procedures, triggers, views | yes | yes |
+| sequences / AUTO_INCREMENT | yes | yes |
+| scheduled events | yes (`--events`) | n/a |
+| extensions | n/a | yes (`CREATE EXTENSION`, must be installed on the target) |
+| large objects | n/a | yes |
+| users, passwords, grants | **no** (`mysql.user`) | yes, but **from a different instance** — `postgres-globals-backup` |
+| other databases on the server | no | no |
+| `CREATE DATABASE` | no | no (`--create` is missing) |
+| server configuration | no (`my.cnf`) | no (`postgresql.conf`, `pg_hba.conf`) |
+| point-in-time recovery | no (binlogs) | no (WAL archive) |
 
-Co z toho plyne prakticky:
+What follows from that in practice:
 
-- **MySQL uživatelé a granty nejsou zálohovaní vůbec.** Po obnově na jiný server je musíš
-  vytvořit ručně, jinak se do obnovené databáze nikdo nepřipojí. Arcatum pro to zatím
-  nemá protějšek toho, co u Postgresu dělá `postgres-globals-backup`.
-- **U Postgresu potřebuješ obě instance.** Jedna `postgres-globals-backup` na server,
-  jedna `postgres-backup` na každou databázi. Sama o sobě neobnoví ani jedna.
-- `--single-transaction` u `mysqldump` dává konzistentní snímek jen pro **InnoDB**;
-  MyISAM tabulky se dumpnou tak, jak se zrovna trefí.
+- **MySQL users and grants are not backed up at all.** After restoring onto another server
+  you have to create them by hand, otherwise nobody will connect to the restored database.
+  Arcatum has no counterpart yet to what `postgres-globals-backup` does for Postgres.
+- **With Postgres you need both instances.** One `postgres-globals-backup` per server, one
+  `postgres-backup` per database. Neither restores anything on its own.
+- `--single-transaction` in `mysqldump` gives a consistent snapshot only for **InnoDB**;
+  MyISAM tables are dumped in whatever state they happen to be caught.
 
 ---
 
-## 6. Katalog chyb
+## 6. Error catalogue
 
-| Zpráva | Kde | Co s tím |
+| Message | Where | What to do |
 |---|---|---|
-| `410 this run's dump has been rotated away by retention` | stažení | dump smazala retence — vyber novější běh, nebo zvedni `keep_last`/`keep_days` |
-| `404 this run has no backup data` | stažení | běh neskončil úspěšně, nebo skript nemá `capture = "stream"` |
-| `ERROR 1840 … @@GLOBAL.GTID_PURGED can only be set when @@GLOBAL.GTID_EXECUTED is empty` | MySQL obnova | GTID — viz [§3](#3-mysql--mariadb) |
-| `ERROR 1049 Unknown database` | MySQL obnova | dump neobsahuje `CREATE DATABASE`, založ ji ručně |
-| `role "x" does not exist` | PG obnova | globals dump obnov **před** dumpem databáze, nebo role vytvoř ručně |
-| `role "x" already exists` | PG obnova globals | cluster už role má — vynech `ON_ERROR_STOP` a projdi stderr ručně |
-| `permission denied for table pg_authid` | běh `postgres-globals-backup` | instance neběží pod superuživatelem; hesla rolí jinak přečíst nelze |
-| `you need (at least one of) the EVENT privilege(s)` | běh `mysql-backup` | zálohovací účet nemá `EVENT` — přidej ho, nebo z skriptu vyhoď `--events` |
-| `relation "x" already exists` | PG obnova | obnovuješ do neprázdné databáze; `pg_dump` bez `--clean` nic nemaže |
-| `unsupported version … in file header` | `pg_restore` | plain dump se obnovuje `psql`, ne `pg_restore` |
-| `server version mismatch` | PG obnova | dump z novějšího Postgresu do staršího nejde |
-| obnova skončí kódem 0, ale data chybí | PG obnova | zapomenuté `ON_ERROR_STOP=1` — `psql` chyby jen vypsal a šel dál |
-| dump je podezřele malý | — | skript možná selhal bez `pipefail`; porovnej `data_bytes` s předchozími běhy |
+| `410 this run's dump has been rotated away by retention` | download | retention deleted the dump — pick a newer run, or raise `keep_last`/`keep_days` |
+| `404 this run has no backup data` | download | the run did not finish successfully, or the script has no `capture = "stream"` |
+| `ERROR 1840 … @@GLOBAL.GTID_PURGED can only be set when @@GLOBAL.GTID_EXECUTED is empty` | MySQL restore | GTID — see [§3](#3-mysql--mariadb) |
+| `ERROR 1049 Unknown database` | MySQL restore | the dump has no `CREATE DATABASE`, create it by hand |
+| `role "x" does not exist` | PG restore | restore the globals dump **before** the database dump, or create the roles by hand |
+| `role "x" already exists` | PG globals restore | the cluster already has the roles — drop `ON_ERROR_STOP` and go through stderr by hand |
+| `permission denied for table pg_authid` | `postgres-globals-backup` run | the instance is not running as a superuser; role passwords cannot be read otherwise |
+| `you need (at least one of) the EVENT privilege(s)` | `mysql-backup` run | the backup account has no `EVENT` — add it, or drop `--events` from the script |
+| `relation "x" already exists` | PG restore | you are restoring into a non-empty database; `pg_dump` without `--clean` deletes nothing |
+| `unsupported version … in file header` | `pg_restore` | a plain dump is restored with `psql`, not `pg_restore` |
+| `server version mismatch` | PG restore | a dump from a newer Postgres cannot go into an older one |
+| the restore exits 0 but data is missing | PG restore | a forgotten `ON_ERROR_STOP=1` — `psql` only printed the errors and carried on |
+| the dump is suspiciously small | — | the script may have failed without `pipefail`; compare `data_bytes` with previous runs |
 
 ---
 
-## 7. Zkušební obnova
+## 7. A trial restore
 
-Záloha, ze které se nikdy nic neobnovilo, je nepotvrzená domněnka. Postup, který se vejde
-do půl hodiny a dá skutečnou odpověď:
+A backup nothing has ever been restored from is an unconfirmed assumption. A procedure that
+fits into half an hour and gives a real answer:
 
-1. Stáhni **nejnovější** dump instance (`/api/v1/instances/<id>/dumps` → `/runs/<run>/data`).
-2. Obnov ho do **nové prázdné databáze** na testovacím serveru, ne přes produkci.
-3. Zkontroluj, že obnova skončila kódem 0 — u Postgresu **s `ON_ERROR_STOP=1`**, jinak
-   ten kód nic neznamená.
-4. Porovnej obsah proti originálu. Pusť **tentýž příkaz** proti zdrojové i obnovené
-   databázi a výstupy prožeň `diff`em:
+1. Download the **newest** dump of the instance
+   (`/api/v1/instances/<id>/dumps` → `/runs/<run>/data`).
+2. Restore it into a **new, empty database** on a test server, not over production.
+3. Check that the restore exited with code 0 — with Postgres **with `ON_ERROR_STOP=1`**,
+   otherwise that code means nothing.
+4. Compare the contents against the original. Run **the same command** against the source and
+   the restored database and pipe the outputs through `diff`:
 
    ```sh
-   # MySQL — kontrolní součty obsahu, ne jen počty řádků
+   # MySQL — checksums of the contents, not just row counts
    mysql -N -B shop -e "SHOW TABLES" |
      xargs -I% mysql -N -B shop -e 'CHECKSUM TABLE `%`' | sed 's/^[^.]*\.//'
 
-   # PostgreSQL — přesné počty řádků; n_live_tup ze statistik je jen odhad
+   # PostgreSQL — exact row counts; n_live_tup from the statistics is only an estimate
    psql -At -d shop -c "
      SELECT relname, (xpath('/row/c/text()',
               query_to_xml(format('SELECT count(*) AS c FROM %I.%I', schemaname, relname),
@@ -236,27 +240,31 @@ do půl hodiny a dá skutečnou odpověď:
      FROM pg_stat_user_tables ORDER BY relname"
    ```
 
-   (`sed` u MySQL utíná jméno databáze, aby diff nehlásil rozdíl jen proto, že obnovená
-   kopie se jmenuje jinak.)
+   (The `sed` in the MySQL case cuts off the database name so the diff does not report a
+   difference merely because the restored copy has a different name.)
 
-5. Ověř, co tabulky neukážou: existují funkce, triggery a EVENTy, sedí sekvence /
-   `AUTO_INCREMENT`, aplikace se do obnovené databáze připojí.
+5. Verify what the tables will not show: that functions, triggers and EVENTs exist, that
+   sequences / `AUTO_INCREMENT` are right, that the application connects to the restored
+   database.
 
-Checklist pro novou databázovou instanci:
+A checklist for a new database instance:
 
-- [ ] zkušební obnova proběhla, `exit = 0`, kontrolní součty / počty řádků sedí
-- [ ] cílová databáze šla založit se **stejným kódováním a collation**
-- [ ] u Postgresu: server má i instanci `postgres-globals-backup` a její dump jsi obnovil
-      **jako první**
-- [ ] u Postgresu: instance globals běží pod superuživatelem (jinak běh spadne na `pg_authid`)
-- [ ] u MySQL: zálohovací účet má právo `EVENT` — skript ho po přidání `--events` vyžaduje
-- [ ] u MySQL: víš, kde vezmeš uživatele a granty — v dumpu nejsou a Arcatum je nezálohuje
-- [ ] `keep_last` / `keep_days` na instanci pokrývají dobu, za kterou se pozná tiché
-      poškození dat, ne jen včerejšek
+- [ ] a trial restore was done, `exit = 0`, checksums / row counts match
+- [ ] the target database could be created with the **same encoding and collation**
+- [ ] with Postgres: the server also has a `postgres-globals-backup` instance and you
+      restored its dump **first**
+- [ ] with Postgres: the globals instance runs as a superuser (otherwise the run fails on
+      `pg_authid`)
+- [ ] with MySQL: the backup account has the `EVENT` privilege — the script requires it since
+      `--events` was added
+- [ ] with MySQL: you know where you will get the users and grants — they are not in the dump
+      and Arcatum does not back them up
+- [ ] `keep_last` / `keep_days` on the instance cover the time it takes to notice silent data
+      corruption, not just yesterday
 
 ---
 
-Související: [vývoj a ladění skriptů](script-development.md) ·
-[architektura §17 (payload vs. log)](architecture.md) ·
-[architektura §19 (retence dumpů)](architecture.md) ·
-[README → Obnova dat](../README.md#obnova-dat) (souborové zálohy přes restic)
+Related: [script development and debugging](script-development.md) ·
+[architecture §17 (payload vs. log)](architecture.md) ·
+[architecture §19 (dump retention)](architecture.md) ·
+[README → Restoring data](../README.md#restoring-data) (file backups through restic)

@@ -51,18 +51,18 @@ header h1 { margin: 0; font-size: 1.15rem; letter-spacing: .01em; }
 .sub { color: var(--muted); font-size: .85rem; }
 .conn { margin-left: auto; font-size: .8rem; color: var(--fail); }
 
-/* Kdo je přihlášený, vpravo v hlavičce. */
+/* Who is signed in, on the right in the header. */
 .account { margin-left: auto; display: flex; align-items: center; gap: .5rem; }
 .conn:not(:empty) + .account { margin-left: .75rem; }
 .me-name { font-size: .85rem; }
 .badge.viewer { color: var(--muted); }
 .badge.admin { color: var(--accent); }
 
-/* Viewer vidí všechno, ale nic nemění — akce se mu proto vůbec nezobrazují.
-   Server to hlídá taky (webAdmin v users.go); tohle je jen aby na ně neklikal. */
+/* A viewer sees everything but changes nothing — the actions are therefore not shown at
+   all. The server enforces it too (webAdmin in users.go); this only stops them clicking. */
 body.viewer .admin-only { display: none !important; }
 
-/* Přihlašovací obrazovka */
+/* The login screen */
 .login {
   position: fixed;
   inset: 0;
@@ -165,9 +165,10 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.mono, .mono { font-family: var(--mono); font-size: .85em; }
 .empty { color: var(--muted); text-align: center; padding: 1.5rem; }
 
-/* Instance: údaj o repozitáři přichází až po zbytku řádku a mění šířku. Volné místo
-   proto dostane právě ten sloupec — ostatní si drží šířku podle obsahu a tlačítka vpravo
-   zůstanou při obnovení tam, kam na ně člověk míří. */
+/* Instances: the repository figure arrives after the rest of the row and changes its
+   width. The spare space therefore goes to that very column — the others keep their width
+   from their content and the buttons on the right stay where people aim at them across a
+   refresh. */
 #view-instances th:nth-child(5) { width: 100%; }
 
 .badge {
@@ -182,13 +183,14 @@ td.mono, .mono { font-family: var(--mono); font-size: .85em; }
 .badge.failed, .badge.error { color: var(--fail); }
 .badge.running { color: var(--run); }
 .badge.pending { color: var(--warn); }
-/* Zastavený běh není porucha, jen nedokončená práce — proto tlumeně, ne červeně. */
+/* A stopped run is not a fault, just unfinished work — hence muted, not red. */
 .badge.cancelled { color: var(--muted); }
 .badge.approved { color: var(--ok); }
 .badge.rejected { color: var(--fail); }
 
-/* Výpis položek, které se nedaří dostat na odlehlý server. Vnořená tabulka v kartě —
-   drobnější než hlavní seznamy, protože je to podrobnost k údaji nad ní, ne přehled. */
+/* The listing of items failing to reach the off-site server. A nested table inside the
+   card — smaller than the main lists, because it is a detail of the figure above it, not
+   an overview. */
 table.sub { margin-top: .75rem; font-size: .82rem; }
 table.sub td, table.sub th { padding: .25rem .5rem; }
 
@@ -289,7 +291,7 @@ select {
   word-break: break-word;
 }
 .log:empty::after {
-  content: "(žádný výstup)";
+  content: "(no output)";
   color: var(--muted);
 }
 
@@ -353,7 +355,7 @@ select {
 .field input[disabled] { opacity: .6; }
 #form-error, #account-error { color: var(--fail); }
 
-/* Správa uživatelů: formulář pro nový účet žije v patičce sekce */
+/* User management: the form for a new account lives in the section footer */
 .section-foot input, .section-foot select {
   font: inherit;
   font-size: .85rem;
@@ -366,7 +368,7 @@ select {
 }
 #users-error { font-size: .82rem; color: var(--muted); }
 #users-error.err { color: var(--fail); }
-/* Vygenerované heslo se ukáže jednou — musí být čitelné a snadné označit. */
+/* A generated password is shown once — it has to be readable and easy to select. */
 .generated {
   font-family: var(--mono);
   font-size: .9em;
@@ -376,7 +378,8 @@ select {
   user-select: all;
 }
 
-/* Návod na instalaci runneru: rozbalovací, aby nepřekážel tomu, kdo jen kouká na stav. */
+/* Runner installation instructions: collapsible, so they do not get in the way of
+   someone who is only checking the status. */
 .guide {
   border-top: 1px solid var(--border);
   font-size: .85rem;
@@ -391,7 +394,7 @@ select {
 .guide-body ol { margin: 0; padding-left: 1.2rem; }
 .guide-body li { margin-bottom: .6rem; }
 .guide-body .hint { color: var(--muted); font-size: .78rem; margin-top: .2rem; }
-/* Příkaz se kopíruje do terminálu, takže jedno kliknutí musí označit celý. */
+/* The command is copied into a terminal, so one click has to select all of it. */
 .cmd {
   font-family: var(--mono);
   font-size: .85em;
