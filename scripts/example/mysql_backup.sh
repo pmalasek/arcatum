@@ -28,5 +28,5 @@ exec mysqldump \
   --host="$ARCATUM_HOST" \
   --port="$PORT" \
   --user="$ARCATUM_USER" \
-  --single-transaction --quick --routines --triggers \
+  --single-transaction --quick --routines --triggers --events \
   "$ARCATUM_DATABASE"

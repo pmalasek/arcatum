@@ -1,0 +1,43 @@
+# Script DEFINITION (template). Values for a concrete server live in an instance
+# (in the DB / web UI), not here. See docs/architecture.md §5.
+#
+# Cluster-wide companion to postgres-backup: one instance per PostgreSQL server,
+# not per database. See docs/restore.md §4.
+name       = "postgres-globals-backup"
+type       = "bash"                       # bash | python | binary | restic
+entrypoint = "postgres_globals_backup.sh" # relative to this manifest
+timeout    = "10m"                        # globals are small; a long run means trouble
+# stdout of this script is the dump itself, not a log: the server takes it as the
+# backup payload, uploads it raw and never shows it in the run log.
+capture    = "stream"
+
+# Parameter declarations → the server renders a form and validates instances.
+[[param]]
+name = "host"
+type = "string"
+required = true
+
+[[param]]
+name = "port"
+type = "int"
+default = "5432"
+
+[[param]]
+name = "user"
+type = "string"
+required = true
+# Must be a superuser: role passwords live in pg_authid and anything less fails the
+# run outright ("permission denied for table pg_authid"). See the script's comment.
+
+[[param]]
+name = "maintenance_database"
+type = "string"
+default = "postgres"
+# pg_dumpall connects here to read the cluster's globals. Only change it on a cluster
+# where the "postgres" database was dropped.
+
+[[param]]
+name = "password"
+type = "string"
+required = true
+secret = true

@@ -41,6 +41,7 @@ README je referenční přehled. Postupy krok za krokem mají vlastní dokumenty
 | [Nasazení produkční verze](docs/production.md) | od čistého serveru k běžícímu Arcatum se zapnutým zabezpečením — PKI, systemd, publikování buildů, rollout runnerů, provoz, záloha samotného Arcatum |
 | [Vývoj a ladění backendu](docs/backend-development.md) | práce na Go kódu: lokální prostředí, tok dat jedním během, kam co přidat, testy, ladění, mTLS lokálně |
 | [Vývoj a ladění skriptů](docs/script-development.md) | psaní zálohovacích skriptů: manifest, předání parametrů, vývojová smyčka, katalog chyb |
+| [Obnova databáze z dumpu](docs/restore.md) | jak dump dostat zpět do MySQL nebo PostgreSQL, co v něm není, a zkušební obnova |
 
 ---
 
