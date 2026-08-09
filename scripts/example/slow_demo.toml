@@ -1,5 +1,0 @@
-# Demo for the live tail in the web UI: prints one line per second.
-name       = "slow-demo"
-type       = "bash"
-entrypoint = "slow_demo.sh"
-timeout    = "2m"
