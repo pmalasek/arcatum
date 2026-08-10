@@ -8,6 +8,47 @@
 </head>
 <body>
 
+<!-- The icon set, inlined. A separate .svg file would have to be added both to the
+     go:embed line in web/web.go and to the asset list in http.go — two Go edits for a
+     picture. The sprite sits outside #app and is hidden by being taken out of flow
+     rather than with display:none, which stops <use> rendering in several browsers.
+     Every symbol shares one geometry (24×24, stroked); the stroke itself comes from
+     the .ic rule, so the markup here is only the paths. -->
+<svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-dashboard" viewBox="0 0 24 24">
+    <rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/>
+    <rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>
+  </symbol>
+  <symbol id="i-instances" viewBox="0 0 24 24">
+    <ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/>
+    <path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>
+  </symbol>
+  <symbol id="i-schedules" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>
+  </symbol>
+  <symbol id="i-restore" viewBox="0 0 24 24">
+    <path d="M3 12a9 9 0 1 0 2.6-6.4"/><path d="M3 4v5h5"/><path d="M12 8v4.5l3 1.8"/>
+  </symbol>
+  <symbol id="i-runners" viewBox="0 0 24 24">
+    <rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/>
+    <path d="M7 7.5h.01M7 16.5h.01"/>
+  </symbol>
+  <symbol id="i-keys" viewBox="0 0 24 24">
+    <circle cx="8" cy="14" r="4"/><path d="M11 11l8-8"/><path d="M17 5l2.5 2.5"/><path d="M14.5 7.5L17 10"/>
+  </symbol>
+  <symbol id="i-users" viewBox="0 0 24 24">
+    <circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/>
+    <path d="M16 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M17.5 14.8c2.1.6 3.5 2.3 3.5 4.4"/>
+  </symbol>
+  <symbol id="i-admin" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7.9 19.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 4 13.9H4a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 5.1 7.2L5 7.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H10a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V10a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/>
+  </symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24">
+    <path d="M4 7h16M4 12h16M4 17h16"/>
+  </symbol>
+</svg>
+
 <!-- Login. Covers the whole app until the server confirms a valid session —
      runners authenticate with a certificate, people with a username and password. -->
 <div id="login" class="login hidden">
@@ -29,6 +70,10 @@
 <div id="app" class="hidden">
 
 <header>
+  <button id="nav-toggle" class="icon-btn" type="button"
+          aria-controls="sidebar" aria-expanded="false" aria-label="Menu">
+    <svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg>
+  </button>
   <h1>Arcatum</h1>
   <span class="sub">backup system — Xtuning</span>
   <span id="conn" class="conn"></span>
@@ -40,25 +85,105 @@
   </span>
 </header>
 
-<nav>
-  <button class="tab active" data-view="dashboard">Dashboard</button>
-  <button class="tab" data-view="instances">Instances</button>
-  <button class="tab" data-view="schedules">Schedules</button>
-  <button class="tab" data-view="restore">Restore</button>
-  <button class="tab" data-view="runners">Runners</button>
-  <button class="tab" data-view="rotation">Keys</button>
-  <button class="tab admin-only" data-view="users">Users</button>
-  <button class="tab admin-only" data-view="admin">Administration</button>
-</nav>
+<div class="shell">
 
-<!-- Warnings about approaching certificate expiry; hidden until there is something to report -->
-<div id="warnings" class="warnings hidden"></div>
+<!-- The navigation. It is the only <nav> in the document and every entry keeps the
+     .tab class and its data-view: the click delegation and showView() are keyed on
+     both, so moving the strip into a sidebar costs no JavaScript at all. -->
+<aside id="sidebar" class="sidebar">
+  <nav>
+    <button class="tab active" data-view="dashboard">
+      <svg class="ic" aria-hidden="true"><use href="#i-dashboard"/></svg><span>Dashboard</span></button>
+    <button class="tab" data-view="instances">
+      <svg class="ic" aria-hidden="true"><use href="#i-instances"/></svg><span>Instances</span></button>
+    <button class="tab" data-view="schedules">
+      <svg class="ic" aria-hidden="true"><use href="#i-schedules"/></svg><span>Schedules</span></button>
+    <button class="tab" data-view="restore">
+      <svg class="ic" aria-hidden="true"><use href="#i-restore"/></svg><span>Restore</span></button>
+    <button class="tab" data-view="runners">
+      <svg class="ic" aria-hidden="true"><use href="#i-runners"/></svg><span>Runners</span></button>
+    <button class="tab" data-view="rotation">
+      <svg class="ic" aria-hidden="true"><use href="#i-keys"/></svg><span>Keys</span></button>
+    <button class="tab admin-only" data-view="users">
+      <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></button>
+    <button class="tab admin-only" data-view="admin">
+      <svg class="ic" aria-hidden="true"><use href="#i-admin"/></svg><span>Administration</span></button>
+  </nav>
+</aside>
+<!-- Closes the drawer when the content beside it is tapped. Invisible until the
+     layout collapses. -->
+<button id="nav-scrim" class="nav-scrim" type="button" tabindex="-1" aria-hidden="true"></button>
 
 <main>
-  <!-- Dashboard: what is happening now, what broke, what is next. The landing page,
-       because those are the three questions somebody opens Arcatum with. -->
-  <section id="view-dashboard" class="view">
+  <!-- Warnings about approaching certificate expiry and off-site trouble; hidden until
+       there is something to report -->
+  <div id="warnings" class="warnings hidden"></div>
+
+  <!-- Dashboard: what is happening now, what broke, what is next — and, below that, how
+       the period went. The landing page, because those are the questions somebody opens
+       Arcatum with, in that order. -->
+  <section id="view-dashboard" class="view dash">
+
+    <!-- The live strip: figures that change minute to minute, refreshed with the rest
+         of the fast poll. Deliberately not merged with the period tiles below, which
+         are a different question on a slower clock. -->
     <div id="dash-counts" class="counts"><span class="empty">loading…</span></div>
+
+    <!-- The period filter. Static markup: the JS only ever toggles .active and
+         aria-pressed here, so no redraw can lose the operator's choice. -->
+    <div class="dash-head">
+      <div class="seg" role="group" aria-label="Reporting period">
+        <button type="button" class="seg-btn active" data-period="7" aria-pressed="true">7 days</button>
+        <button type="button" class="seg-btn" data-period="30" aria-pressed="false">30 days</button>
+      </div>
+      <span class="grow"></span>
+      <span id="dash-period-note"></span>
+    </div>
+
+    <div id="dash-tiles" class="tiles"><span class="empty">loading…</span></div>
+
+    <div class="card chart-card">
+      <div class="card-head">
+        <h3>Runs per day</h3>
+        <div id="chart-legend" class="legend"></div>
+      </div>
+      <div id="chart-runs" class="chart"></div>
+      <h4 class="chart-sub">Data backed up per day</h4>
+      <div id="chart-volume" class="chart"></div>
+      <details class="chart-table">
+        <summary>values</summary>
+        <div id="chart-values"></div>
+      </details>
+    </div>
+
+    <div class="cards two">
+      <div class="card">
+        <h3>Storage on this server</h3>
+        <div id="dash-storage"><p class="empty">loading…</p></div>
+      </div>
+      <div class="card">
+        <h3>Off-site replication</h3>
+        <div id="dash-replica"><p class="empty">loading…</p></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Instances in this period</h3>
+      <table id="top-instances">
+        <thead>
+          <tr>
+            <th>Instance</th>
+            <th><button type="button" class="th-sort active" data-sort="bytes">Data</button></th>
+            <th>Runs</th>
+            <th><button type="button" class="th-sort" data-sort="duration">Total time</button></th>
+            <th>Average</th>
+            <th>Last result</th>
+          </tr>
+        </thead>
+        <tbody id="top-body"><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
+      </table>
+    </div>
+
     <div class="cards">
       <div class="card">
         <h3>Running now</h3>
@@ -347,6 +472,8 @@
     <pre id="log" class="log"></pre>
   </section>
 </main>
+
+</div><!-- .shell -->
 
 </div><!-- #app -->
 

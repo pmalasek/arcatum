@@ -25,6 +25,16 @@ let detailReturn = 'dashboard';
 // Which instance the Schedules tab is filtered to; empty means all of them.
 let scheduleFilter = '';
 
+// The dashboard's period view. How wide a window is on screen lives here rather than in
+// the DOM: the lists above it are redrawn every five seconds, and a switch whose truth
+// was a CSS class would flip back under the operator's hands twelve times a minute.
+const STATS_REFRESH_MS = 60000; // a bucket only changes when a run finishes
+let statsDays = readStatsDays(); // 7 or 30, remembered across reloads
+let statsData = null;            // the last /stats payload, so a redraw costs no request
+let statsFetchedAt = 0;
+let statsLoading = false;
+let topSort = 'bytes';           // 'bytes' | 'duration' — how the instance table is ordered
+
 // --- helpers ----------------------------------------------------------------
 
 // ApiError carries the HTTP code so callers can tell 401 (not logged in) from other errors.
@@ -114,6 +124,20 @@ function fmtDuration(startIso, endIso) {
   return `${m} min ${Math.round(s % 60)} s`;
 }
 
+// fmtSpan formats a duration already measured in milliseconds — what the period view
+// carries, where fmtDuration's pair of timestamps does not exist.
+function fmtSpan(ms) {
+  if (!ms || ms < 0) return '—';
+  if (ms < 1000) return ms + ' ms';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + ' s';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ${s % 60} s`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} h ${m % 60} min`;
+  return `${Math.floor(h / 24)} d ${h % 24} h`;
+}
+
 function fmtBytes(n) {
   if (!n) return '—';
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -177,6 +201,17 @@ async function loadDashboard() {
     ${u.name ? `<span class="hint">${esc(u.name)}</span>` : ''}
     <span>${fmtTime(u.next_run)}</span>`,
     (u) => ({ history: u.instance_id }));
+
+  // The replica card draws from the state the poll keeps up to date anyway; the first
+  // paint after a reload is the only moment there is nothing to draw from yet.
+  if (!replicaState) await refreshReplica();
+  renderDashReplica();
+  // The controls carry a remembered choice, so they are put right before the first
+  // answer arrives rather than after it.
+  syncStatsControls();
+  // Not awaited: the period view is an aggregate over weeks and the lists above must
+  // not wait for it.
+  loadStats();
 }
 
 function countTile(label, value, note, tone) {
@@ -201,6 +236,383 @@ function renderDashList(id, items, emptyText, htmlOf, targetOf) {
       : `data-history="${esc(target.history)}"`;
     return `<div class="dash-row clickable" ${attr}>${htmlOf(item)}</div>`;
   }).join('');
+}
+
+// --- dashboard: the period view ------------------------------------------------
+
+// How the last N days went. A second endpoint and a second clock: the lists above are
+// "what is happening", polled every few seconds, while this is an aggregate over weeks
+// where a figure only moves when a run finishes. Fetching it with the fast poll would
+// make every open browser pay for a thirty-day scan twelve times a minute.
+
+function readStatsDays() {
+  try {
+    return localStorage.getItem('arcatum.statsDays') === '30' ? 30 : 7;
+  } catch (_) {
+    return 7; // private mode refuses storage; the default is not worth an error
+  }
+}
+
+function writeStatsDays(days) {
+  try { localStorage.setItem('arcatum.statsDays', String(days)); } catch (_) { /* see above */ }
+}
+
+// loadStats fetches the period unless a recent answer is already in hand. force is for
+// the moment the operator changes the window, where waiting out the throttle would look
+// like a broken button.
+async function loadStats(force) {
+  if (!force && statsData && Date.now() - statsFetchedAt < STATS_REFRESH_MS) return;
+  if (statsLoading) return;
+  statsLoading = true;
+  // Dim the existing chart rather than clearing it: a skeleton in its place would move
+  // everything below it up and back down again on every refresh.
+  if (force) setChartLoading(true);
+  const asked = statsDays;
+  let ok = false;
+  try {
+    const data = await api(`/stats?days=${asked}`);
+    statsData = data;
+    statsFetchedAt = Date.now();
+    ok = true;
+    renderStats();
+  } catch (err) {
+    // The previous drawing stays on screen. It is old, not wrong, and the connection
+    // banner already says the server is unreachable.
+    if (err.status !== 401) showError(err);
+  } finally {
+    statsLoading = false;
+    setChartLoading(false);
+  }
+  // The window was switched while the answer was on its way, so what came back describes
+  // a period the operator has already left. Without this the click would be swallowed and
+  // the right figures would not appear until the throttle expired a minute later.
+  if (ok && asked !== statsDays) loadStats(true);
+}
+
+function setChartLoading(on) {
+  const card = document.querySelector('.chart-card');
+  if (card) card.classList.toggle('chart--loading', on);
+}
+
+// syncStatsControls makes the highlighted period and sort order match the state that is
+// actually in force. Re-applied on every draw rather than only on a click, so however the
+// page is redrawn the buttons resynchronise instead of drifting. It only toggles classes,
+// which is why it is safe to call from the five-second poll: no markup is rewritten, so
+// nothing flickers.
+function syncStatsControls() {
+  for (const btn of document.querySelectorAll('[data-period]')) {
+    const on = Number(btn.dataset.period) === statsDays;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
+  }
+  for (const btn of document.querySelectorAll('[data-sort]')) {
+    btn.classList.toggle('active', btn.dataset.sort === topSort);
+  }
+}
+
+// renderStats draws from what was last fetched and never fetches itself, so any redraw
+// is free and cannot change what is on screen behind the operator's back.
+function renderStats() {
+  syncStatsControls();
+  if (!statsData) return;
+
+  const d = statsData;
+  el('dash-period-note').textContent =
+    `${fmtDay(d.daily[0] && d.daily[0].day)} – ${fmtDay(d.daily[d.daily.length - 1] && d.daily[d.daily.length - 1].day)}`
+    + (d.timezone ? ` · ${d.timezone}` : '');
+
+  renderStatTiles(d.period);
+  renderRunsChart(d.daily, d.days);
+  renderVolumeChart(d.daily, d.days);
+  renderChartValues(d.daily);
+  renderTopInstances(d.instances || []);
+  renderStorageCard(d.storage || {});
+}
+
+// The figures above the chart. Every one carries what it counts underneath it: a number
+// on a dashboard without its denominator is where wrong conclusions come from.
+function renderStatTiles(p) {
+  const rate = p.completed > 0 ? Math.round(p.success_rate * 1000) / 10 : null;
+  const tone = rate === null ? '' : (rate >= 99 ? ' ok' : (rate < 90 ? ' fail' : ''));
+  el('dash-tiles').innerHTML = [
+    tile('Backups completed', p.completed,
+      `${p.success} succeeded · ${p.failed} failed`
+      + (p.cancelled ? ` · ${p.cancelled} stopped` : '')),
+    tile('Success rate', rate === null ? '—' : `${rate} %`,
+      'of the runs that reached a verdict', tone),
+    tile('Data backed up', fmtBytes(p.data_bytes), 'produced by the successful runs'),
+    tile('Total run time', fmtSpan(p.duration_ms),
+      `measured over ${p.duration_runs} run${p.duration_runs === 1 ? '' : 's'}`),
+    tile('Average run', fmtSpan(p.avg_duration_ms),
+      p.never_started
+        ? `${p.never_started} run${p.never_started === 1 ? '' : 's'} never started`
+        : 'per measured run'),
+  ].join('');
+}
+
+function tile(label, value, note, tone) {
+  return `<div class="tile">
+    <span class="label">${esc(label)}</span>
+    <span class="value${tone || ''}">${esc(String(value))}</span>
+    <span class="note">${esc(note)}</span>
+  </div>`;
+}
+
+// fmtDay turns "2026-08-10" into something readable. Parsed field by field rather than
+// handed to Date(): the ISO date form is read as UTC midnight, which lands on the day
+// before in every timezone west of Greenwich.
+function fmtDay(day, withWeekday) {
+  if (!day) return '—';
+  const [y, m, d] = day.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString('en-GB', withWeekday
+    ? { weekday: 'short', day: 'numeric', month: 'short' }
+    : { day: 'numeric', month: 'short' });
+}
+
+// --- the charts ---------------------------------------------------------------
+
+// Two panels, stacked, sharing one band of days — never one plot with two y axes. A
+// count of runs and a volume in bytes are different scales, and drawing them on one
+// frame invents a relationship between them that is not in the data.
+
+// One gutter for both panels, wide enough for the longer of the two label kinds
+// ("21.2 GiB" rather than "4"). It has to be shared: the whole point of stacking the
+// panels is that a column in the lower one sits under its own day in the upper one, and
+// two different left paddings would shift one row of columns against the other. The
+// count labels are right-aligned against the plot edge, so the extra room costs them
+// nothing.
+const CHART_W = 720;
+const PAD = { l: 66, r: 10, t: 12, b: 24 };
+
+// niceMax rounds a maximum up to a value whose half is still a whole number, so the
+// middle gridline can be labelled without a decimal appearing in a count of runs.
+function niceMax(v) {
+  if (v <= 2) return 2;
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const step of [2, 4, 6, 8, 10]) {
+    if (v <= step * mag) return step * mag;
+  }
+  return 10 * mag;
+}
+
+// barPath draws a column with rounded corners at the data end only. The baseline end
+// stays square: a rounded foot would lift the mark off the axis it is measured from.
+function barPath(x, y, w, h, r) {
+  if (h <= 0) return '';
+  if (h <= r || w <= 2 * r) return `M${x},${y}h${w}v${h}h${-w}z`;
+  return `M${x},${y + r}a${r},${r} 0 0 1 ${r},${-r}h${w - 2 * r}a${r},${r} 0 0 1 ${r},${r}v${h - r}h${-w}z`;
+}
+
+// bandGeometry lays out one panel. Both panels use the same day count and the same bar
+// width rule, so a column in the lower one reads as belonging to the day above it.
+function bandGeometry(n, height) {
+  const plotW = CHART_W - PAD.l - PAD.r;
+  const plotH = height - PAD.t - PAD.b;
+  const band = plotW / n;
+  return { plotW, plotH, band, width: Math.min(24, Math.max(3, band - 6)) };
+}
+
+// Which days get a label underneath. Thirty of them would overlap into a grey smear, so
+// past a week only every few are named — the rest are in the tooltip and the table.
+function labelEvery(n) {
+  if (n <= 8) return 1;
+  if (n <= 16) return 2;
+  return 5;
+}
+
+function renderRunsChart(daily, days) {
+  const box = el('chart-runs');
+  const legend = el('chart-legend');
+  // Counted over what is actually drawn. A stopped run has no column — it is neither a
+  // backup nor a fault — so a period holding nothing else still has an empty chart, and
+  // the axes of an empty chart are furniture pretending to be data.
+  const total = daily.reduce((sum, d) => sum + d.success + d.failed, 0);
+  if (total === 0) {
+    box.innerHTML = '<p class="empty">no runs finished in this period</p>';
+    legend.innerHTML = '';
+    return;
+  }
+  legend.innerHTML = '<span><i class="key ok"></i>successful</span>'
+    + '<span><i class="key fail"></i>failed</span>';
+
+  const height = 170;
+  const n = daily.length;
+  const g = bandGeometry(n, height);
+  const max = niceMax(Math.max(1, ...daily.map((d) => d.success + d.failed)));
+  const y = (v) => PAD.t + g.plotH * (1 - v / max);
+  const every = labelEvery(n);
+
+  let svg = '';
+  for (const v of [0, max / 2, max]) {
+    svg += `<line class="grid-line" x1="${PAD.l}" y1="${y(v)}" x2="${CHART_W - PAD.r}" y2="${y(v)}"/>`
+      + `<text class="axis-text" x="${PAD.l - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  }
+
+  daily.forEach((d, i) => {
+    const centre = PAD.l + g.band * i + g.band / 2;
+    const x = centre - g.width / 2;
+    const base = y(0);
+    // A day on which nothing ran draws nothing. The gap in the row is the honest
+    // rendering of "no backups", where a zero-height rect would be a mark for no data.
+    if (d.success + d.failed > 0) {
+      const okH = g.plotH * (d.success / max);
+      const failH = g.plotH * (d.failed / max);
+      // The 2px separation between the two segments is a gap in the surface colour, not
+      // a stroke around the marks: a border would add ink that is not data.
+      const gap = d.success > 0 && d.failed > 0 ? 2 : 0;
+      if (d.failed > 0) {
+        svg += `<path class="bar-fail" d="${barPath(x, base - okH - failH, g.width, failH, 4)}"/>`;
+      }
+      if (d.success > 0) {
+        const h = Math.max(1, okH - gap);
+        svg += `<path class="bar-ok" d="${barPath(x, base - h, g.width, h, d.failed > 0 ? 0 : 4)}"/>`;
+      }
+    }
+    if (i % every === 0) {
+      svg += `<text class="axis-text" x="${centre}" y="${height - 7}" text-anchor="middle">${esc(fmtDay(d.day))}</text>`;
+    }
+    // A transparent hit area across the whole band, wider than the bar, so the reading
+    // is available to a mouse and — through tabindex — to a keyboard as well.
+    svg += `<rect class="hit" x="${PAD.l + g.band * i}" y="${PAD.t}" width="${g.band}" height="${g.plotH}"
+      tabindex="0" role="img"><title>${esc(dayTitle(d))}</title></rect>`;
+  });
+
+  box.innerHTML = chartSvg(height, svg,
+    `Runs per day over the last ${days} days`,
+    `${total} runs in total, of which ${daily.reduce((s, d) => s + d.failed, 0)} failed.`);
+}
+
+function renderVolumeChart(daily, days) {
+  const box = el('chart-volume');
+  const max = Math.max(...daily.map((d) => d.data_bytes), 0);
+  if (max === 0) {
+    box.innerHTML = '<p class="empty">nothing was backed up in this period</p>';
+    return;
+  }
+  const height = 122;
+  const n = daily.length;
+  const g = bandGeometry(n, height);
+  const y = (v) => PAD.t + g.plotH * (1 - v / max);
+  const every = labelEvery(n);
+
+  // Bars rather than a line: a line between Monday and Tuesday would imply a value at
+  // half past Monday, and there is no such thing as half of a night's backup.
+  let svg = '';
+  for (const v of [0, max]) {
+    svg += `<line class="grid-line" x1="${PAD.l}" y1="${y(v)}" x2="${CHART_W - PAD.r}" y2="${y(v)}"/>`
+      + `<text class="axis-text" x="${PAD.l - 6}" y="${y(v) + 4}" text-anchor="end">${esc(v === 0 ? '0' : fmtBytes(v))}</text>`;
+  }
+  daily.forEach((d, i) => {
+    const centre = PAD.l + g.band * i + g.band / 2;
+    if (d.data_bytes > 0) {
+      const h = Math.max(1, g.plotH * (d.data_bytes / max));
+      svg += `<path class="bar-vol" d="${barPath(centre - g.width / 2, y(0) - h, g.width, h, 4)}"/>`;
+    }
+    if (i % every === 0) {
+      svg += `<text class="axis-text" x="${centre}" y="${height - 7}" text-anchor="middle">${esc(fmtDay(d.day))}</text>`;
+    }
+    svg += `<rect class="hit" x="${PAD.l + g.band * i}" y="${PAD.t}" width="${g.band}" height="${g.plotH}"
+      tabindex="0" role="img"><title>${esc(fmtDay(d.day, true))} — ${esc(fmtBytes(d.data_bytes))}</title></rect>`;
+  });
+
+  box.innerHTML = chartSvg(height, svg,
+    `Data backed up per day over the last ${days} days`,
+    `The busiest day produced ${fmtBytes(max)}.`);
+}
+
+function chartSvg(height, body, title, desc) {
+  return `<svg viewBox="0 0 ${CHART_W} ${height}" preserveAspectRatio="xMidYMid meet" role="img">
+    <title>${esc(title)}</title><desc>${esc(desc)}</desc>${body}</svg>`;
+}
+
+function dayTitle(d) {
+  const parts = [`${d.success} successful`, `${d.failed} failed`];
+  if (d.cancelled) parts.push(`${d.cancelled} stopped`);
+  if (d.data_bytes) parts.push(fmtBytes(d.data_bytes));
+  return `${fmtDay(d.day, true)} — ${parts.join(' · ')}`;
+}
+
+// The same numbers as a table, collapsed under the chart. A tooltip may enhance a chart
+// but must never be the only way to a value — not least because a phone has no hover.
+function renderChartValues(daily) {
+  el('chart-values').innerHTML = `<table>
+    <thead><tr><th>Day</th><th>Successful</th><th>Failed</th><th>Data</th><th>Time</th></tr></thead>
+    <tbody>${daily.map((d) => `<tr>
+      <td>${esc(fmtDay(d.day, true))}</td>
+      <td class="num">${d.success}</td>
+      <td class="num">${d.failed}</td>
+      <td class="num">${esc(d.data_bytes ? fmtBytes(d.data_bytes) : '—')}</td>
+      <td class="num">${esc(d.duration_ms ? fmtSpan(d.duration_ms) : '—')}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+// --- the instance table and the two cards under the chart ----------------------
+
+function renderTopInstances(list) {
+  const body = el('top-body');
+  if (list.length === 0) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">no task finished a run in this period</td></tr>';
+    return;
+  }
+  // Sorted here rather than on the server: the whole window is already in hand, so
+  // changing the order is a redraw instead of a request.
+  const rows = [...list].sort((a, b) => (topSort === 'duration'
+    ? b.duration_ms - a.duration_ms
+    : b.data_bytes - a.data_bytes));
+
+  syncRows(body, rows, (r) => r.instance_id, (r) => `
+    <td class="mono" data-label="Instance">${esc(r.instance_id)}</td>
+    <td class="num" data-label="Data">${esc(fmtBytes(r.data_bytes))}</td>
+    <td class="num" data-label="Runs">${r.success}/${r.runs}</td>
+    <td class="num" data-label="Total time">${esc(fmtSpan(r.duration_ms))}</td>
+    <td class="num" data-label="Average">${esc(fmtSpan(r.avg_duration_ms))}</td>
+    <td data-label="Last result">${badge(r.last_status)} <span class="hint">${esc(fmtTime(r.last_ended_at))}</span></td>`,
+    (tr, r) => {
+      tr.className = 'clickable';
+      tr.dataset.history = r.instance_id; // a row leads to the task's own history
+    });
+}
+
+// What the server is holding. Three figures rather than one total, because they answer
+// different questions and adding them up would answer none of them.
+function renderStorageCard(st) {
+  // An unmeasured repository says so. Reporting it as zero bytes would be a claim the
+  // server has not yet had the chance to make.
+  const repo = hasTime(st.measured_at)
+    ? `${fmtBytes(st.repo_bytes)} <span class="hint">in ${st.repositories} repositor${st.repositories === 1 ? 'y' : 'ies'}`
+      + `${st.stale ? ', refreshing' : ''}</span>`
+    : '<span class="hint">measuring…</span>';
+  el('dash-storage').innerHTML = `<dl class="meta">
+    <dt>dumps</dt><dd>${esc(fmtBytes(st.dump_bytes))}</dd>
+    <dt>logs</dt><dd>${esc(fmtBytes(st.log_bytes))}</dd>
+    <dt>repositories</dt><dd>${repo}</dd>
+  </dl>
+  <p class="card-note">Dumps are the files the Restore tab hands back; repositories are
+    measured on disk, after restic has deduplicated them.</p>`;
+}
+
+// The replica card reads the state the fast poll already keeps up to date (see
+// refreshReplica), so the dashboard costs no request of its own for it.
+function renderDashReplica() {
+  const box = el('dash-replica');
+  const st = replicaState;
+  if (!st) { box.innerHTML = '<p class="empty">loading…</p>'; return; }
+  if (!st.enabled) {
+    box.innerHTML = '<p class="empty">Not configured — everything the server holds sits '
+      + 'in one place only. See <code>[replica]</code> in <code>server.toml</code>.</p>';
+    return;
+  }
+  const health = st.healthy
+    ? '<span class="badge success">reachable</span>'
+    : '<span class="badge failed">unreachable</span>';
+  box.innerHTML = `<dl class="meta">
+    <dt>target</dt><dd class="mono">${esc(st.target)}</dd>
+    <dt>link</dt><dd>${health}</dd>
+    <dt>queue</dt><dd>${st.counts.pending} waiting · ${st.counts.syncing} sending
+      · ${st.counts.failed} failing</dd>
+    <dt>last success</dt><dd>${esc(fmtTime(st.link.last_ok_at))}</dd>
+  </dl>`;
 }
 
 // --- schedules ----------------------------------------------------------------
@@ -599,7 +1011,7 @@ async function loadRunners() {
   const list = await api('/runners');
   const body = el('runners-body');
   if (!list || list.length === 0) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">no runners</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty">no runners</td></tr>';
     return;
   }
   body.innerHTML = list.map((r) => {
@@ -1908,7 +2320,23 @@ document.querySelector('nav').addEventListener('click', (e) => {
   // Reaching a tab from the navigation means "show me all of it": a filter left over from
   // a drill-down into one task would otherwise look like an empty system.
   if (tab.dataset.view === 'schedules') scheduleFilter = '';
+  setNav(false); // on a narrow screen the drawer has served its purpose
   showView(tab.dataset.view);
+});
+
+// The sidebar becomes a drawer once the window is too narrow for a column beside the
+// content. CSS carries the layout; this only says whether it is open, and keeps the
+// button's aria-expanded telling the truth about it.
+function setNav(open) {
+  document.body.classList.toggle('nav-open', open);
+  el('nav-toggle').setAttribute('aria-expanded', String(open));
+}
+
+el('nav-toggle').addEventListener('click', () =>
+  setNav(!document.body.classList.contains('nav-open')));
+el('nav-scrim').addEventListener('click', () => setNav(false));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') setNav(false);
 });
 
 el('login-form').addEventListener('submit', submitLogin);
@@ -1968,6 +2396,27 @@ el('stream').addEventListener('change', () => {
 });
 
 document.addEventListener('click', async (e) => {
+  // The dashboard's own controls come first, and each returns: placed after the
+  // row-navigation fallbacks further down they would either never fire or take the
+  // operator to a run they did not ask for.
+  const period = e.target.closest('[data-period]');
+  if (period) {
+    const days = Number(period.dataset.period);
+    if (days && days !== statsDays) {
+      statsDays = days;
+      writeStatsDays(days);
+      syncStatsControls(); // the button answers the click at once, not when the data lands
+      loadStats(true);
+    }
+    return;
+  }
+  const sort = e.target.closest('[data-sort]');
+  if (sort) {
+    topSort = sort.dataset.sort;
+    renderStats();
+    return;
+  }
+
   const open = e.target.closest('[data-open]');
   if (open) {
     e.stopPropagation();

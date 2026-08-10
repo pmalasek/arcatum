@@ -223,4 +223,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_instance_id  ON runs(instance_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_schedule     ON runs(schedule_id, id DESC);
 -- The dashboard's "what failed in the last 24 hours".
 CREATE INDEX IF NOT EXISTS idx_runs_status_ended ON runs(status, ended_at DESC);
+-- The period view scans a date range of finished runs regardless of status (stats.go).
+-- Every other index over runs leads with a different column, so that range would
+-- otherwise be a full table scan.
+CREATE INDEX IF NOT EXISTS idx_runs_ended       ON runs(ended_at);
 `

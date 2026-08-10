@@ -36,6 +36,9 @@ type Server struct {
 	rotation RotationOptions
 	// dist describes the published runner builds, for auto-update.
 	dist *distCache
+	// storage holds the last measurement of the backup directory, so the period view can
+	// report disk usage without walking it inside a request (stats.go).
+	storage *storageCache
 	// bootstrapListen is the plain-HTTP listener install.sh is served from. Empty when
 	// there is none.
 	bootstrapListen string
@@ -138,6 +141,7 @@ func New(store *Store, scriptsDir string, loc *time.Location, logger *log.Logger
 		serverCertIssuer:   opts.ServerCertIssuer,
 		rotation:           opts.Rotation,
 		dist:               &distCache{dir: opts.DistDir},
+		storage:            &storageCache{},
 		bootstrapListen:    opts.BootstrapListen,
 		web:                opts.Web,
 		retention:          opts.Retention,
@@ -260,6 +264,11 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux, read, write guard) {
 	mux.HandleFunc("GET /api/v1/instances/{id}/runs", read(s.handleInstanceRuns))
 	// The landing page, assembled in one request (dashboard.go).
 	mux.HandleFunc("GET /api/v1/dashboard", read(s.handleDashboard))
+	// The same history seen as a period rather than as a moment: how many backups ran in
+	// the last N days, how big they were and how long they took (stats.go). Its own
+	// endpoint because it is an aggregate over weeks, while the dashboard above is polled
+	// every few seconds.
+	mux.HandleFunc("GET /api/v1/stats", read(s.handleStats))
 	mux.HandleFunc("GET /api/v1/scripts", read(s.handleListScripts))
 	mux.HandleFunc("GET /api/v1/runs", read(s.handleListRuns))
 	mux.HandleFunc("GET /api/v1/runs/{id}", read(s.handleRunDetail))

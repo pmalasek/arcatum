@@ -1,190 +1,331 @@
-/* Arcatum web UI — deliberately small and dependency-free, styled for both light and
-   dark so it fits whatever the operator's system is set to. */
+/* Arcatum web UI — dependency-free and deliberately small, so the server stays one
+   self-contained binary with no build step.
+
+   The look is light and quiet: a soft page plane, white reading surfaces, hairline
+   rules, one accent, and shadows so shallow they read as depth rather than decoration.
+   Dark mode is not a flip of that but its own set of steps from the same token names —
+   see the block after the light one.
+
+   Sections, in order:
+     1  tokens — light            6  components (view, card, rot, guide, log, warnings)
+     2  tokens — dark             7  dashboard (tiles, cards, rows)
+     3  base                      8  chart
+     4  layout shell + sidebar    9  narrow screens: 900px
+     5  primitives                10 narrow screens: 620px (tables become cards)
+   The media queries stay last, which is the functional reason for the order. */
+
+/* --- 1. tokens — light -------------------------------------------------------- */
+
 :root {
-  --bg: #fbfbfa;
+  /* Surfaces, from the page plane inwards. Three steps is enough to build every
+     elevation in the UI without any of them being pure white on pure white. */
+  --bg: #f6f6f4;
   --panel: #ffffff;
-  --border: #e2e2df;
-  --text: #1d1d1b;
-  --muted: #6d6d68;
-  --accent: #2d6cdf;
+  --panel-2: #fafaf8;   /* insets: table heads, footers, chart plots */
+  --panel-3: #f1f1ee;   /* hover and pressed washes */
+
+  /* Hairlines. The default one is nearly invisible and always there; the strong one is
+     for a division that has to register at a glance. */
+  --border: #e8e7e3;
+  --border-strong: #d9d8d3;
+
+  /* Ink, three levels. Anything below the third is unreadable, not subtle. */
+  --text: #16161a;
+  --text-2: #56565e;
+  --muted: #8a8a92;
+
+  /* One accent. --accent-ink is the same hue darkened for use as text on a light
+     surface, where the mark colour itself would be too light to read. */
+  --accent: #2a78d6;
+  --accent-ink: #1c5cab;
+  --accent-wash: color-mix(in oklab, var(--accent) 8%, transparent);
+
+  /* Semantic status. Reserved for state — never reused as a chart series colour. */
   --ok: #1a7f45;
   --fail: #b3341f;
   --warn: #96650a;
-  --run: #2d6cdf;
-  --log-bg: #1c1c1a;
+  --run: var(--accent);
+
+  /* Chart series. Deliberately not --ok/--fail: as a *pair* that green and red are
+     4.9 apart under simulated deuteranopia, against a floor of 6. On a badge that is
+     fine, because the word "success" sits beside the colour; in two segments of one
+     column, where colour is the only channel, it is not. Blue/red clears every check
+     in both modes. */
+  --series-ok: #2a78d6;
+  --series-fail: #d03b3b;
+  --series-vol: #2a78d6;
+  --grid: #eaeae6;
+  --axis: #cfcec9;
+
+  /* Elevation. Wide, soft and cheap — a premium surface is one you notice only when
+     it is missing. */
+  --shadow-1: 0 1px 2px rgba(18, 18, 26, .04);
+  --shadow-2: 0 1px 3px rgba(18, 18, 26, .05), 0 10px 26px -14px rgba(18, 18, 26, .14);
+  --shadow-3: 0 2px 8px rgba(18, 18, 26, .07), 0 26px 50px -26px rgba(18, 18, 26, .20);
+
+  --r-1: 7px;
+  --r-2: 11px;
+  --r-3: 16px;
+  --r-pill: 999px;
+
+  --fs-xs: .72rem;
+  --fs-sm: .82rem;
+  --fs-md: .9rem;
+  --fs-lg: 1.05rem;
+  --fs-xl: 1.3rem;
+
+  /* The header is sticky and the sidebar sticks below it; one value keeps the two from
+     overlapping or leaving a gap between them. */
+  --header-h: 3.4rem;
+
+  --log-bg: #1b1b1f;
   --log-text: #e8e8e4;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
+
+/* --- 2. tokens — dark --------------------------------------------------------- */
+
+/* Four rules, so future edits stay coherent:
+     1. Surfaces darken but never reach black, and keep the same three-step ladder.
+     2. Hairlines invert direction: lighter than their surface instead of darker.
+     3. Shadows stop carrying depth on a dark ground and are replaced by the border —
+        never lightened into a glow.
+     4. Chroma steps up, so every colour still clears 3:1 against the darker surface.
+   Because every rule in this file reads a token, this block is all dark mode needs. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #17171a;
-    --panel: #1f1f23;
-    --border: #33333a;
+    --bg: #101014;
+    --panel: #17171b;
+    --panel-2: #1c1c21;
+    --panel-3: #23232a;
+
+    --border: #2c2c33;
+    --border-strong: #3a3a43;
+
     --text: #ececef;
-    --muted: #9b9ba3;
-    --accent: #6fa0ff;
+    --text-2: #b4b4bd;
+    --muted: #8b8b95;
+
+    --accent: #3987e5;
+    --accent-ink: #7fb2f2;
+
     --ok: #4fbe7f;
     --fail: #f0806a;
     --warn: #ddab4a;
-    --run: #6fa0ff;
-    --log-bg: #101012;
+
+    --series-ok: #3987e5;
+    --series-fail: #e66767;
+    --series-vol: #3987e5;
+    --grid: #2a2a31;
+    --axis: #3c3c45;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, .28);
+    --shadow-2: 0 1px 3px rgba(0, 0, 0, .34);
+    --shadow-3: 0 2px 10px rgba(0, 0, 0, .45);
+
+    --log-bg: #0c0c0f;
     --log-text: #e2e2e6;
   }
 }
 
+/* --- 3. base ------------------------------------------------------------------ */
+
 * { box-sizing: border-box; }
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-header {
-  display: flex;
-  align-items: baseline;
-  gap: .75rem;
-  padding: 1rem 1.25rem .75rem;
-  border-bottom: 1px solid var(--border);
-}
-header h1 { margin: 0; font-size: 1.15rem; letter-spacing: .01em; }
-.sub { color: var(--muted); font-size: .85rem; }
-.conn { margin-left: auto; font-size: .8rem; color: var(--fail); }
+/* Toggled from JS on roughly fifteen elements, several of which — the login overlay, the
+   warnings strip, a section footer — carry a display of their own further down the file.
+   Equal specificity means the later rule would win, so hiding them would silently stop
+   working; !important is what makes this independent of where the rule sits. */
+.hidden { display: none !important; }
+.muted { color: var(--muted); }
+.grow { flex: 1; }
+.mono, td.mono { font-family: var(--mono); font-size: .85em; }
 
-/* Who is signed in, on the right in the header. */
-.account { margin-left: auto; display: flex; align-items: center; gap: .5rem; }
-.conn:not(:empty) + .account { margin-left: .75rem; }
-.me-name { font-size: .85rem; }
-.badge.viewer { color: var(--muted); }
-.badge.admin { color: var(--accent); }
-
-/* A viewer sees everything but changes nothing — the actions are therefore not shown at
-   all. The server enforces it too (webAdmin in users.go); this only stops them clicking. */
+/* A viewer sees everything and changes nothing, so the actions are not shown at all.
+   The server enforces it too (webAdmin in users.go); this only stops them clicking.
+   The !important is load-bearing: it has to beat the display the sidebar and the
+   toolbars set on the very elements it hides. */
 body.viewer .admin-only { display: none !important; }
 
-/* The login screen */
-.login {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 1.25rem;
-  background: var(--bg);
-}
-.login-box {
-  width: min(22rem, 100%);
-  display: grid;
-  gap: .75rem;
-  padding: 1.5rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-}
-.login-box h1 { margin: 0; font-size: 1.2rem; }
-.login-box .sub { margin: -.5rem 0 .25rem; }
-.login-field { display: grid; gap: .25rem; font-size: .85rem; color: var(--muted); }
-.login-field input {
-  font: inherit;
-  padding: .45rem .55rem;
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-.login-error { color: var(--fail); font-size: .82rem; min-height: 1.2em; }
-button.action.primary { border-color: var(--accent); color: var(--accent); }
+/* The icon sprite is inlined in the page, since a separate .svg would have to be added
+   both to the go:embed line and to the asset list in http.go. It is positioned out of
+   flow rather than display:none — a <use> whose target sits in a display:none subtree
+   has a long history of rendering nothing. */
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 
-nav {
+/* pointer-events is not cosmetic: clicks are delegated with closest('.tab'), and an
+   icon that swallows the event would break navigation in ways that look like a
+   flaky button. */
+.ic {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+/* --- 4. layout shell + sidebar ------------------------------------------------ */
+
+header {
+  position: sticky;
+  top: 0;
+  z-index: 40;
   display: flex;
-  gap: .25rem;
-  padding: .6rem 1.25rem 0;
-}
-.tab {
-  border: 1px solid transparent;
-  border-bottom: none;
-  background: none;
-  color: var(--muted);
-  padding: .4rem .8rem;
-  border-radius: 6px 6px 0 0;
-  cursor: pointer;
-  font: inherit;
-  font-size: .9rem;
-}
-.tab:hover { color: var(--text); }
-.tab.active {
-  background: var(--panel);
-  border-color: var(--border);
-  color: var(--text);
-}
-
-/* Expiry warnings sit above the content: easy to notice, easy to ignore once read. */
-.warnings { padding: .75rem 1.25rem 0; display: grid; gap: .4rem; }
-.warning {
-  padding: .5rem .75rem;
-  border-radius: 6px;
-  font-size: .85rem;
-  border: 1px solid currentColor;
-}
-.warning.warn { color: var(--warn); }
-.warning.alert { color: var(--fail); }
-
-.expiry.warn { color: var(--warn); font-weight: 600; }
-.expiry.alert { color: var(--fail); font-weight: 600; }
-.expiry .days { opacity: .7; font-weight: 400; }
-.muted { color: var(--muted); }
-
-main { padding: 0 1.25rem 2rem; }
-.view {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 0 8px 8px 8px;
-  overflow: hidden;
-}
-.hidden { display: none; }
-
-/* Wide tables must scroll inside their own box, never the page. */
-table { width: 100%; border-collapse: collapse; display: table; }
-.view { overflow-x: auto; }
-th, td {
-  text-align: left;
-  padding: .55rem .8rem;
+  align-items: center;
+  gap: .7rem;
+  padding: .7rem 1.25rem;
+  background: color-mix(in oklab, var(--panel) 88%, transparent);
+  backdrop-filter: saturate(1.6) blur(10px);
   border-bottom: 1px solid var(--border);
-  white-space: nowrap;
 }
-th {
-  font-size: .72rem;
-  text-transform: uppercase;
-  letter-spacing: .05em;
-  color: var(--muted);
+header h1 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+.sub { color: var(--muted); font-size: var(--fs-sm); }
+.conn { margin-left: auto; font-size: var(--fs-sm); color: var(--fail); }
+
+/* Who is signed in, on the right of the header. */
+.account { margin-left: auto; display: flex; align-items: center; gap: .5rem; }
+.conn:not(:empty) + .account { margin-left: .75rem; }
+.me-name { font-size: var(--fs-sm); color: var(--text-2); }
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.icon-btn:hover { background: var(--panel-3); color: var(--text); }
+
+.shell {
+  display: grid;
+  grid-template-columns: 14rem minmax(0, 1fr);
+  align-items: start;
+}
+
+.sidebar {
+  position: sticky;
+  top: var(--header-h);
+  padding: 1rem .6rem;
+  max-height: calc(100vh - var(--header-h));
+  overflow-y: auto;
+}
+
+nav { display: flex; flex-direction: column; gap: .15rem; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  width: 100%;
+  padding: .5rem .65rem;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
+.tab:hover { background: var(--panel-3); color: var(--text); }
+.tab.active {
+  background: var(--accent-wash);
+  color: var(--accent-ink);
   font-weight: 600;
 }
-tbody tr:last-child td { border-bottom: none; }
-tbody tr.clickable { cursor: pointer; }
-tbody tr.clickable:hover { background: color-mix(in oklab, var(--accent) 8%, transparent); }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
-td.mono, .mono { font-family: var(--mono); font-size: .85em; }
-.empty { color: var(--muted); text-align: center; padding: 1.5rem; }
+.tab.active .ic { stroke-width: 1.9; }
 
-/* Instances: the repository figure arrives after the rest of the row and changes its
-   width. The spare space therefore goes to that very column — the others keep their width
-   from their content and the buttons on the right stay where people aim at them across a
-   refresh. */
-/* The spare width goes to the repository column, whose figure arrives after the rest of
-   the row and changes its width. The others keep their width from their content, so the
-   buttons on the right stay where people aim at them across a refresh. Both selectors are
-   tied to column order — move them if a column is inserted before them. */
-#view-instances th:nth-child(6) { width: 100%; }
-/* The Schedules table has no late-arriving column, so the spare width goes to the label:
-   it is the free-text one and the only one that benefits from room. */
-#view-schedules th:nth-child(2) { width: 100%; }
+/* The drawer's backdrop. Present at every width so the JS can address it; it only
+   becomes visible once the layout has collapsed (see the 900px block). */
+.nav-scrim { display: none; }
+
+main { padding: 1rem 1.25rem 2.5rem; min-width: 0; }
+
+/* --- 5. primitives ------------------------------------------------------------ */
+
+button.action, button.ghost {
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: .32rem .7rem;
+  border-radius: var(--r-1);
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+button.action:hover { border-color: var(--accent); color: var(--accent-ink); }
+button.action[disabled] { opacity: .5; cursor: default; }
+button.ghost { border-color: transparent; color: var(--muted); background: none; }
+button.ghost:hover { color: var(--text); background: var(--panel-3); }
+button.action.danger { color: var(--fail); }
+button.action.danger:hover { border-color: var(--fail); color: var(--fail); }
+button.action.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+button.action.primary:hover { filter: brightness(1.06); color: #fff; }
+
+a.action {
+  display: inline-block;
+  text-decoration: none;
+  font-size: var(--fs-sm);
+  padding: .32rem .7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-1);
+  color: var(--text);
+}
+a.action:hover { border-color: var(--accent); color: var(--accent-ink); }
+
+select, .field input, .field select, .section-foot input, .section-foot select {
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: .32rem .5rem;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-1);
+  max-width: 100%;
+}
+select:focus-visible, input:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 
 .badge {
   display: inline-block;
-  padding: .1rem .5rem;
-  border-radius: 999px;
-  font-size: .75rem;
+  padding: .08rem .5rem;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
   font-weight: 600;
-  border: 1px solid currentColor;
+  letter-spacing: .01em;
+  border: 1px solid color-mix(in oklab, currentColor 35%, transparent);
+  background: color-mix(in oklab, currentColor 10%, transparent);
 }
 .badge.success { color: var(--ok); }
 .badge.failed, .badge.error { color: var(--fail); }
@@ -194,95 +335,135 @@ td.mono, .mono { font-family: var(--mono); font-size: .85em; }
 .badge.cancelled { color: var(--muted); }
 .badge.approved { color: var(--ok); }
 .badge.rejected { color: var(--fail); }
-/* A paused schedule and one that has never run are both "nothing to see here" rather than
-   states to act on, so neither gets a colour that asks for attention. */
+/* A paused schedule and one that has never run are both "nothing to see here" rather
+   than states to act on, so neither gets a colour that asks for attention. */
 .badge.paused, .badge.never { color: var(--muted); }
 .badge.ok { color: var(--ok); }
+.badge.viewer { color: var(--muted); }
+.badge.admin { color: var(--accent-ink); }
 
-/* The listing of items failing to reach the off-site server. A nested table inside the
-   card — smaller than the main lists, because it is a detail of the figure above it, not
-   an overview. */
-table.sub { margin-top: .75rem; font-size: .82rem; }
+.expiry.warn { color: var(--warn); font-weight: 600; }
+.expiry.alert { color: var(--fail); font-weight: 600; }
+.expiry .days { opacity: .7; font-weight: 400; }
+
+/* Tables. Wide ones scroll inside their own box, never the page. */
+table { width: 100%; border-collapse: collapse; display: table; }
+th, td {
+  text-align: left;
+  padding: .55rem .85rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+th {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+  font-weight: 600;
+  background: var(--panel-2);
+  border-bottom-color: var(--border-strong);
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr.clickable { cursor: pointer; }
+tbody tr.clickable:hover { background: var(--accent-wash); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.empty { color: var(--muted); text-align: center; padding: 1.6rem; }
+
+/* The spare width goes to the repository column, whose figure arrives after the rest of
+   the row and changes its width. The others keep their width from their content, so the
+   buttons on the right stay where people aim at them across a refresh. The Schedules
+   table has no late-arriving column, so its spare width goes to the label — the free-text
+   one, and the only one that benefits from room. Both selectors are tied to column
+   order: move them if a column is inserted before them. */
+#view-instances th:nth-child(6) { width: 100%; }
+#view-schedules th:nth-child(2) { width: 100%; }
+
+/* A cell that is itself a link to a run — used for "last run" in the schedules table. */
+.rowlink { color: var(--accent-ink); cursor: pointer; }
+.rowlink:hover { text-decoration: underline; }
+
+/* The listing of items failing to reach the off-site server: a detail of the figure
+   above it rather than an overview, so it is smaller than the main tables. */
+table.sub { margin-top: .75rem; font-size: var(--fs-sm); }
 table.sub td, table.sub th { padding: .25rem .5rem; }
 
-button.action, button.ghost {
-  font: inherit;
-  font-size: .82rem;
-  padding: .3rem .7rem;
-  border-radius: 6px;
-  cursor: pointer;
-  border: 1px solid var(--border);
+/* --- 6. components ------------------------------------------------------------ */
+
+/* The view is the card every tab's content sits in. It keeps both overflow rules: the
+   pair is what makes a wide table scroll inside the card instead of moving the page. */
+.view {
   background: var(--panel);
-  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  overflow-x: auto;
 }
-button.action:hover { border-color: var(--accent); color: var(--accent); }
-button.action[disabled] { opacity: .5; cursor: default; }
-button.ghost { border-color: transparent; color: var(--muted); }
-button.ghost:hover { color: var(--text); }
-button.action.danger { color: var(--fail); }
-button.action.danger:hover { border-color: var(--fail); }
+/* The dashboard is a column of cards rather than one surface, so it drops the frame. */
+.view.dash {
+  background: none;
+  border: none;
+  box-shadow: none;
+  overflow: visible;
+  display: grid;
+  gap: 1rem;
+}
+
+/* Expiry and replication warnings sit above the content: easy to notice, easy to
+   ignore once read. */
+.warnings { display: grid; gap: .5rem; margin-bottom: 1rem; }
+.warning {
+  padding: .6rem .85rem;
+  border-radius: var(--r-1);
+  font-size: var(--fs-sm);
+  border: 1px solid color-mix(in oklab, currentColor 40%, transparent);
+  background: color-mix(in oklab, currentColor 7%, var(--panel));
+}
+.warning.warn { color: var(--warn); }
+.warning.alert { color: var(--fail); }
 
 .section-foot {
   display: flex;
   align-items: center;
   gap: .6rem;
-  padding: .7rem .8rem;
+  padding: .75rem .85rem;
   border-top: 1px solid var(--border);
+  background: var(--panel-2);
   flex-wrap: wrap;
 }
-.section-foot .hint { color: var(--muted); font-size: .8rem; }
-.detail-head .hint { color: var(--muted); font-size: .8rem; }
-
-/* Breadcrumbs for browsing a snapshot */
-.crumbs {
-  padding: .5rem .8rem;
-  border-bottom: 1px solid var(--border);
-  font-family: var(--mono);
-  font-size: .82rem;
-}
-.crumbs a { color: var(--accent); text-decoration: none; }
-.crumbs a:hover { text-decoration: underline; }
-.crumbs .sep { color: var(--muted); margin: 0 .15rem; }
-
-a.action {
-  display: inline-block;
-  text-decoration: none;
-  font-size: .82rem;
-  padding: .3rem .7rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-}
-a.action:hover { border-color: var(--accent); color: var(--accent); }
+.section-foot .hint, .detail-head .hint { color: var(--muted); font-size: var(--fs-sm); }
 
 .detail-head {
   display: flex;
   align-items: center;
   gap: .75rem;
-  padding: .75rem .8rem;
+  padding: .8rem .85rem;
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
-.detail-head h2 { margin: 0; font-size: 1rem; font-family: var(--mono); }
-.grow { flex: 1; }
-.follow { font-size: .82rem; color: var(--muted); display: flex; align-items: center; gap: .3rem; }
-select {
-  font: inherit;
-  font-size: .82rem;
-  padding: .25rem .4rem;
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
+.detail-head h2 { margin: 0; font-size: var(--fs-lg); font-family: var(--mono); }
+.follow { font-size: var(--fs-sm); color: var(--muted); display: flex; align-items: center; gap: .3rem; }
 
+/* Breadcrumbs for browsing a snapshot */
+.crumbs {
+  padding: .55rem .85rem;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+.crumbs a { color: var(--accent-ink); text-decoration: none; }
+.crumbs a:hover { text-decoration: underline; }
+.crumbs .sep { color: var(--muted); margin: 0 .15rem; }
+
+/* A definition list rendered as a grid. Fed with raw dt/dd pairs from several places,
+   so it has to stay a <dl>. */
 .meta {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: .2rem 1rem;
+  gap: .25rem 1rem;
   margin: 0;
-  padding: .75rem .8rem;
-  font-size: .85rem;
+  padding: .8rem .85rem;
+  font-size: var(--fs-md);
   border-bottom: 1px solid var(--border);
 }
 .meta dt { color: var(--muted); }
@@ -294,90 +475,56 @@ select {
   background: var(--log-bg);
   color: var(--log-text);
   font-family: var(--mono);
-  font-size: .82rem;
-  line-height: 1.45;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
   max-height: 60vh;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
 }
-.log:empty::after {
-  content: "(no output)";
-  color: var(--muted);
-}
+.log:empty::after { content: "(no output)"; color: var(--muted); }
 
-/* Key rotation view: one block per rotatable secret */
+/* Key rotation and Administration: one block per subject, each with room for the prose
+   a destructive button needs beside it. */
 .rot { border-bottom: 1px solid var(--border); }
 .rot:last-child { border-bottom: none; }
-.rot h3 {
-  margin: 0;
-  padding: .7rem .8rem .2rem;
-  font-size: .9rem;
-}
+.rot h3 { margin: 0; padding: .85rem .85rem .2rem; font-size: var(--fs-md); }
 .rot .meta { border-bottom: none; }
-
-/* Administration view: the same blocks as the rotation view, plus the prose a
-   destructive button needs beside it. Three operations that act on Arcatum itself, so
-   each one gets room to say what it does before anyone clicks. */
 .rot > .hint {
   margin: 0;
-  padding: 0 .8rem .5rem;
+  padding: 0 .85rem .6rem;
   max-width: 62rem;
   color: var(--muted);
-  font-size: .8rem;
-  line-height: 1.55;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
 }
 .rot > .hint code { font-family: var(--mono); font-size: .95em; }
 #config-plan:not(:empty) { border-top: 1px solid var(--border); }
-#config-plan .warning { margin: 0 .8rem; }
+#config-plan .warning { margin: 0 .85rem; }
 #config-plan .meta dd { font-family: inherit; }
-#config-note, #reset-note {
-  padding: 0 .8rem .7rem;
-  color: var(--muted);
-  font-size: .8rem;
-}
+#config-note, #reset-note { padding: 0 .85rem .75rem; color: var(--muted); font-size: var(--fs-sm); }
 #config-note:empty, #reset-note:empty { padding: 0; }
 #reset-summary .meta { border-bottom: none; }
-/* A file picker sits in a row of buttons; keeping it from stretching keeps the row
-   readable on a narrow window. */
-#config-file { max-width: 22rem; font-size: .82rem; }
+/* A file picker in a row of buttons; keeping it from stretching keeps the row readable
+   on a narrow window. */
+#config-file { max-width: 22rem; font-size: var(--fs-sm); }
 
-/* Instance form: label on the left, inputs on the right */
+/* Forms: label on the left, inputs on the right. toggleRetention() finds a field by
+   closest('.field'), so the wrapper has to stay. */
 .field {
   display: grid;
   grid-template-columns: 10rem 1fr;
   gap: .5rem 1rem;
   align-items: start;
-  padding: .5rem .8rem;
+  padding: .55rem .85rem;
   border-bottom: 1px solid var(--border);
 }
-.field > label { color: var(--muted); font-size: .85rem; padding-top: .3rem; }
-.field .hint { color: var(--muted); font-size: .78rem; margin-top: .2rem; }
-.field input, .field select {
-  font: inherit;
-  font-size: .85rem;
-  padding: .3rem .45rem;
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  max-width: 100%;
-}
+.field > label { color: var(--muted); font-size: var(--fs-sm); padding-top: .3rem; }
+.field .hint { color: var(--muted); font-size: var(--fs-xs); margin-top: .2rem; }
 .field input[disabled] { opacity: .6; }
 #form-error, #account-error { color: var(--fail); }
 
-/* User management: the form for a new account lives in the section footer */
-.section-foot input, .section-foot select {
-  font: inherit;
-  font-size: .85rem;
-  padding: .3rem .45rem;
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  max-width: 100%;
-}
-#users-error { font-size: .82rem; color: var(--muted); }
+#users-error { font-size: var(--fs-sm); color: var(--muted); }
 #users-error.err { color: var(--fail); }
 /* A generated password is shown once — it has to be readable and easy to select. */
 .generated {
@@ -385,154 +532,370 @@ select {
   font-size: .9em;
   padding: .15rem .4rem;
   border: 1px dashed var(--accent);
-  border-radius: 5px;
+  border-radius: var(--r-1);
   user-select: all;
 }
 
-/* Runner installation instructions: collapsible, so they do not get in the way of
-   someone who is only checking the status. */
-.guide {
-  border-top: 1px solid var(--border);
-  font-size: .85rem;
-}
-.guide > summary {
-  padding: .5rem .8rem;
-  color: var(--accent);
-  cursor: pointer;
-  user-select: none;
-}
-.guide-body { padding: 0 .8rem .8rem; }
+/* Runner installation instructions: collapsible, so they stay out of the way of
+   somebody who is only checking the status. */
+.guide { border-top: 1px solid var(--border); font-size: var(--fs-md); }
+.guide > summary { padding: .6rem .85rem; color: var(--accent-ink); cursor: pointer; user-select: none; }
+.guide-body { padding: 0 .85rem .85rem; }
 .guide-body ol { margin: 0; padding-left: 1.2rem; }
 .guide-body li { margin-bottom: .6rem; }
-.guide-body .hint { color: var(--muted); font-size: .78rem; margin-top: .2rem; }
+.guide-body .hint { color: var(--muted); font-size: var(--fs-xs); margin-top: .2rem; }
 /* The command is copied into a terminal, so one click has to select all of it. */
 .cmd {
   font-family: var(--mono);
   font-size: .85em;
   margin: .3rem 0;
-  padding: .4rem .6rem;
+  padding: .45rem .65rem;
   background: var(--log-bg);
   color: var(--log-text);
-  border-radius: 6px;
+  border-radius: var(--r-1);
   overflow-x: auto;
   white-space: pre;
   user-select: all;
 }
 
-/* --- dashboard --------------------------------------------------------------- */
+/* The login screen */
+.login {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background:
+    radial-gradient(60rem 40rem at 50% -10%, var(--accent-wash), transparent 70%),
+    var(--bg);
+}
+.login-box {
+  width: min(23rem, 100%);
+  display: grid;
+  gap: .8rem;
+  padding: 1.75rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-3);
+}
+.login-box h1 { margin: 0; font-size: var(--fs-xl); font-weight: 600; letter-spacing: -.01em; }
+.login-box .sub { margin: -.6rem 0 .35rem; }
+.login-field { display: grid; gap: .3rem; font-size: var(--fs-sm); color: var(--muted); }
+.login-field input {
+  font: inherit;
+  padding: .5rem .6rem;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-1);
+}
+.login-error { color: var(--fail); font-size: var(--fs-sm); min-height: 1.2em; }
 
-/* The figures across the top: a glance, before the three lists below. */
+/* --- 7. dashboard ------------------------------------------------------------- */
+
+/* A card is the dashboard's unit: heading, then content. It borrows the frame the rest
+   of the app uses for a view, so the two read as one design. */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-1);
+  /* The pair, as on .view: hidden keeps the corners rounded over the table inside,
+     auto lets a wide table scroll within the card instead of stretching the page. */
+  overflow: hidden;
+  overflow-x: auto;
+}
+.card h3 {
+  margin: 0;
+  padding: .8rem .85rem .1rem;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+.card .empty { text-align: left; padding: .7rem .85rem 1.1rem; }
+/* A sentence explaining what the figures above it mean, rather than a "nothing here"
+   state — hence its own class and not .empty. */
+.card-note {
+  margin: 0;
+  padding: 0 .85rem .85rem;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.card-note code { font-family: var(--mono); font-size: .95em; }
+.card table { border-top: 1px solid var(--border); margin-top: .7rem; }
+
+.cards {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+}
+.cards.two { grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); }
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  gap: .75rem;
+  flex-wrap: wrap;
+  padding: .8rem .85rem .1rem;
+}
+.card-head h3 { padding: 0; }
+
+/* The live inventory strip: what exists and what is happening this second. Kept apart
+   from the period tiles below, because the two are refreshed on different clocks. */
 .counts {
   display: flex;
   flex-wrap: wrap;
-  gap: .4rem .75rem;
-  padding: .7rem .8rem;
-  border-bottom: 1px solid var(--border);
-  font-size: .85rem;
+  gap: .5rem 1.4rem;
+  padding: .8rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-1);
+  font-size: var(--fs-sm);
 }
 .count { color: var(--muted); }
-.count b { color: var(--text); font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+.count b { color: var(--text); font-size: var(--fs-lg); font-weight: 600; margin-right: .15rem; }
 .count.fail b { color: var(--fail); }
 .count.warn b { color: var(--warn); }
 
-/* Three cards side by side while there is room, stacked once there is not. They borrow
-   the border and heading treatment of .rot, so the dashboard reads as part of the same
-   application rather than as a second design. */
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+/* The period filter. Static markup, so no redraw can lose the choice. */
+.dash-head { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--panel-3);
+  border-radius: var(--r-pill);
 }
-.card { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.card:last-child { border-right: none; }
-.card h3 { margin: 0; padding: .7rem .8rem .2rem; font-size: .9rem; }
-.card .empty { text-align: left; padding: .6rem .8rem 1rem; }
+.seg-btn {
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: .28rem .85rem;
+  border: none;
+  border-radius: var(--r-pill);
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active {
+  background: var(--panel);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow-1);
+}
+#dash-period-note { color: var(--muted); font-size: var(--fs-sm); }
 
-/* One entry in a card. Not a table row, but it navigates like one. */
+/* The period summary: a row of figures, each with its label above it and its
+   qualification below, so no number is on screen without saying what it counts. */
+.tiles {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+}
+.tile {
+  padding: .85rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-1);
+}
+.tile .label {
+  display: block;
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+  font-weight: 600;
+}
+/* Proportional figures on purpose: tabular-nums gives every digit the width of a zero,
+   which reads loose at this size. The tables are where digits have to line up. */
+.tile .value {
+  display: block;
+  margin-top: .3rem;
+  font-size: 1.7rem;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -.02em;
+}
+.tile .value.ok { color: var(--ok); }
+.tile .value.fail { color: var(--fail); }
+.tile .note { display: block; margin-top: .2rem; color: var(--muted); font-size: var(--fs-sm); }
+
+/* One entry in a card. Not a table row, but it navigates like one — the class is the
+   hook the delegated click handler looks for. */
 .dash-row {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: .5rem;
-  padding: .4rem .8rem;
-  font-size: .85rem;
+  padding: .45rem .85rem;
+  font-size: var(--fs-md);
   border-top: 1px solid var(--border);
 }
-.dash-row .hint { color: var(--muted); font-size: .78rem; }
+.dash-row:hover { background: var(--accent-wash); }
+.dash-row .hint { color: var(--muted); font-size: var(--fs-sm); }
 .dash-row .mono { font-family: var(--mono); font-size: .85em; }
 
-/* A cell that is itself a link to a run — used for "last run" in the schedules table. */
-.rowlink { color: var(--accent); cursor: pointer; }
-.rowlink:hover { text-decoration: underline; }
+/* Sortable column heading in the per-instance table. */
+.th-sort {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.th-sort:hover { color: var(--text); }
+.th-sort.active { color: var(--accent-ink); }
+.th-sort.active::after { content: " ↓"; }
 
-/* --- narrow screens ----------------------------------------------------------
-   The UI is used from a phone often enough to matter: an operator checking on a night's
-   backups is rarely at a desk. Two steps — first the page furniture stops assuming a wide
-   window, then the tables stop being tables. */
+/* --- 8. chart ----------------------------------------------------------------- */
+
+/* Two panels stacked over one shared band of days, never one plot with two y axes:
+   a count of runs and a volume in bytes are two scales, and putting them on one frame
+   invents relationships that are not in the data. */
+.chart { padding: .2rem .85rem .5rem; overflow-x: auto; }
+/* The minimum width is what makes 30 columns scroll on a phone instead of compressing
+   into slivers with unreadable tick labels. */
+.chart svg { display: block; width: 100%; height: auto; min-width: 26rem; }
+.chart-sub {
+  margin: .6rem 0 0;
+  padding: 0 .85rem;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-2);
+}
+.chart--loading { opacity: .55; }
+
+.bar-ok { fill: var(--series-ok); }
+.bar-fail { fill: var(--series-fail); }
+.bar-vol { fill: var(--series-vol); }
+.grid-line { stroke: var(--grid); stroke-width: 1; }
+.axis-text { fill: var(--muted); font-size: 12px; font-family: inherit; }
+.hit { fill: transparent; }
+.hit:hover { fill: color-mix(in oklab, var(--text) 6%, transparent); }
+
+/* Identity never rests on colour alone: two series, so a legend is not optional. */
+.legend { display: flex; gap: .9rem; flex-wrap: wrap; font-size: var(--fs-sm); color: var(--text-2); }
+.legend span { display: inline-flex; align-items: center; gap: .35rem; }
+.key { width: .7rem; height: .7rem; border-radius: 3px; display: inline-block; }
+.key.ok { background: var(--series-ok); }
+.key.fail { background: var(--series-fail); }
+
+/* The same numbers as a table, collapsed. It discharges the phone case, where there is
+   no hover, and the rule that a tooltip may enhance a chart but never gate it. */
+.chart-table { border-top: 1px solid var(--border); font-size: var(--fs-sm); }
+.chart-table > summary { padding: .5rem .85rem; color: var(--accent-ink); cursor: pointer; user-select: none; }
+.chart-table table { border-top: 1px solid var(--border); }
+.chart-table td, .chart-table th { padding: .3rem .85rem; font-size: var(--fs-sm); }
+
+/* --- 9. narrow screens: 900px -------------------------------------------------
+   The UI is used from a phone often enough to matter: an operator checking on a
+   night's backups is rarely at a desk. First the page furniture stops assuming a wide
+   window, then (below) the tables stop being tables. */
 
 @media (max-width: 900px) {
-  header, nav, main { padding-left: .75rem; padding-right: .75rem; }
-  header { flex-wrap: wrap; }
+  header { padding-left: .8rem; padding-right: .8rem; flex-wrap: wrap; }
+  main { padding-left: .8rem; padding-right: .8rem; }
   /* The account block drops onto its own line instead of squeezing the title out. */
   .account { margin-left: 0; width: 100%; justify-content: flex-end; }
   .conn:not(:empty) + .account { margin-left: 0; }
 
-  /* Eight tabs wrapped over three lines would eat a third of the screen. A scrolling
-     strip keeps them on one, and the active tab is scrolled into view by the browser. */
-  nav {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    scrollbar-width: none;
-    scroll-snap-type: x proximity;
+  /* The sidebar becomes a drawer over the content rather than a column beside it. It
+     covers the full height, header included: on a narrow window the header wraps onto
+     two lines, and a drawer offset by a fixed header height would either float below a
+     gap or slide under the account row. */
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .sidebar {
+    position: fixed;
+    z-index: 50;
+    inset: 0 auto 0 0;
+    width: 15rem;
+    max-height: none;
+    padding-top: .8rem;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    box-shadow: var(--shadow-3);
+    transform: translateX(-100%);
+    transition: transform .18s ease;
   }
-  nav::-webkit-scrollbar { display: none; }
-  .tab { flex: 0 0 auto; scroll-snap-align: start; }
+  body.nav-open .sidebar { transform: none; }
+  .nav-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    border: 0;
+    padding: 0;
+    background: rgba(16, 16, 26, .3);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s ease;
+  }
+  body.nav-open .nav-scrim { opacity: 1; pointer-events: auto; }
 
   /* Label above input rather than beside it: 10rem of label leaves nothing for a value. */
   .field { grid-template-columns: 1fr; }
   .field > label { padding-top: 0; }
-  .meta { grid-template-columns: 1fr; gap: 0 0; }
+  .meta { grid-template-columns: 1fr; gap: 0; }
   .meta dt { margin-top: .4rem; }
 
   /* The controls on the right of a header get their own line instead of being crushed. */
   .detail-head .grow { flex-basis: 100%; height: 0; }
 
-  .cards { grid-template-columns: 1fr; }
-  .card { border-right: none; }
+  .cards, .cards.two, .tiles { grid-template-columns: 1fr; }
   .log { max-height: 50vh; }
 }
 
-@media (max-width: 620px) {
-  /* Tables become cards. Scrolling a table sideways to find out whether last night
-     succeeded is the one thing that makes the UI useless on a phone, so each row is
-     stacked and every cell carries the heading it lost with the thead.
+@media (min-width: 901px) {
+  #nav-toggle { display: none; }
+}
 
-     Cells that render an empty value are hidden outright — a card of "Code:" and
-     "Data:" with nothing after them is noise. */
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .nav-scrim, .tab, button.action { transition: none; }
+}
+
+/* --- 10. narrow screens: 620px — tables become cards --------------------------
+   Scrolling a table sideways to find out whether last night succeeded is the one thing
+   that makes the UI useless on a phone, so each row is stacked and every cell carries
+   the heading it lost with the thead.
+
+   The view ids are listed rather than matched loosely on purpose: a bare `table` would
+   also catch the nested failing-items table, which is a detail of a figure and reads
+   fine as it is. A new table view has to be added to all six lists. */
+
+@media (max-width: 620px) {
   #view-instances table, #view-schedules table, #view-history table,
-  #view-runners table, #view-users table, #view-restore table {
+  #view-runners table, #view-users table, #view-restore table, #top-instances {
     display: block;
   }
   #view-instances thead, #view-schedules thead, #view-history thead,
-  #view-runners thead, #view-users thead, #view-restore thead {
+  #view-runners thead, #view-users thead, #view-restore thead, #top-instances thead {
     display: none;
   }
   #view-instances tbody, #view-schedules tbody, #view-history tbody,
-  #view-runners tbody, #view-users tbody, #view-restore tbody {
+  #view-runners tbody, #view-users tbody, #view-restore tbody, #top-instances tbody {
     display: block;
   }
   #view-instances tbody tr, #view-schedules tbody tr, #view-history tbody tr,
-  #view-runners tbody tr, #view-users tbody tr, #view-restore tbody tr {
+  #view-runners tbody tr, #view-users tbody tr, #view-restore tbody tr,
+  #top-instances tbody tr {
     display: block;
-    padding: .35rem 0;
+    padding: .4rem 0;
     border-bottom: 1px solid var(--border);
   }
   #view-instances tbody td, #view-schedules tbody td, #view-history tbody td,
-  #view-runners tbody td, #view-users tbody td, #view-restore tbody td {
+  #view-runners tbody td, #view-users tbody td, #view-restore tbody td,
+  #top-instances tbody td {
     display: flex;
     gap: .5rem;
     align-items: baseline;
     justify-content: space-between;
-    padding: .2rem .8rem;
+    padding: .2rem .85rem;
     border-bottom: none;
     white-space: normal;
     text-align: left;
@@ -542,10 +905,11 @@ select {
   #view-history tbody td[data-label]::before,
   #view-runners tbody td[data-label]::before,
   #view-users tbody td[data-label]::before,
-  #view-restore tbody td[data-label]::before {
+  #view-restore tbody td[data-label]::before,
+  #top-instances tbody td[data-label]::before {
     content: attr(data-label);
     color: var(--muted);
-    font-size: .72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: .05em;
     flex: 0 0 auto;

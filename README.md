@@ -1179,6 +1179,7 @@ web port always applies.
 | `POST /api/v1/runs/{id}/cancel` | admin | **stops a run** — the runner picks it up within a few seconds |
 | `GET /api/v1/runs/{id}/cancel` | runner | a running job asking whether it should stop |
 | `GET /api/v1/dashboard` | read | the overview in one request: counts, what is running, failures in the last 24 h, the next runs |
+| `GET /api/v1/stats?days=N` | read | the period view: how the last N days went (7 by default, 90 at most) — totals, one bucket per day, a per-instance breakdown and what is currently on disk |
 | `GET /api/v1/instances` | read | instances with `next_run` (the earliest across their **enabled** schedules) and how many schedules each has (secrets masked) |
 | `POST /api/v1/instances` | admin | creates an instance (validated against the manifest) — no timing, that is a schedule |
 | `PUT /api/v1/instances/{id}` | admin | edits an instance |

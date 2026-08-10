@@ -1141,6 +1141,7 @@ se na portu API nekontroluje nic (vývojový režim); přihlášení na webovém
 | `POST /api/v1/runs/{id}/cancel` | admin | **zastavení běhu** — runner ho vyzvedne do pár sekund |
 | `GET /api/v1/runs/{id}/cancel` | runner | dotaz běžící úlohy, jestli má skončit |
 | `GET /api/v1/dashboard` | čtení | přehled v jednom požadavku: počty, co běží, chyby za 24 h, nejbližší běhy |
+| `GET /api/v1/stats?days=N` | čtení | pohled za období: jak dopadlo posledních N dní (výchozí 7, nejvýš 90) — souhrny, jeden kbelík na den, rozpad po instancích a co je právě na disku |
 | `GET /api/v1/instances` | čtení | instance s `next_run` (nejbližší přes jejich **povolené** rozvrhy) a počtem rozvrhů (secrets maskované) |
 | `POST /api/v1/instances` | admin | vytvoří instanci (validuje se proti manifestu) — bez času, ten je rozvrh |
 | `PUT /api/v1/instances/{id}` | admin | upraví instanci |

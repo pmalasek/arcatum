@@ -577,6 +577,46 @@ imports with its schedules lifted out and tracked without a restart.
 with restic and an admin certificate), notifications, dry-run, instance management through the
 API (today a seed from JSON), key revocation and rotation, runner auto-update.
 
+### Phase J — the period view and the redesigned UI ✓
+
+**What:** the dashboard gained a second half. Above it the live strip stays as it was; below,
+a 7/30-day window reports how many backups completed, how many of them succeeded, how much
+data they produced and how long they took — with a column per day, a per-instance breakdown
+and what is currently on disk. It is served by **`GET /api/v1/stats?days=N`**
+(`internal/server/stats.go`), a second endpoint rather than more fields on `/dashboard`. The
+navigation moved from a strip of tabs into a left sidebar with icons, which becomes a drawer
+on a narrow window, and the stylesheet was rebuilt on design tokens with a dark mode derived
+from them.
+
+**Why the period is its own endpoint:** the two are on different clocks. "Is anything running,
+did anything break overnight" has to be seconds fresh, and the browser polls it every five;
+"how did the last thirty days go" changes only when a run finishes. Merged, every open browser
+would pay for a thirty-day aggregate twelve times a minute, and the landing page's response
+shape would depend on a query parameter that the shell client never passes.
+
+**Why the day boundaries are cut in Go, not in SQL:** `strftime(..., 'localtime')` uses the
+*process* timezone, which need not be the one schedules fire in, and a fixed `'+HH:MM'` offset
+is wrong for the one day in a thirty-day window that straddles a daylight-saving change —
+that day gets 23 or 25 hours and a night's runs land in the neighbouring column. The scan
+therefore returns rows and the buckets are cut with the scheduler's `*time.Location`. One pass
+also means the totals, the columns and the per-instance table cannot disagree with each other.
+
+**Three storage figures, not one total:** dumps still on disk and log bytes come from the
+database with the pruned flags honoured (`ResetStats` deliberately is *not* reused — it counts
+payloads retention has already deleted, which is right for "what a reset would remove" and
+wrong for "what is stored"). Repository size is the only figure that is a measurement, because
+restic deduplicates and no sum of run payloads would equal it. That walk is done once for the
+whole directory, in the background, behind a five-minute cache: the response carries the
+measurement's age and says when it is stale, so a slow disk makes the number older rather than
+the page slower.
+
+**Verified end to end:** a cancelled run stays out of the success rate; a run the reaper closed
+without the runner ever starting it counts as a failure and contributes nothing to any average;
+a failed run's payload is excluded from the volume, because it is discarded on disk too; a
+rotated dump still counts as data backed up this week but no longer as data held; a run that
+begins at 23:50 lands on the night it started; `days=0`, `-1` and `999` all clamp; and the
+handler answers promptly before any disk walk has finished.
+
 ---
 
 ## 11. Runner installation and enrollment

@@ -555,6 +555,43 @@ zatrackovaný bez restartu.
 certifikátem), notifikace, dry-run, správa instancí přes API (dnes seed z JSON),
 revokace a rotace klíčů, auto-update runneru.
 
+### Fáze J — pohled za období a předělané UI ✓
+
+**Co:** dashboard dostal druhou půlku. Nahoře zůstal živý pruh beze změny; pod ním okno 7/30
+dní říká, kolik záloh doběhlo, kolik z nich uspělo, kolik dat vyprodukovaly a jak dlouho
+trvaly — se sloupcem na každý den, rozpadem po instancích a s tím, co je právě na disku.
+Obsluhuje to **`GET /api/v1/stats?days=N`** (`internal/server/stats.go`), tedy druhý endpoint,
+ne další pole v `/dashboard`. Navigace se přestěhovala z pásu tabů do levého sidebaru
+s ikonami, který se na úzkém okně mění v šuplík, a styl je přestavěný na design tokenech
+s tmavým režimem odvozeným z nich.
+
+**Proč je období vlastní endpoint:** obojí běží na jiných hodinách. „Běží něco, spadlo něco
+přes noc" musí být čerstvé na sekundy a prohlížeč se ptá každých pět; „jak dopadlo posledních
+třicet dní" se změní jen tehdy, když nějaký běh skončí. Spojené dohromady by každý otevřený
+prohlížeč platil za třicetidenní agregaci dvanáctkrát za minutu a tvar odpovědi úvodní
+stránky by závisel na parametru, který shellový klient nikdy neposílá.
+
+**Proč se dny řežou v Go, ne v SQL:** `strftime(..., 'localtime')` použije timezone *procesu*,
+což nemusí být ta, ve které střílejí rozvrhy, a pevný posun `'+HH:MM'` je špatně pro ten jeden
+den v třicetidenním okně, kde se přechází na letní čas — takový den má 23 nebo 25 hodin
+a noční běhy spadnou do sousedního sloupce. Dotaz tedy vrací řádky a kbelíky se řežou přes
+`*time.Location` scheduleru. Jeden průchod navíc znamená, že si souhrny, sloupce a tabulka
+instancí nemohou navzájem odporovat.
+
+**Tři čísla o úložišti, ne jeden součet:** dumpy na disku a bajty logů jdou z databáze
+s respektováním pruned příznaků (`ResetStats` se záměrně *nepoužívá* — počítá i payloady, které
+retence už smazala, což je správně pro „co by reset odstranil" a špatně pro „co je uložené").
+Velikost repozitářů je jediné číslo, které je měření: restic deduplikuje a žádný součet
+payloadů se mu nerovná. Ta chůze po adresáři se dělá jednou za celý adresář, na pozadí,
+za pětiminutovou cache: odpověď nese stáří měření a říká, když je zastaralé — pomalý disk tak
+udělá číslo starší, nikdy stránku pomalejší.
+
+**Ověřeno E2E:** zrušený běh zůstává mimo úspěšnost; běh, který reaper uzavřel, aniž ho runner
+kdy začal, se počítá jako selhání a nepřispívá do žádného průměru; payload neúspěšného běhu je
+mimo objem, protože je zahozený i na disku; zrotovaný dump se pořád počítá jako data zálohovaná
+tento týden, ale už ne jako držená; běh začínající ve 23:50 patří noci, kdy začal; `days=0`,
+`-1` i `999` se ořežou; a handler odpoví hned, ještě než doběhne první chůze po disku.
+
 ---
 
 ## 11. Instalace runneru a enrollment

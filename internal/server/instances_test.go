@@ -55,6 +55,7 @@ func instanceAPIServer(t *testing.T) *Server {
 		log:     log.New(io.Discard, "", 0),
 		sched:   NewScheduler(time.UTC),
 		catalog: catalog,
+		storage: &storageCache{},
 	}
 }
 
