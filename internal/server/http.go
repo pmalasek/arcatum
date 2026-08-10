@@ -234,7 +234,11 @@ func (s *Server) WebHandler() http.Handler {
 	// through the API above.
 	ui := http.FileServerFS(web.FS()).ServeHTTP
 	mux.HandleFunc("GET /{$}", ui)
-	for _, asset := range []string{"app.js", "style.css", "index.html"} {
+	for _, asset := range []string{
+		"app.js", "style.css", "index.html",
+		"logo.png", "logo-dark.png",
+		"logo-wordmark.png", "logo-wordmark-dark.png", "favicon.png",
+	} {
 		mux.HandleFunc("GET /"+asset, ui)
 	}
 	return mux

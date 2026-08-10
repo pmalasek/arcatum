@@ -196,6 +196,11 @@ header h1 {
   font-weight: 600;
   letter-spacing: -.01em;
 }
+/* display:contents takes the <picture> out of the box tree, so the <img> inside it is
+   the flex item here and the centred block on the login screen — the wrapper exists only
+   to choose which file to fetch. */
+header picture, .brand picture { display: contents; }
+.logo { width: auto; height: 1.7rem; flex: 0 0 auto; }
 .sub { color: var(--muted); font-size: var(--fs-sm); }
 .conn { margin-left: auto; font-size: var(--fs-sm); color: var(--fail); }
 
@@ -580,7 +585,13 @@ table.sub td, table.sub th { padding: .25rem .5rem; }
   box-shadow: var(--shadow-3);
 }
 .login-box h1 { margin: 0; font-size: var(--fs-xl); font-weight: 600; letter-spacing: -.01em; }
-.login-box .sub { margin: -.6rem 0 .35rem; }
+.login-box .sub { margin: -.6rem 0 .35rem; text-align: center; }
+
+/* The logo on the login screen. Sized in CSS rather than left at its natural size, so the
+   PNG can be swapped for a larger one without the layout moving. */
+.brand { display: block; }
+.brand img { display: block; width: 13rem; height: auto; margin: .25rem auto .75rem; }
+
 .login-field { display: grid; gap: .3rem; font-size: var(--fs-sm); color: var(--muted); }
 .login-field input {
   font: inherit;
@@ -631,6 +642,10 @@ table.sub td, table.sub th { padding: .25rem .5rem; }
   grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
 }
 .cards.two { grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr)); }
+/* The chart pair needs a higher floor than a pair of text cards: below about 30rem a
+   panel has no room left for its gutter, thirty columns and a row of dates, so the two
+   drop under each other well before the rest of the dashboard does. */
+.cards.charts { grid-template-columns: repeat(auto-fit, minmax(30rem, 1fr)); }
 
 .card-head {
   display: flex;
@@ -758,24 +773,18 @@ table.sub td, table.sub th { padding: .25rem .5rem; }
 /* Two panels stacked over one shared band of days, never one plot with two y axes:
    a count of runs and a volume in bytes are two scales, and putting them on one frame
    invents relationships that are not in the data. */
-.chart { padding: .2rem .85rem .5rem; overflow-x: auto; }
-/* The minimum width is what makes 30 columns scroll on a phone instead of compressing
-   into slivers with unreadable tick labels. */
-.chart svg { display: block; width: 100%; height: auto; min-width: 26rem; }
-.chart-sub {
-  margin: .6rem 0 0;
-  padding: 0 .85rem;
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--text-2);
-}
+.chart { padding: .4rem .85rem .6rem; overflow-x: auto; }
+/* The SVG carries its own pixel width, measured from this box when it was drawn, so one
+   unit is one pixel and the tick labels are the size they claim to be. The overflow is
+   what lets a very narrow panel scroll instead of squeezing the columns into slivers. */
+.chart svg { display: block; max-width: none; }
 .chart--loading { opacity: .55; }
 
 .bar-ok { fill: var(--series-ok); }
 .bar-fail { fill: var(--series-fail); }
 .bar-vol { fill: var(--series-vol); }
 .grid-line { stroke: var(--grid); stroke-width: 1; }
-.axis-text { fill: var(--muted); font-size: 12px; font-family: inherit; }
+.axis-text { fill: var(--muted); font-size: 11px; font-family: inherit; }
 .hit { fill: transparent; }
 .hit:hover { fill: color-mix(in oklab, var(--text) 6%, transparent); }
 
@@ -786,11 +795,18 @@ table.sub td, table.sub th { padding: .25rem .5rem; }
 .key.ok { background: var(--series-ok); }
 .key.fail { background: var(--series-fail); }
 
-/* The same numbers as a table, collapsed. It discharges the phone case, where there is
-   no hover, and the rule that a tooltip may enhance a chart but never gate it. */
-.chart-table { border-top: 1px solid var(--border); font-size: var(--fs-sm); }
-.chart-table > summary { padding: .5rem .85rem; color: var(--accent-ink); cursor: pointer; user-select: none; }
-.chart-table table { border-top: 1px solid var(--border); }
+/* The same numbers as a table, collapsed under the two panels. It discharges the phone
+   case, where there is no hover, and the rule that a tooltip may enhance a chart but
+   never gate the values behind it. */
+.chart-table { font-size: var(--fs-sm); }
+.chart-table > summary {
+  padding: .7rem .85rem;
+  color: var(--accent-ink);
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+}
+.chart-table table { border-top: 1px solid var(--border); margin: 0; }
 .chart-table td, .chart-table th { padding: .3rem .85rem; font-size: var(--fs-sm); }
 
 /* --- 9. narrow screens: 900px -------------------------------------------------
@@ -847,7 +863,10 @@ table.sub td, table.sub th { padding: .25rem .5rem; }
   /* The controls on the right of a header get their own line instead of being crushed. */
   .detail-head .grow { flex-basis: 100%; height: 0; }
 
-  .cards, .cards.two, .tiles { grid-template-columns: 1fr; }
+  /* Cards go to one column; the tiles do not, because their auto-fit already steps down
+     to three or four across here and five short figures in a single column would push
+     the chart off the screen. Their own two-column floor is in the 620px block. */
+  .cards, .cards.two { grid-template-columns: 1fr; }
   .log { max-height: 50vh; }
 }
 
@@ -924,4 +943,15 @@ table.sub td, table.sub th { padding: .25rem .5rem; }
   /* An "empty" row spans the whole card list rather than pretending to be a cell. */
   tbody td.empty { display: block; text-align: center; }
   tbody td.empty::before { content: none; }
+
+  /* The header now carries a logo as well as the name, and on a phone the tagline is what
+     has to give: it is the one thing there that nobody is reading twice. */
+  header .sub { display: none; }
+  .logo { height: 1.5rem; }
+  /* Five figures side by side become a two-column grid rather than one very long column:
+     scrolling past five screens of tile to reach the chart is worse than a smaller
+     number. */
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tile { padding: .7rem .8rem; }
+  .tile .value { font-size: 1.35rem; }
 }

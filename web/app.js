@@ -290,8 +290,9 @@ async function loadStats(force) {
 }
 
 function setChartLoading(on) {
-  const card = document.querySelector('.chart-card');
-  if (card) card.classList.toggle('chart--loading', on);
+  for (const card of document.querySelectorAll('.chart-card')) {
+    card.classList.toggle('chart--loading', on);
+  }
 }
 
 // syncStatsControls makes the highlighted period and sort order match the state that is
@@ -372,18 +373,30 @@ function fmtDay(day, withWeekday) {
 
 // --- the charts ---------------------------------------------------------------
 
-// Two panels, stacked, sharing one band of days — never one plot with two y axes. A
-// count of runs and a volume in bytes are different scales, and drawing them on one
-// frame invents a relationship between them that is not in the data.
+// Two panels side by side — never one plot with two y axes. A count of runs and a volume
+// in bytes are different scales, and drawing them on one frame invents a relationship
+// between them that is not in the data.
+//
+// The viewBox is measured from the container instead of being a fixed 720, so one SVG
+// unit is exactly one CSS pixel. With a fixed viewBox and width:100% the browser scales
+// the whole drawing to fit — which scales the type with it, and on a wide monitor turns
+// a 12px tick label into a 40px one. Sizing the box to the element is what keeps the
+// text the size it says it is.
+const PAD = { t: 12, b: 24, r: 12 };
+const PAD_COUNT = 34; // room for a two-digit count
+const PAD_BYTES = 62; // room for "21.2 GiB"
+const CHART_H = 168;
+const CHART_MIN_W = 300; // below this the panel scrolls rather than compresses
 
-// One gutter for both panels, wide enough for the longer of the two label kinds
-// ("21.2 GiB" rather than "4"). It has to be shared: the whole point of stacking the
-// panels is that a column in the lower one sits under its own day in the upper one, and
-// two different left paddings would shift one row of columns against the other. The
-// count labels are right-aligned against the plot edge, so the extra room costs them
-// nothing.
-const CHART_W = 720;
-const PAD = { l: 66, r: 10, t: 12, b: 24 };
+// chartWidth measures the box the panel will be drawn into. A hidden view reports zero,
+// in which case a sensible default is drawn and the resize handler redraws it correctly
+// as soon as it is on screen.
+function chartWidth(box) {
+  const style = getComputedStyle(box);
+  const inner = box.clientWidth
+    - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0);
+  return Math.max(CHART_MIN_W, Math.round(inner) || 640);
+}
 
 // niceMax rounds a maximum up to a value whose half is still a whole number, so the
 // middle gridline can be labelled without a decimal appearing in a count of runs.
@@ -404,21 +417,22 @@ function barPath(x, y, w, h, r) {
   return `M${x},${y + r}a${r},${r} 0 0 1 ${r},${-r}h${w - 2 * r}a${r},${r} 0 0 1 ${r},${r}v${h - r}h${-w}z`;
 }
 
-// bandGeometry lays out one panel. Both panels use the same day count and the same bar
-// width rule, so a column in the lower one reads as belonging to the day above it.
-function bandGeometry(n, height) {
-  const plotW = CHART_W - PAD.l - PAD.r;
+// bandGeometry lays out one panel for a measured width. The bar is capped at 24px and the
+// rest of its band is left as air, rather than the column growing to fill the slot: a
+// wide screen should give a chart more room to breathe, not fatter marks.
+function bandGeometry(n, width, height, padL) {
+  const plotW = width - padL - PAD.r;
   const plotH = height - PAD.t - PAD.b;
   const band = plotW / n;
-  return { plotW, plotH, band, width: Math.min(24, Math.max(3, band - 6)) };
+  return { padL, plotW, plotH, band, width: Math.min(24, Math.max(3, band - 6)) };
 }
 
-// Which days get a label underneath. Thirty of them would overlap into a grey smear, so
-// past a week only every few are named — the rest are in the tooltip and the table.
-function labelEvery(n) {
-  if (n <= 8) return 1;
-  if (n <= 16) return 2;
-  return 5;
+// Which days get a label underneath. Derived from the band the panel actually has rather
+// than from the number of days: the same thirty days are comfortable on a wide screen and
+// a grey smear on half of one. A date needs roughly 52px, so that is the spacing asked
+// for; the days that miss out are still in the tooltip and in the values table.
+function labelEvery(band) {
+  return Math.max(1, Math.ceil(52 / band));
 }
 
 function renderRunsChart(daily, days) {
@@ -436,21 +450,22 @@ function renderRunsChart(daily, days) {
   legend.innerHTML = '<span><i class="key ok"></i>successful</span>'
     + '<span><i class="key fail"></i>failed</span>';
 
-  const height = 170;
+  const width = chartWidth(box);
+  const height = CHART_H;
   const n = daily.length;
-  const g = bandGeometry(n, height);
+  const g = bandGeometry(n, width, height, PAD_COUNT);
   const max = niceMax(Math.max(1, ...daily.map((d) => d.success + d.failed)));
   const y = (v) => PAD.t + g.plotH * (1 - v / max);
-  const every = labelEvery(n);
+  const every = labelEvery(g.band);
 
   let svg = '';
   for (const v of [0, max / 2, max]) {
-    svg += `<line class="grid-line" x1="${PAD.l}" y1="${y(v)}" x2="${CHART_W - PAD.r}" y2="${y(v)}"/>`
-      + `<text class="axis-text" x="${PAD.l - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+    svg += `<line class="grid-line" x1="${g.padL}" y1="${y(v)}" x2="${width - PAD.r}" y2="${y(v)}"/>`
+      + `<text class="axis-text" x="${g.padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
   }
 
   daily.forEach((d, i) => {
-    const centre = PAD.l + g.band * i + g.band / 2;
+    const centre = g.padL + g.band * i + g.band / 2;
     const x = centre - g.width / 2;
     const base = y(0);
     // A day on which nothing ran draws nothing. The gap in the row is the honest
@@ -474,11 +489,11 @@ function renderRunsChart(daily, days) {
     }
     // A transparent hit area across the whole band, wider than the bar, so the reading
     // is available to a mouse and — through tabindex — to a keyboard as well.
-    svg += `<rect class="hit" x="${PAD.l + g.band * i}" y="${PAD.t}" width="${g.band}" height="${g.plotH}"
+    svg += `<rect class="hit" x="${g.padL + g.band * i}" y="${PAD.t}" width="${g.band}" height="${g.plotH}"
       tabindex="0" role="img"><title>${esc(dayTitle(d))}</title></rect>`;
   });
 
-  box.innerHTML = chartSvg(height, svg,
+  box.innerHTML = chartSvg(width, height, svg,
     `Runs per day over the last ${days} days`,
     `${total} runs in total, of which ${daily.reduce((s, d) => s + d.failed, 0)} failed.`);
 }
@@ -490,21 +505,22 @@ function renderVolumeChart(daily, days) {
     box.innerHTML = '<p class="empty">nothing was backed up in this period</p>';
     return;
   }
-  const height = 122;
+  const width = chartWidth(box);
+  const height = CHART_H;
   const n = daily.length;
-  const g = bandGeometry(n, height);
+  const g = bandGeometry(n, width, height, PAD_BYTES);
   const y = (v) => PAD.t + g.plotH * (1 - v / max);
-  const every = labelEvery(n);
+  const every = labelEvery(g.band);
 
   // Bars rather than a line: a line between Monday and Tuesday would imply a value at
   // half past Monday, and there is no such thing as half of a night's backup.
   let svg = '';
   for (const v of [0, max]) {
-    svg += `<line class="grid-line" x1="${PAD.l}" y1="${y(v)}" x2="${CHART_W - PAD.r}" y2="${y(v)}"/>`
-      + `<text class="axis-text" x="${PAD.l - 6}" y="${y(v) + 4}" text-anchor="end">${esc(v === 0 ? '0' : fmtBytes(v))}</text>`;
+    svg += `<line class="grid-line" x1="${g.padL}" y1="${y(v)}" x2="${width - PAD.r}" y2="${y(v)}"/>`
+      + `<text class="axis-text" x="${g.padL - 6}" y="${y(v) + 4}" text-anchor="end">${esc(v === 0 ? '0' : fmtBytes(v))}</text>`;
   }
   daily.forEach((d, i) => {
-    const centre = PAD.l + g.band * i + g.band / 2;
+    const centre = g.padL + g.band * i + g.band / 2;
     if (d.data_bytes > 0) {
       const h = Math.max(1, g.plotH * (d.data_bytes / max));
       svg += `<path class="bar-vol" d="${barPath(centre - g.width / 2, y(0) - h, g.width, h, 4)}"/>`;
@@ -512,17 +528,17 @@ function renderVolumeChart(daily, days) {
     if (i % every === 0) {
       svg += `<text class="axis-text" x="${centre}" y="${height - 7}" text-anchor="middle">${esc(fmtDay(d.day))}</text>`;
     }
-    svg += `<rect class="hit" x="${PAD.l + g.band * i}" y="${PAD.t}" width="${g.band}" height="${g.plotH}"
+    svg += `<rect class="hit" x="${g.padL + g.band * i}" y="${PAD.t}" width="${g.band}" height="${g.plotH}"
       tabindex="0" role="img"><title>${esc(fmtDay(d.day, true))} — ${esc(fmtBytes(d.data_bytes))}</title></rect>`;
   });
 
-  box.innerHTML = chartSvg(height, svg,
+  box.innerHTML = chartSvg(width, height, svg,
     `Data backed up per day over the last ${days} days`,
     `The busiest day produced ${fmtBytes(max)}.`);
 }
 
-function chartSvg(height, body, title, desc) {
-  return `<svg viewBox="0 0 ${CHART_W} ${height}" preserveAspectRatio="xMidYMid meet" role="img">
+function chartSvg(width, height, body, title, desc) {
+  return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img">
     <title>${esc(title)}</title><desc>${esc(desc)}</desc>${body}</svg>`;
 }
 
@@ -2337,6 +2353,18 @@ el('nav-toggle').addEventListener('click', () =>
 el('nav-scrim').addEventListener('click', () => setNav(false));
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') setNav(false);
+});
+
+// The charts are drawn to the pixel width they were measured at, so a resized window
+// means they have to be drawn again. Debounced, because a drag fires this continuously,
+// and free of any request: it redraws from the data already in hand.
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    resizeTimer = null;
+    if (currentView === 'dashboard' && statsData) renderStats();
+  }, 150);
 });
 
 el('login-form').addEventListener('submit', submitLogin);

@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Arcatum</title>
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="logo.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -53,7 +55,14 @@
      runners authenticate with a certificate, people with a username and password. -->
 <div id="login" class="login hidden">
   <form id="login-form" class="login-box" autocomplete="on">
-    <h1>Arcatum</h1>
+    <!-- The wordmark carries the name, so the heading is the image rather than a
+         duplicate of it in text. Two files, one per colour scheme. -->
+    <h1 class="brand">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="logo-wordmark-dark.png">
+        <img src="logo-wordmark.png" alt="Arcatum" width="400" height="270">
+      </picture>
+    </h1>
     <p class="sub">backup system — Xtuning</p>
     <label class="login-field">user
       <input id="login-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
@@ -74,6 +83,15 @@
           aria-controls="sidebar" aria-expanded="false" aria-label="Menu">
     <svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg>
   </button>
+  <!-- The mark, with the name beside it in the UI's own type. The dark source is a
+       variant whose navy is lifted to near-white; <picture> means the browser fetches
+       only the one it will actually show. alt is empty on purpose: the <h1> beside it
+       already says "Arcatum", and hearing it twice is worse than not hearing the
+       picture at all. -->
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logo-dark.png">
+    <img class="logo" src="logo.png" alt="" width="96" height="91">
+  </picture>
   <h1>Arcatum</h1>
   <span class="sub">backup system — Xtuning</span>
   <span id="conn" class="conn"></span>
@@ -142,19 +160,29 @@
 
     <div id="dash-tiles" class="tiles"><span class="empty">loading…</span></div>
 
-    <div class="card chart-card">
-      <div class="card-head">
-        <h3>Runs per day</h3>
-        <div id="chart-legend" class="legend"></div>
+    <!-- Two panels, side by side rather than one plot with two y axes: a count of runs
+         and a volume in bytes are different scales. The shared thing is the row of days,
+         not the axis. -->
+    <div class="cards charts">
+      <div class="card chart-card">
+        <div class="card-head">
+          <h3>Runs per day</h3>
+          <div id="chart-legend" class="legend"></div>
+        </div>
+        <div id="chart-runs" class="chart"></div>
       </div>
-      <div id="chart-runs" class="chart"></div>
-      <h4 class="chart-sub">Data backed up per day</h4>
-      <div id="chart-volume" class="chart"></div>
-      <details class="chart-table">
-        <summary>values</summary>
-        <div id="chart-values"></div>
-      </details>
+      <div class="card chart-card">
+        <div class="card-head">
+          <h3>Data backed up per day</h3>
+        </div>
+        <div id="chart-volume" class="chart"></div>
+      </div>
     </div>
+
+    <details class="card chart-table">
+      <summary>values behind the charts</summary>
+      <div id="chart-values"></div>
+    </details>
 
     <div class="cards two">
       <div class="card">
