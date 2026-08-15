@@ -679,6 +679,14 @@ the service does not see `/root/.ssh`. Move the key and `known_hosts` into
 for that architecture. `ls /opt/arcatum/dist`, and if need be `just dist-runner bin` and the
 installer again.
 
+**The runner installs but never appears in the Runners tab, and `journalctl -u arcatum-runner`
+shows `libc.so.6: version 'GLIBC_2.34' not found`** — the published binary was built with cgo
+on a machine with a newer glibc than the target host, so it never starts and never sends its
+certificate request. `just dist-runner` sets `CGO_ENABLED=0` for exactly this reason; a binary
+built any other way will not run across the fleet. Check with
+`file /opt/arcatum/dist/arcatum-runner-linux-amd64` — it must say `statically linked`. Rebuild,
+copy into `dist/`, and run the installer on the host again.
+
 **No update is offered to the runners** — `/opt/arcatum/dist/VERSION` is missing. The binaries
 alone do not constitute a release; that is deliberate, so that copying and releasing can be
 done separately.

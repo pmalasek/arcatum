@@ -650,6 +650,14 @@ nevidí. Klíč i `known_hosts` přesuň do `/opt/arcatum/pki/` a uprav `[replic
 **Instalace runneru končí na 404** — v `dist/` není `arcatum-runner-linux-<arch>` pro danou
 architekturu. `ls /opt/arcatum/dist`, případně znovu `just dist-runner bin` a instalátor.
 
+**Runner se nainstaluje, ale v záložce Runners se neobjeví a `journalctl -u arcatum-runner`
+hlásí `libc.so.6: version 'GLIBC_2.34' not found`** — publikovaná binárka se buildila s cgo na
+stroji s novější glibc, než má cílový host, takže se vůbec nespustí a nikdy neodešle žádost
+o certifikát. `just dist-runner` proto nastavuje `CGO_ENABLED=0`; binárka postavená jinak
+napříč flotilou nepoběží. Ověř přes `file /opt/arcatum/dist/arcatum-runner-linux-amd64` — musí
+tam být `statically linked`. Přebuildit, nakopírovat do `dist/` a na hostu spustit instalátor
+znovu.
+
 **Runnerům se nenabízí aktualizace** — chybí `/opt/arcatum/dist/VERSION`. Samotné binárky
 vydání neznamenají; je to schválně, aby šlo kopírovat a vydat zvlášť.
 

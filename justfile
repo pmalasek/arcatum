@@ -34,10 +34,15 @@ release:
 	{{go}} build -ldflags "-X arcatum/pkg/version.Version={{version}}" -o bin/arcatum-ca ./cmd/arcatum-ca
 
 # Build runner binaries for bootstrap dist directory.
+#
+# CGO_ENABLED=0 is not optional here: with cgo on, the amd64 build links dynamically
+# against the build host's glibc and then refuses to start on any older host
+# ("version `GLIBC_2.34' not found"), which is exactly the fleet this is installed on.
+# A static binary runs everywhere; the runner needs nothing cgo provides.
 dist-runner dist_dir="local/dist":
 	mkdir -p "{{dist_dir}}"
-	GOOS=linux GOARCH=amd64 {{go}} build -ldflags "-X arcatum/pkg/version.Version={{version}}" -o "{{dist_dir}}/arcatum-runner-linux-amd64" ./cmd/runner
-	GOOS=linux GOARCH=arm64 {{go}} build -ldflags "-X arcatum/pkg/version.Version={{version}}" -o "{{dist_dir}}/arcatum-runner-linux-arm64" ./cmd/runner
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 {{go}} build -ldflags "-X arcatum/pkg/version.Version={{version}}" -o "{{dist_dir}}/arcatum-runner-linux-amd64" ./cmd/runner
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 {{go}} build -ldflags "-X arcatum/pkg/version.Version={{version}}" -o "{{dist_dir}}/arcatum-runner-linux-arm64" ./cmd/runner
 	printf '%s\n' "{{version}}" > "{{dist_dir}}/VERSION"
 
 # Build everything a production server needs into one tarball: binaries, runner builds,
