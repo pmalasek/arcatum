@@ -41,7 +41,7 @@ The README is a reference overview. Step-by-step procedures have their own docum
 | [Production deployment](docs/production.md) | from a clean server to a running Arcatum with security enabled — PKI, systemd, publishing builds, runner rollout, operations, backing up Arcatum itself |
 | [Backend development and debugging](docs/backend-development.md) | working on the Go code: local environment, the flow of data through a single run, where to add things, tests, debugging, mTLS locally |
 | [Script development and debugging](docs/script-development.md) | writing backup scripts: manifest, passing parameters, the development loop, error catalogue |
-| [Restoring a database from a dump](docs/restore.md) | how to get a dump back into MySQL or PostgreSQL, what is not in it, and a trial restore |
+| [Restoring from a dump](docs/restore.md) | how to get a dump back into MySQL or PostgreSQL or a KVM host, what is not in it, and a trial restore |
 
 ---
 

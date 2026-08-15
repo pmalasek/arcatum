@@ -1,16 +1,18 @@
-# Guide: restoring a database from a dump
+# Guide: restoring from a dump
 
-How to get a dump out of Arcatum and back into a running database — MySQL and PostgreSQL
-alike. This is hardest to read at the moment you need it, so walk through the whole procedure
-once as a dry run before you need it for real.
+How to get a dump out of Arcatum and back where it belongs — into a running MySQL or
+PostgreSQL database, or into the libvirt configuration of a KVM host. This is hardest to read
+at the moment you need it, so walk through the whole procedure once as a dry run before you
+need it for real.
 
 - [1. What Arcatum guarantees and what it does not](#1-what-arcatum-guarantees-and-what-it-does-not)
 - [2. How to get hold of the dump](#2-how-to-get-hold-of-the-dump)
 - [3. MySQL / MariaDB](#3-mysql--mariadb)
 - [4. PostgreSQL](#4-postgresql)
-- [5. What is not in the dump](#5-what-is-not-in-the-dump)
-- [6. Error catalogue](#6-error-catalogue)
-- [7. A trial restore](#7-a-trial-restore)
+- [5. KVM guests (the kvm-xml-backup dump)](#5-kvm-guests-the-kvm-xml-backup-dump)
+- [6. What is not in a database dump](#6-what-is-not-in-a-database-dump)
+- [7. Error catalogue](#7-error-catalogue)
+- [8. A trial restore](#8-a-trial-restore)
 
 ---
 
@@ -28,7 +30,7 @@ that exits zero and prints nonsense produces a backup indistinguishable from a c
 right up to the moment you restore it.
 
 > The only proof that a backup is restorable is **a restore you have performed**. Not the file
-> size, not a green row in the run overview. See [§7](#7-a-trial-restore).
+> size, not a green row in the run overview. See [§8](#8-a-trial-restore).
 
 Dumps are also **rotated** (`keep_last`, `keep_days` per instance) — older ones may no longer
 be available even though the run's row stays in the history
@@ -165,7 +167,99 @@ dump into an **older** major version of Postgres does not work reliably.
 
 ---
 
-## 5. What is not in the dump
+## 5. KVM guests (the `kvm-xml-backup` dump)
+
+The dump from [scripts/libvirt/kvm_xml_backup.sh](../scripts/libvirt/kvm_xml_backup.sh) is a
+**gzipped tar of a hypervisor's libvirt configuration** — no database, no disk images, so
+nothing in §3 and §4 applies to it. Unpack it and start by reading the manifest:
+
+```sh
+mkdir -p /tmp/kvm && tar -xzf kvm-xml-supervisor1-run-42.dump -C /tmp/kvm
+cat /tmp/kvm/MANIFEST.txt
+```
+
+```
+MANIFEST.txt          host, time, URI + a TSV table: name, file, state, autostart, persistent
+domains/<name>.xml    dumpxml --inactive of every guest, running or not
+networks/<name>.xml   virtual networks         (include_networks, on by default)
+pools/<name>.xml      storage pool definitions (include_pools, on by default)
+host/                 capabilities.xml, nodeinfo.txt — for when a guest will not start on new hardware
+secrets/ nvram/       only with include_secrets / include_nvram
+```
+
+The file names are sanitised, the real names are in the manifest — a guest whose name contains
+something other than letters, digits, `.`, `_` or `-` has it replaced in the file name only.
+
+**Restore the networks and pools before the domains.** A domain that references a network
+which does not exist will `define` happily and then refuse to `start`, which is a confusing
+place to discover the ordering.
+
+```sh
+# 1) networks, then pools — the domains reference them
+virsh net-define /tmp/kvm/networks/default.xml
+virsh net-start default && virsh net-autostart default
+
+virsh pool-define /tmp/kvm/pools/images.xml
+virsh pool-start images && virsh pool-autostart images
+
+# 2) the guests
+virsh define /tmp/kvm/domains/web01.xml
+
+# 3) autostart — from MANIFEST.txt, because it is in no XML (see below)
+virsh autostart web01
+```
+
+**Autostart is not part of the domain XML.** libvirt keeps it as a symlink under
+`/etc/libvirt/qemu/autostart`, so a restore that only replays the XML gives you a host whose
+guests all stay down after a reboot. That is why the script records it per domain in
+`MANIFEST.txt` — the `autostart` column is what you replay in step 3, for networks and pools
+alike.
+
+**Redefining a guest that already exists** overwrites its persistent configuration, and on a
+running domain the change takes effect at its next boot, not immediately. libvirt matches on
+the UUID in the XML: a name/UUID combination that clashes with a different domain already on
+the host is rejected outright rather than merged.
+
+**MAC addresses are in the XML**, so DHCP reservations and anything keyed to them survive the
+restore — which is also why defining these domains on a host where the originals still run
+will collide on the network.
+
+Validating an XML before defining anything needs no hypervisor at all:
+
+```sh
+virt-xml-validate /tmp/kvm/domains/web01.xml
+```
+
+**What is not in this dump:**
+
+| | |
+|---|---|
+| disk images / volume contents | **no** — a separate files-backup or a storage-level snapshot |
+| host bridges (`br0`), netplan, `/etc/network` | **no** — host configuration, outside libvirt |
+| `libvirtd.conf`, `qemu.conf`, `/etc/libvirt` as such | **no** — back it up with a files-backup of `/etc` |
+| libvirt secret **values** (Ceph/RBD keys) | **no** — definitions only, and only with `include_secrets` |
+| NVRAM / UEFI variables | only with `include_nvram` |
+| snapshot metadata (`virsh snapshot-dumpxml`) | **no** |
+
+The first row is the one that catches people out: `virsh define` succeeds against an XML whose
+disks do not exist anywhere, and only `virsh start` says so. The XML tells you where they were
+— restore the images to those paths, or edit the XML before defining.
+
+With `include_secrets` the definitions come back with `virsh secret-define`, but the values
+never left the hypervisor, so an RBD-backed guest stays unstartable until you feed them in:
+
+```sh
+virsh secret-define /tmp/kvm/secrets/<uuid>.xml
+virsh secret-set-value --secret <uuid> --base64 "$(cat /somewhere/outside/arcatum/key)"
+```
+
+With `include_nvram`, copy the files back to the paths the domain XML gives in `<nvram>`
+**before** the first start — otherwise libvirt builds a fresh one from the template and the
+guest's UEFI boot entries are gone.
+
+---
+
+## 6. What is not in a database dump
 
 A dump of one database captures the database, not the server. Do not look for these in it:
 
@@ -194,7 +288,7 @@ What follows from that in practice:
 
 ---
 
-## 6. Error catalogue
+## 7. Error catalogue
 
 | Message | Where | What to do |
 |---|---|---|
@@ -211,10 +305,18 @@ What follows from that in practice:
 | `server version mismatch` | PG restore | a dump from a newer Postgres cannot go into an older one |
 | the restore exits 0 but data is missing | PG restore | a forgotten `ON_ERROR_STOP=1` — `psql` only printed the errors and carried on |
 | the dump is suspiciously small | — | the script may have failed without `pipefail`; compare `data_bytes` with previous runs |
+| `cannot connect to libvirt at qemu:///system` | `kvm-xml-backup` run | libvirtd is down, or the runner is neither root nor in the `libvirt` group |
+| `aborting: N object(s) could not be dumped` | `kvm-xml-backup` run | stderr names the objects just above; the run deliberately produces no payload rather than a partial one |
+| `Cannot access storage file … No such file or directory` | `virsh start` after a restore | the XML is restored, the disk image is not — it never was in this dump ([§5](#5-kvm-guests-the-kvm-xml-backup-dump)) |
+| `Network not found: no network with matching name` | `virsh start` after a restore | define and start the networks before the domains |
+| `Unable to get bridge br0` / `Cannot get interface MTU on 'br0'` | `virsh start` after a restore | the bridge is host configuration, outside libvirt and outside this dump |
+| `domain '…' is already defined with uuid …` | `virsh define` | the name/UUID clashes with a domain already on the host — undefine or rename it first |
+| `failed to find the secret` | `virsh start` after a restore | secret definitions restore without their values; `virsh secret-set-value` |
+| the guests are all down after a reboot | after a restore | autostart is not in the XML — replay the `autostart` column from `MANIFEST.txt` |
 
 ---
 
-## 7. A trial restore
+## 8. A trial restore
 
 A backup nothing has ever been restored from is an unconfirmed assumption. A procedure that
 fits into half an hour and gives a real answer:
@@ -263,6 +365,16 @@ A checklist for a new database instance:
       and Arcatum does not back them up
 - [ ] `keep_last` / `keep_days` on the instance cover the time it takes to notice silent data
       corruption, not just yesterday
+
+And for a `kvm-xml-backup` instance:
+
+- [ ] at least one domain XML from the dump was `virsh define`d on a test hypervisor, exit 0
+- [ ] you know where the **disk images** are backed up — this dump has none of them
+- [ ] the host's own network configuration (bridges, netplan) and `/etc/libvirt` are covered
+      by a files-backup; a domain bridged to `br0` needs a host that has `br0`
+- [ ] with Ceph/RBD: the secret **values** exist somewhere outside Arcatum — the dump carries
+      definitions only
+- [ ] the runner on that host reaches `qemu:///system` (root, or in the `libvirt` group)
 
 ---
 

@@ -1,0 +1,58 @@
+# Script DEFINITION (template). Values for a concrete hypervisor live in an instance
+# (in the DB / web UI), not here. See docs/architecture.md §5.
+#
+# Backs up the libvirt *configuration* of a KVM host: the persistent XML of every guest,
+# plus the networks, pools and autostart flags a guest needs to come back. Disk images are
+# not in here — back those up separately (files-backup / a storage-level snapshot).
+name       = "kvm-xml-backup"
+type       = "bash"
+entrypoint = "kvm_xml_backup.sh"  # relative to this manifest
+timeout    = "10m"                # dumping XML is seconds' worth of work; longer means trouble
+# stdout of this script is a gzipped tar of the whole configuration, not a log: the server
+# takes it as the backup payload and never shows it in the run log. Unpack a downloaded
+# dump with `tar -xzf <instance>-<run>.dump`.
+capture    = "stream"
+
+[[param]]
+name    = "connect_uri"
+type    = "string"
+default = "qemu:///system"
+# libvirt connection URI. The system instance is the only one that matters on a server;
+# change it only for a non-standard setup (e.g. "qemu+unix:///system?socket=...").
+
+[[param]]
+name    = "include_networks"
+type    = "bool"
+default = "true"
+# Virtual networks (virsh net-dumpxml). A guest whose <interface> points at a network that
+# does not exist will not start, so these belong in the same backup as the domains.
+
+[[param]]
+name    = "include_pools"
+type    = "bool"
+default = "true"
+# Storage pool definitions (virsh pool-dumpxml). Definitions only — no volume contents.
+
+[[param]]
+name    = "include_secrets"
+type    = "bool"
+default = "false"
+# libvirt secret *definitions* (virsh secret-dumpxml), e.g. Ceph/RBD auth. The secret
+# values are deliberately NOT dumped — they would land in the backup payload in clear.
+# After a restore you have to feed them back in with `virsh secret-set-value`.
+
+[[param]]
+name    = "include_nvram"
+type    = "bool"
+default = "false"
+# The NVRAM (UEFI variable) file of each guest that has one. Binary, a few hundred kB per
+# guest. libvirt re-creates it from the template on define, so you only need this if you
+# care about the guests' UEFI boot entries surviving verbatim.
+
+[[param]]
+name    = "security_info"
+type    = "bool"
+default = "true"
+# Pass --security-info to dumpxml, which keeps graphics (VNC/SPICE) passwords in the XML.
+# Without it the dump is not restorable as-is; with it the payload contains those passwords
+# — which is what a configuration backup is for, but worth knowing.

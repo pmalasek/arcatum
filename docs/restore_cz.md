@@ -1,16 +1,17 @@
-# Návod: obnova databáze z dumpu
+# Návod: obnova z dumpu
 
-Jak z Arcatum dostat dump zpět do běžící databáze — MySQL i PostgreSQL. Čte se to nejhůř
-ve chvíli, kdy je to potřeba, takže si celý postup jednou projdi nanečisto dřív, než ho
-budeš potřebovat doopravdy.
+Jak z Arcatum dostat dump zpět tam, kam patří — do běžící MySQL nebo PostgreSQL databáze,
+nebo do libvirt konfigurace KVM hosta. Čte se to nejhůř ve chvíli, kdy je to potřeba, takže
+si celý postup jednou projdi nanečisto dřív, než ho budeš potřebovat doopravdy.
 
 - [1. Co Arcatum garantuje a co ne](#1-co-arcatum-garantuje-a-co-ne)
 - [2. Jak se dostat k dumpu](#2-jak-se-dostat-k-dumpu)
 - [3. MySQL / MariaDB](#3-mysql--mariadb)
 - [4. PostgreSQL](#4-postgresql)
-- [5. Co v dumpu není](#5-co-v-dumpu-není)
-- [6. Katalog chyb](#6-katalog-chyb)
-- [7. Zkušební obnova](#7-zkušební-obnova)
+- [5. KVM hosté (dump kvm-xml-backup)](#5-kvm-hosté-dump-kvm-xml-backup)
+- [6. Co v databázovém dumpu není](#6-co-v-databázovém-dumpu-není)
+- [7. Katalog chyb](#7-katalog-chyb)
+- [8. Zkušební obnova](#8-zkušební-obnova)
 
 ---
 
@@ -27,7 +28,7 @@ nesmysl, vyrobí zálohu, která je od té správné k nerozeznání až do chv�
 obnovovat.
 
 > Jediný důkaz, že záloha je obnovitelná, je **provedená obnova**. Ne velikost souboru,
-> ne zelený řádek v přehledu běhů. Viz [§7](#7-zkušební-obnova).
+> ne zelený řádek v přehledu běhů. Viz [§8](#8-zkušební-obnova).
 
 Dumpy se navíc **rotují** (`keep_last`, `keep_days` na instanci) — starší už nemusí být
 k dispozici, i když řádek běhu v historii zůstává ([architektura §19](architecture_cz.md)).
@@ -162,7 +163,96 @@ dump do **starší** major verze Postgresu spolehlivě nejde.
 
 ---
 
-## 5. Co v dumpu není
+## 5. KVM hosté (dump `kvm-xml-backup`)
+
+Dump ze [scripts/libvirt/kvm_xml_backup.sh](../scripts/libvirt/kvm_xml_backup.sh) je
+**gzipovaný tar s libvirt konfigurací hypervizoru** — žádná databáze, žádné disky, takže nic
+z §3 a §4 na něj neplatí. Rozbal ho a začni manifestem:
+
+```sh
+mkdir -p /tmp/kvm && tar -xzf kvm-xml-supervisor1-run-42.dump -C /tmp/kvm
+cat /tmp/kvm/MANIFEST.txt
+```
+
+```
+MANIFEST.txt          host, čas, URI + TSV tabulka: jméno, soubor, stav, autostart, persistent
+domains/<jméno>.xml   dumpxml --inactive každého hosta, běžícího i vypnutého
+networks/<jméno>.xml  virtuální sítě             (include_networks, výchozí zapnuto)
+pools/<jméno>.xml     definice storage poolů     (include_pools, výchozí zapnuto)
+host/                 capabilities.xml, nodeinfo.txt — když host nenaběhne na jiném železe
+secrets/ nvram/       jen s include_secrets / include_nvram
+```
+
+Jména souborů jsou očištěná, skutečná jsou v manifestu — hostovi, jehož jméno obsahuje něco
+jiného než písmena, číslice, `.`, `_` nebo `-`, se to nahradí jen v názvu souboru.
+
+**Sítě a pooly obnov před doménami.** Doména, která odkazuje na neexistující síť, se
+`define` v pohodě a teprve `start` odmítne — což je nepříjemné místo na to zjišťovat pořadí.
+
+```sh
+# 1) sítě, pak pooly — domény je odkazují
+virsh net-define /tmp/kvm/networks/default.xml
+virsh net-start default && virsh net-autostart default
+
+virsh pool-define /tmp/kvm/pools/images.xml
+virsh pool-start images && virsh pool-autostart images
+
+# 2) hosté
+virsh define /tmp/kvm/domains/web01.xml
+
+# 3) autostart — z MANIFEST.txt, protože v žádném XML není (viz níž)
+virsh autostart web01
+```
+
+**Autostart není součástí XML domény.** libvirt ho drží jako symlink v
+`/etc/libvirt/qemu/autostart`, takže obnova, která přehraje jen XML, ti vyrobí hosta, jemuž
+po rebootu všichni hosté zůstanou dole. Proto ho skript zapisuje po doménách do
+`MANIFEST.txt` — sloupec `autostart` je to, co v kroku 3 přehráváš, u sítí a poolů stejně.
+
+**Nová definice už existujícího hosta** přepíše jeho perzistentní konfiguraci a u běžící
+domény se změna projeví až při jejím dalším startu, ne hned. libvirt páruje podle UUID v XML:
+kombinace jméno/UUID, která koliduje s jinou doménou na hostiteli, se rovnou odmítne, nic se
+neslučuje.
+
+**MAC adresy jsou v XML**, takže DHCP rezervace a všechno na ně navázané obnovu přežije — což
+je zároveň důvod, proč tyhle domény nedefinuj na stroji, kde originály pořád běží: v síti se
+potlučou.
+
+Ověřit XML dřív, než cokoli definuješ, jde i bez hypervizoru:
+
+```sh
+virt-xml-validate /tmp/kvm/domains/web01.xml
+```
+
+**Co v tomhle dumpu není:**
+
+| | |
+|---|---|
+| obrazy disků / obsah volumů | **ne** — samostatná files-backup nebo snapshot na úrovni storage |
+| bridge na hostiteli (`br0`), netplan, `/etc/network` | **ne** — konfigurace hostitele, mimo libvirt |
+| `libvirtd.conf`, `qemu.conf`, `/etc/libvirt` jako takové | **ne** — zálohuj files-backupem `/etc` |
+| **hodnoty** libvirt secretů (Ceph/RBD klíče) | **ne** — jen definice, a jen s `include_secrets` |
+| NVRAM / UEFI proměnné | jen s `include_nvram` |
+| metadata snapshotů (`virsh snapshot-dumpxml`) | **ne** |
+
+První řádek je ten, na kterém se lidi napálí: `virsh define` projde i nad XML, jehož disky
+nikde neexistují, a řekne to až `virsh start`. V XML je napsané, kde byly — obnov obrazy na
+ty cesty, nebo XML před definicí uprav.
+
+S `include_secrets` se definice vrátí přes `virsh secret-define`, ale hodnoty hypervizor
+nikdy neopustily, takže host na RBD zůstane nespustitelný, dokud je nedodáš:
+
+```sh
+virsh secret-define /tmp/kvm/secrets/<uuid>.xml
+virsh secret-set-value --secret <uuid> --base64 "$(cat /nekde/mimo/arcatum/klic)"
+```
+
+S `include_nvram` soubory nakopíruj zpátky na cesty, které má doména v `<nvram>`, **před**
+prvním startem — jinak si libvirt vyrobí nový ze šablony a UEFI boot záznamy hosta jsou pryč.
+
+---
+
+## 6. Co v databázovém dumpu není
 
 Dump jedné databáze zachytí databázi, ne server. Tohle v něm nehledej:
 
@@ -191,7 +281,7 @@ Co z toho plyne prakticky:
 
 ---
 
-## 6. Katalog chyb
+## 7. Katalog chyb
 
 | Zpráva | Kde | Co s tím |
 |---|---|---|
@@ -208,10 +298,18 @@ Co z toho plyne prakticky:
 | `server version mismatch` | PG obnova | dump z novějšího Postgresu do staršího nejde |
 | obnova skončí kódem 0, ale data chybí | PG obnova | zapomenuté `ON_ERROR_STOP=1` — `psql` chyby jen vypsal a šel dál |
 | dump je podezřele malý | — | skript možná selhal bez `pipefail`; porovnej `data_bytes` s předchozími běhy |
+| `cannot connect to libvirt at qemu:///system` | běh `kvm-xml-backup` | libvirtd neběží, nebo runner není root ani ve skupině `libvirt` |
+| `aborting: N object(s) could not be dumped` | běh `kvm-xml-backup` | stderr kousek výš jmenuje které; běh schválně nevyrobí žádný payload místo neúplného |
+| `Cannot access storage file … No such file or directory` | `virsh start` po obnově | XML je obnovené, obraz disku ne — v tomhle dumpu nikdy nebyl ([§5](#5-kvm-hosté-dump-kvm-xml-backup)) |
+| `Network not found: no network with matching name` | `virsh start` po obnově | sítě definuj a nastartuj před doménami |
+| `Unable to get bridge br0` / `Cannot get interface MTU on 'br0'` | `virsh start` po obnově | bridge je konfigurace hostitele, mimo libvirt i mimo tenhle dump |
+| `domain '…' is already defined with uuid …` | `virsh define` | jméno/UUID koliduje s doménou, která na hostiteli už je — nejdřív ji undefinuj nebo přejmenuj |
+| `failed to find the secret` | `virsh start` po obnově | definice secretů se obnoví bez hodnot; `virsh secret-set-value` |
+| po rebootu jsou všichni hosté dole | po obnově | autostart není v XML — přehraj sloupec `autostart` z `MANIFEST.txt` |
 
 ---
 
-## 7. Zkušební obnova
+## 8. Zkušební obnova
 
 Záloha, ze které se nikdy nic neobnovilo, je nepotvrzená domněnka. Postup, který se vejde
 do půl hodiny a dá skutečnou odpověď:
@@ -255,6 +353,15 @@ Checklist pro novou databázovou instanci:
 - [ ] u MySQL: víš, kde vezmeš uživatele a granty — v dumpu nejsou a Arcatum je nezálohuje
 - [ ] `keep_last` / `keep_days` na instanci pokrývají dobu, za kterou se pozná tiché
       poškození dat, ne jen včerejšek
+
+A pro instanci `kvm-xml-backup`:
+
+- [ ] aspoň jedno XML domény z dumpu prošlo `virsh define` na testovacím hypervizoru, exit 0
+- [ ] víš, kde jsou zálohované **obrazy disků** — v tomhle dumpu nejsou
+- [ ] síťová konfigurace hostitele (bridge, netplan) a `/etc/libvirt` jsou pokryté
+      files-backupem; doména na `br0` potřebuje hostitele, který `br0` má
+- [ ] u Ceph/RBD: **hodnoty** secretů existují někde mimo Arcatum — dump nese jen definice
+- [ ] runner na tom stroji dosáhne na `qemu:///system` (root, nebo skupina `libvirt`)
 
 ---
 
